@@ -36,6 +36,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -52,7 +53,12 @@ const DAEMON_INPUTS = ['core', 'worker', 'daemon'];
 
 const UI_PORT = Number(process.env.DSH_DEV_UI_PORT ?? 5173);
 const UI_ORIGIN = `http://localhost:${UI_PORT}`;
-const DEBOUNCE_MS = 120;
+/**
+ * Long on purpose. tsc emits in layers (core, then worker, then daemon), so one
+ * save produces several bursts of writes; this is what folds them into the one
+ * restart the change actually deserves.
+ */
+const DEBOUNCE_MS = 400;
 
 const argv = new Set(process.argv.slice(2));
 const wantUi = !argv.has('--no-ui');
@@ -298,6 +304,8 @@ let daemonPort = 0;
 let pendingRestart = false;
 let restarting = false;
 let restartTimer = null;
+/** The last digest of built JavaScript the running daemon was started from. */
+let lastDigest = '';
 
 async function restartDaemon(reason) {
   if (restarting) {
@@ -309,6 +317,7 @@ async function restartDaemon(reason) {
     say('dev', `restarting the daemon (${reason})`);
     await stopDaemon();
     const record = await startDaemon();
+    lastDigest = distDigest();
     if (record.port !== daemonPort) {
       daemonPort = record.port;
       if (viteChild !== null) {
@@ -335,6 +344,13 @@ function scheduleRestart(reason) {
   if (restartTimer !== null) clearTimeout(restartTimer);
   restartTimer = setTimeout(() => {
     restartTimer = null;
+    // The write is only interesting if it changed the bytes behind it.
+    const digest = distDigest();
+    if (digest === lastDigest) {
+      lastDigest = digest;
+      return;
+    }
+    lastDigest = digest;
     void restartDaemon(reason);
   }, DEBOUNCE_MS);
 }
@@ -344,15 +360,46 @@ function watchDaemonInputs() {
     const dir = path.join(ROOT, 'packages', pkg, 'dist');
     try {
       fs.watch(dir, { recursive: true }, (_event, file) => {
+        // Only emitted JavaScript is worth a restart. Declarations, source maps
+        // and the build info change on every emit and none of them is loaded.
+        if (file === null || !file.endsWith('.js') || file.endsWith('.js.map')) return;
         // The built UI lands in `daemon/dist/public`; Vite's HMR handles that.
-        if (file === null || file.includes('public')) return;
-        if (file.endsWith('.tsbuildinfo')) return;
+        if (file.includes('public')) return;
         scheduleRestart(`${pkg}/${file}`);
       });
     } catch (error) {
       say('dev', `cannot watch ${dir}: ${error.message}`);
     }
   }
+}
+
+/**
+ * A digest of every `.js` the daemon loads.
+ *
+ * Watching for writes is not enough on its own. `tsc --watch` re-emits all its
+ * output on its first pass whether or not anything changed, and a rewrite that
+ * produces the same bytes is not a change: restarting on it would restart the
+ * daemon seconds after it started, and move its port, for nothing. Comparing
+ * the bytes is what tells the two apart.
+ */
+function distDigest() {
+  const entries = [];
+  for (const pkg of DAEMON_INPUTS) {
+    const dir = path.join(ROOT, 'packages', pkg, 'dist');
+    let files;
+    try {
+      files = fs.readdirSync(dir, { recursive: true, withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of files) {
+      if (!entry.isFile() || !entry.name.endsWith('.js') || entry.name.endsWith('.js.map')) continue;
+      const full = path.join(entry.parentPath, entry.name);
+      if (full.includes(`${path.sep}public${path.sep}`)) continue;
+      entries.push(`${full}:${createHash('sha1').update(fs.readFileSync(full)).digest('hex')}`);
+    }
+  }
+  return createHash('sha1').update(entries.sort().join('\n')).digest('hex');
 }
 
 // --- shutdown -------------------------------------------------------------
@@ -384,8 +431,11 @@ async function main() {
   say('dev', 'building once, so the daemon has something to run');
   buildOnce();
 
-  daemonPort = (await startDaemon()).port;
   startWatchers();
+  daemonPort = (await startDaemon()).port;
+  // Taken now, so the watchers' first pass, which rewrites the same bytes, is
+  // not mistaken for a change.
+  lastDigest = distDigest();
   watchDaemonInputs();
   if (wantUi) startVite(daemonPort);
 
