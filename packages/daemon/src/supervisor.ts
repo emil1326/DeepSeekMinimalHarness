@@ -6,8 +6,11 @@ import {
   killTree,
   loadRunConfig,
   readApiKey,
+  readTranscript,
+  type ChatMessage,
   type PriceTable,
   type RunEvent,
+  type RunLimits,
   type RunStatus,
   type RunTotals,
   type Speaker,
@@ -47,6 +50,14 @@ export interface SupervisorOptions {
   swapMs?: number;
 }
 
+/** What a caller may change about starting a run beyond what the task file says. */
+export interface ContinueOptions {
+  /** A run to carry the conversation on from. */
+  continueFrom?: string;
+  /** Limits to override, on top of the ones the task file asked for. */
+  limits?: Partial<RunLimits>;
+}
+
 export class Supervisor {
   /** Set by whoever is serving the API; called for every event and every change. */
   onEvent: ((event: RunEvent) => void) | undefined;
@@ -55,6 +66,8 @@ export class Supervisor {
   private readonly store: Store;
   private readonly options: SupervisorOptions;
   private readonly states = new Map<string, RunState>();
+  /** Conversations waiting to be handed to a worker that has not been forked yet. */
+  private readonly resumes = new Map<string, ChatMessage[] | undefined>();
 
   constructor(options: SupervisorOptions) {
     this.store = options.store;
@@ -62,15 +75,50 @@ export class Supervisor {
   }
 
   /** The task is read and validated here, and stored with the run exactly as used. */
-  createRun(taskPath: string, detached: boolean): RunDetail {
+  createRun(taskPath: string, detached: boolean, options: ContinueOptions = {}): RunDetail {
     // Fail before the fork when there is no key, with something readable.
     readApiKey();
     const config = loadRunConfig(taskPath);
     const id = newRunId();
     const createdAt = new Date().toISOString();
+
+    if (options.limits !== undefined) {
+      config.limits = { ...config.limits, ...options.limits };
+    }
+    config.continues = options.continueFrom ?? null;
+
+    // A continuation is a *new* run, not a resurrection of the old one. The
+    // record of what happened is worth keeping exactly as it happened, and a
+    // run whose status changed from "stopped at a limit" to "finished" would
+    // quietly destroy the evidence that it stopped.
+    let resume: ChatMessage[] | undefined;
+    if (options.continueFrom !== undefined) {
+      const parent = this.store.getRun(options.continueFrom);
+      if (parent === null) throw new Error(`no run called ${options.continueFrom} to continue`);
+      const loaded = readTranscript(options.continueFrom);
+      if (loaded.failure !== null) {
+        throw new Error(
+          `cannot continue ${options.continueFrom}: ${loaded.failure}. Start it again from the task file instead.`,
+        );
+      }
+      resume = loaded.messages;
+    }
+
     this.store.createRun({ id, name: config.name, config, detached, createdAt });
     this.states.set(id, freshState());
+    this.resumes.set(id, resume);
     this.append(id, { type: 'status', status: 'queued' }, createdAt);
+    if (resume !== undefined) {
+      this.append(
+        id,
+        {
+          type: 'message',
+          by: 'system',
+          text: `continuing ${String(options.continueFrom)} with its conversation intact, so the prompt cache still hits`,
+        },
+        createdAt,
+      );
+    }
     if (detached) {
       this.start(id);
     } else {
@@ -140,6 +188,11 @@ export class Supervisor {
       ...(this.options.prices?.[detail.config.model]
         ? { price: this.options.prices[detail.config.model] }
         : {}),
+      // The conversation this run carries on from, if it is a continuation.
+      // Held in memory rather than in the row: it is hundreds of kilobytes of
+      // messages, the row is read on a list view, and nothing but the fork
+      // needs it.
+      ...(this.resumes.get(runId) ? { resume: this.resumes.get(runId) as ChatMessage[] } : {}),
     };
     child.send(message);
   }
@@ -282,6 +335,33 @@ export class Supervisor {
       state.child.send({ type: 'answer', id: questionId, text, by } satisfies DaemonToWorker);
     }
     return questionId;
+  }
+
+  /**
+   * Grant a run more room, live.
+   *
+   * Written to the row as well as sent, so `dsh show`, the report and a
+   * continuation all agree with what the run is actually working to, instead of
+   * quoting the limits the task started with.
+   */
+  raiseLimits(runId: string, patch: Partial<RunLimits>): RunLimits {
+    const state = this.states.get(runId);
+    if (state === undefined) throw new Error(`run ${runId} is not going; continue it instead`);
+    const limits = this.store.setLimits(runId, patch);
+    state.child?.send({ type: 'limits', limits: patch } satisfies DaemonToWorker);
+    this.append(
+      runId,
+      {
+        type: 'message',
+        by: 'system',
+        text: `more room granted: ${Object.entries(patch)
+          .map(([name, value]) => `${name} is now ${String(value)}`)
+          .join(', ')}`,
+      },
+      new Date().toISOString(),
+    );
+    this.onRunChange?.(runId);
+    return limits;
   }
 
   pendingQuestion(runId: string): string | null {

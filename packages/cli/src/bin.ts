@@ -13,8 +13,11 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
 import {
+  formatCount,
   isTerminal,
+  limitUse,
   loadHarnessConfig,
+  toolCatalogue,
   uiHostnames,
   type RunEvent,
   type RunStatus,
@@ -27,7 +30,7 @@ import type {
   StatsResponse,
 } from '@emilswork/harness-daemon';
 import { ApiFailure, DaemonClient, DaemonUnreachable, exitCodeFor, readDaemonRecord } from './client.js';
-import { Renderer, pad, statusWord, useColor } from './render.js';
+import { Renderer, colour as withColour, indent, pad, statusWord, useColor } from './render.js';
 
 const program = new Command();
 program
@@ -161,15 +164,316 @@ program
         process.stdout.write('no runs yet\n');
         return;
       }
+      // STATUS is wide enough for "stopped at limit" (16) and NAME for the
+      // longest task name seen in practice. Before the padding was right,
+      // `list` printed `stopped at limitdeepseek-flash`: the status ran into the
+      // model column with nothing between them.
       process.stdout.write(
-        `${pad('ID', 14)}${pad('NAME', 22)}${pad('STATUS', 16)}${pad('MODEL', 18)}${pad('TURNS', 7)}${pad('OUT TOK', 9)}${pad('TOK/S', 8)}${pad('COST', 9)}${pad('DURATION', 10)}\n`,
+        `${pad('ID', 14)}${pad('NAME', 24)}${pad('STATUS', 17)}${pad('MODEL', 17)}${pad('TURNS', 8)}${pad('OUT TOK', 9)}${pad('TOK/S', 8)}${pad('COST', 9)}${pad('LIMIT', 12)}${pad('DURATION', 10)}\n`,
       );
       for (const run of runs) {
         process.stdout.write(
-          `${pad(run.id, 14)}${pad(run.name, 22)}${pad(statusWord(run.status), 16)}${pad(run.model, 18)}${pad(String(run.turns), 7)}${pad(String(run.totals.completionTokens), 9)}${pad(speed(run), 8)}${pad(cost(run), 9)}${pad(duration(run), 10)}\n`,
+          `${pad(run.id, 14)}${pad(run.name, 24)}${pad(statusWord(run.status), 17)}${pad(run.model, 17)}${pad(String(run.turns), 8)}${pad(String(run.totals.completionTokens), 9)}${pad(speed(run), 8)}${pad(cost(run), 9)}${pad(nearestLimit(run), 12)}${pad(duration(run), 10)}\n`,
         );
       }
     }),
+  );
+
+program
+  .command('limits')
+  .argument('<run>')
+  .description('what a run has used of each of its budgets')
+  .action((run: string) =>
+    guard(async () => {
+      const client = await DaemonClient.connect();
+      const detail = await client.run(run);
+      const uses = limitUse(
+        {
+          turns: detail.turns,
+          elapsedSeconds: detail.startedAt === null ? 0 : (Date.now() - Date.parse(detail.startedAt)) / 1000,
+          totals: detail.totals,
+        },
+        detail.config.limits,
+      );
+      process.stdout.write(`${pad('LIMIT', 16)}${pad('USED', 12)}${pad('OF', 12)}${pad('LEFT', 12)}\n`);
+      for (const use of uses) {
+        const left = Math.max(0, use.budget - use.used);
+        process.stdout.write(
+          `${pad(use.which, 16)}${pad(formatCount(use.used), 12)}${pad(formatCount(use.budget), 12)}${pad(formatCount(left), 12)}\n`,
+        );
+      }
+      process.stdout.write(
+        `\nContext window  ${formatCount(detail.config.limits.contextTokens)} tokens per request.\n` +
+          `totalTokens counts BILLED tokens: prompt cache misses plus output. Cache hits are\n` +
+          `about a tenth of a miss, so counting them at full price bounded nothing worth\n` +
+          `bounding and killed runs that had spent almost nothing.\n` +
+          `\nRaise one with: dsh limit ${run} --turns 60   (figures are absolute, +30 adds 30)\n`,
+      );
+    }),
+  );
+
+program
+  .command('limit')
+  .argument('<run>')
+  .description('grant a running agent more room')
+  .option('--turns <n>', 'turns to allow')
+  .option('--wallSeconds <n>', 'wall clock seconds to allow')
+  .option('--outputTokens <n>', 'output tokens to allow')
+  .option('--totalTokens <n>', 'billed tokens to allow')
+  .action(
+    (
+      run: string,
+      options: {
+        turns?: string;
+        wallSeconds?: string;
+        outputTokens?: string;
+        totalTokens?: string;
+      },
+    ) =>
+      guard(async () => {
+        const client = await DaemonClient.connect();
+        const detail = await client.run(run);
+        const patch: Record<string, number> = {};
+        const names = ['turns', 'wallSeconds', 'outputTokens', 'totalTokens'] as const;
+        for (const name of names) {
+          const given = options[name];
+          if (given === undefined) continue;
+          const value = absoluteLimit(given, detail.config.limits[name], name);
+          patch[name] = value;
+        }
+        if (Object.keys(patch).length === 0) {
+          process.stderr.write(
+            'dsh: give at least one of --turns, --wallSeconds, --outputTokens, --totalTokens\n',
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const answer = await client.json<{ ok: boolean; limits: Record<string, number> }>(
+          'POST',
+          `/runs/${run}/limits`,
+          patch,
+        );
+        process.stdout.write(
+          `${run} now has ${Object.entries(answer.limits)
+            .map(([name, value]) => `${name} ${value}`)
+            .join(', ')}\n`,
+        );
+      }),
+  );
+
+/**
+ * `60` means sixty, `+30` means thirty more than it has now.
+ *
+ * Relative is what a person reaches for when an agent asks for more room, and
+ * absolute is what goes on the wire, so the conversion happens here once. If
+ * the same message were ever delivered twice, a delta would compound and an
+ * absolute figure cannot.
+ */
+function absoluteLimit(given: string, current: number, name: string): number {
+  const relative = /^\+\s*\d+$/.test(given.trim());
+  const value = Number(relative ? given.trim().slice(1) : given);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`--${name} needs a positive whole number, not ${given}`);
+  }
+  return relative ? current + value : value;
+}
+
+program
+  .command('report')
+  .argument('<run>')
+  .description('everything that happened in a run, for somebody who did not watch it')
+  .option('--json', 'the same thing, as JSON')
+  .action((run: string, options: { json?: boolean }) =>
+    guard(async () => {
+      const client = await DaemonClient.connect();
+      const { report } = await client.report(run);
+      if (options.json === true) {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+        return;
+      }
+      const colour = useColor();
+      const paint = (code: 'red' | 'yellow' | 'green' | 'dim' | 'bold', text: string): string =>
+        withColour(colour, code, text);
+      const line = (label: string, value: string): void => {
+        process.stdout.write(`${pad(label, 14)}${value}\n`);
+      };
+
+      const tone =
+        report.status === 'finished' && report.claimSupported !== false
+          ? 'green'
+          : report.status === 'finished'
+            ? 'yellow'
+            : 'red';
+      process.stdout.write(`\n${paint(tone, report.headline)}\n\n`);
+
+      line('run', `${report.name} (${report.id})`);
+      line('status', statusWord(report.status));
+      line('model', report.model);
+      line('turns', String(report.turns));
+      line(
+        'tokens',
+        `${formatCount(report.totals.promptTokens)} sent, ${formatCount(report.totals.cacheHitTokens)} cached, ` +
+          `${formatCount(report.totals.completionTokens)} written (${formatCount(report.totals.reasoningTokens)} thinking)`,
+      );
+      line(
+        'billed',
+        `${formatCount(report.totals.billedTokens)} of ${formatCount(report.limits.totalTokens)}`,
+      );
+      line(
+        'cost',
+        report.totals.costUsd === null ? 'no price table' : `$${report.totals.costUsd.toFixed(4)}`,
+      );
+
+      process.stdout.write(`\n${paint('bold', 'limits')}\n`);
+      for (const use of report.used) {
+        const near = use.ratio >= 0.8 ? paint('yellow', ' (near)') : '';
+        line(`  ${use.which}`, `${formatCount(use.used)} of ${formatCount(use.budget)}${near}`);
+      }
+
+      process.stdout.write(`\n${paint('bold', 'checks')}\n`);
+      if (report.checks.length === 0) {
+        process.stdout.write('  none were run, so nothing verified this change\n');
+      }
+      for (const check of report.checks) {
+        const word = check.passed ? paint('green', 'pass') : paint('red', 'FAIL');
+        line(`  ${check.name}`, `${word}  ${check.output.split('\n').slice(0, 2).join(' | ').slice(0, 160)}`);
+      }
+
+      process.stdout.write(`\n${paint('bold', 'files')}\n`);
+      line('  allowed', String(report.allowed.length));
+      if (report.changed.length === 0) {
+        line('  changed', 'nothing');
+      } else {
+        line('  changed', report.changed.join(', '));
+      }
+      if (report.strayFailure !== null) {
+        line('  stray', paint('red', `COULD NOT CHECK: ${report.strayFailure}`));
+      } else if (report.stray.length > 0) {
+        line('  stray', paint('red', `OUTSIDE THE ALLOWLIST: ${report.stray.join(', ')}`));
+      } else {
+        line('  stray', 'none');
+      }
+
+      if (report.questions.length > 0) {
+        process.stdout.write(`\n${paint('bold', 'questions')}\n`);
+        for (const question of report.questions) {
+          line('  asked', question.question.split('\n')[0]?.slice(0, 140) ?? '');
+          line('  answer', question.answer === null ? paint('yellow', 'never answered') : question.answer);
+        }
+      }
+      if (report.warnings > 0) {
+        process.stdout.write(
+          `\n${paint('bold', 'limits')} the harness warned the agent ${report.warnings} time${report.warnings === 1 ? '' : 's'} before it stopped.\n`,
+        );
+      }
+
+      if (report.claim !== null) {
+        process.stdout.write(`\n${paint('bold', "the agent's own claim")}\n`);
+        if (report.claimSupported === false) {
+          process.stdout.write(
+            `${paint('yellow', '  NOT BACKED BY A CHECK: a check it ran last did not pass.')}\n`,
+          );
+        }
+        process.stdout.write(`${indent(report.claim, '  ')}\n`);
+      }
+
+      if (report.status === 'stopped_at_limit') {
+        process.stdout.write(
+          `\n${paint('yellow', 'This run did not finish.')} Its changes are in the worktree, partially applied.\n` +
+            `Continue it with more room:  dsh continue ${report.id} --turns +20\n`,
+        );
+      }
+      process.stdout.write('\n');
+    }),
+  );
+
+program
+  .command('tools')
+  .description('every tool an agent can call, and what it is for')
+  .option('--json', 'the same thing, as JSON')
+  .action((options: { json?: boolean }) =>
+    guard(async () => {
+      const listing = toolCatalogue();
+      if (options.json === true) {
+        process.stdout.write(`${JSON.stringify(listing, null, 2)}\n`);
+        return;
+      }
+      for (const tool of listing) {
+        process.stdout.write(`${withColour(useColor(), 'bold', tool.name)}\n`);
+        process.stdout.write(`${indent(tool.description, '  ')}\n`);
+        if (tool.args !== '') process.stdout.write(`${indent(tool.args, '  ')}\n`);
+        process.stdout.write('\n');
+      }
+      process.stdout.write(
+        'A check is named, never a command: the profile decides what each name runs, and the\n' +
+          'agent cannot pass it an argument or reach a shell. `dsh tools --json` is the same list.\n',
+      );
+    }),
+  );
+
+program
+  .command('continue')
+  .argument('<run>')
+  .description('carry on a stopped run, with its conversation and its cache intact')
+  .option('--turns <n>', 'turns to allow, absolute, or +n for more than it had')
+  .option('--wallSeconds <n>', 'wall clock seconds to allow')
+  .option('--outputTokens <n>', 'output tokens to allow')
+  .option('--totalTokens <n>', 'billed tokens to allow')
+  .option('--json', 'print one JSON event per line')
+  .option('--detach', 'start it and return without watching')
+  .action(
+    (
+      run: string,
+      options: {
+        turns?: string;
+        wallSeconds?: string;
+        outputTokens?: string;
+        totalTokens?: string;
+        json?: boolean;
+        detach?: boolean;
+      },
+    ) =>
+      guard(async () => {
+        const client = await DaemonClient.connect();
+        const parent = await client.run(run);
+        // Checked before anything is started. A continuation is driven from the
+        // same task file, so without one there is nothing to re-resolve the
+        // worktree and profile from. (A run whose original commit is gone still
+        // works: the file is read fresh, and its own hash is checked.)
+        if (parent.config.sourcePath === null) {
+          process.stderr.write(
+            `dsh: ${run} does not record the task file it was started from, so it cannot be continued\n`,
+          );
+          process.exitCode = 1;
+          return;
+        }
+        const limits: Record<string, number> = {};
+        const names = ['turns', 'wallSeconds', 'outputTokens', 'totalTokens'] as const;
+        for (const name of names) {
+          const given = options[name];
+          if (given === undefined) continue;
+          limits[name] = absoluteLimit(given, parent.limits[name], name);
+        }
+        // A continuation with no new room would stop at the same wall again, so
+        // a bare `dsh continue` doubles the two budgets that actually run out.
+        if (Object.keys(limits).length === 0) {
+          limits.turns = parent.limits.turns * 2;
+          limits.totalTokens = parent.limits.totalTokens * 2;
+        }
+        const created = await client.json<{ id: string }>('POST', '/runs', {
+          taskPath: parent.config.sourcePath,
+          continueFrom: run,
+          limits,
+          detached: options.detach === true,
+        });
+        process.stdout.write(
+          `${created.id} continues ${run} with ${Object.entries(limits)
+            .map(([name, value]) => `${name} ${value}`)
+            .join(', ')}\n`,
+        );
+        if (options.detach === true) return;
+        process.exitCode = await stream(client, created.id, options.json === true);
+      }),
   );
 
 program
@@ -410,6 +714,27 @@ function stream(client: DaemonClient, runId: string, json: boolean): Promise<num
 function speed(run: RunSummary): string {
   const value = run.totals.generationTokensPerSecond;
   return value === null ? '-' : value.toFixed(0);
+}
+
+/**
+ * The limit this run is closest to, as `used of budget`.
+ *
+ * A bare token count says nothing. "6.0M" is only meaningful next to the 8M it
+ * is heading for, and the question a person actually has — how much room is
+ * left — cannot be answered from the total alone.
+ */
+function nearestLimit(run: RunSummary): string {
+  const uses = limitUse(
+    {
+      turns: run.turns,
+      elapsedSeconds: run.startedAt === null ? 0 : (Date.now() - Date.parse(run.startedAt)) / 1000,
+      totals: run.totals,
+    },
+    run.limits,
+  );
+  const worst = [...uses].sort((a, b) => b.ratio - a.ratio)[0];
+  if (worst === undefined) return '-';
+  return `${formatCount(worst.used)}/${formatCount(worst.budget)}`;
 }
 
 function cost(run: RunSummary): string {

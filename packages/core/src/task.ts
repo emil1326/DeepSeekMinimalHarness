@@ -84,6 +84,14 @@ export interface ResolvedRunConfig {
   sourcePath: string | null;
   raw: unknown;
   resolvedProfile: Profile;
+  /**
+   * The run this one carries on from, when it is a continuation.
+   *
+   * Part of the config rather than a column of its own: `runs` has no migration
+   * mechanism and this is genuinely something the run was told, so it belongs
+   * with the task file's own fields rather than in a schema change.
+   */
+  continues?: string | null;
 }
 
 export interface TaskProblem {

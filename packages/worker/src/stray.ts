@@ -1,5 +1,18 @@
-import { execFileSync } from 'node:child_process';
-import { relNorm, toPosix, type ResolvedRunConfig } from '@emilswork/harness-core';
+import { git, gitFailure, relNorm, toPosix, type ResolvedRunConfig } from '@emilswork/harness-core';
+
+export interface StrayReport {
+  /** Changed files that are not on the allow list. */
+  files: string[];
+  /**
+   * Why the worktree could not be read, when it could not be.
+   *
+   * This used to be indistinguishable from "nothing stray", which is how the
+   * loudest control reported a clean tree on a very dirty one: `execFileSync`
+   * threw `ENOBUFS` past its 1 MiB buffer, the `catch` returned `[]`, and the
+   * caller read that as a pass. A report that cannot tell has to say so.
+   */
+  failure: string | null;
+}
 
 /**
  * What the worktree changed that the task did not allow.
@@ -11,13 +24,15 @@ import { relNorm, toPosix, type ResolvedRunConfig } from '@emilswork/harness-cor
  * one `dir/` entry, which never matches the allow list and reports a stray
  * change for a file that was allowed.
  */
-export function strayChanges(root: string, allow: Iterable<string>): string[] {
+export function strayChanges(root: string, allow: Iterable<string>): StrayReport {
   const allowed = new Set([...allow].map((entry) => relNorm(entry)));
   let output: string;
   try {
-    output = execFileSync('git', ['status', '--porcelain', '-uall'], { cwd: root, encoding: 'utf8' });
-  } catch {
-    return [];
+    // Through the shared helper, so this cannot drift from the daemon's own git
+    // calls in buffer size or in whether it hides its console window.
+    output = git(['status', '--porcelain', '-uall'], { cwd: root });
+  } catch (error) {
+    return { files: [], failure: gitFailure(error) };
   }
   const changed = output
     .split('\n')
@@ -28,15 +43,12 @@ export function strayChanges(root: string, allow: Iterable<string>): string[] {
       const renamed = entry.split(' -> ');
       return toPosix((renamed[renamed.length - 1] ?? entry).replace(/^"|"$/g, ''));
     });
-  return changed.filter((file) => !allowed.has(relNorm(file)));
+  return { files: changed.filter((file) => !allowed.has(relNorm(file))), failure: null };
 }
 
 export function isGitWorktree(root: string): boolean {
   try {
-    return (
-      execFileSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: root, encoding: 'utf8' }).trim() ===
-      'true'
-    );
+    return git(['rev-parse', '--is-inside-work-tree'], { cwd: root }).trim() === 'true';
   } catch {
     return false;
   }

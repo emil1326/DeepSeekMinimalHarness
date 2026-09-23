@@ -44,6 +44,13 @@ export interface RunTotals {
   promptTokens: number;
   cacheHitTokens: number;
   completionTokens: number;
+  /**
+   * Prompt cache misses plus output: what the run is actually charged for.
+   *
+   * This is what `limits.totalTokens` counts, so it is what the UI divides by to
+   * show how much room is left.
+   */
+  billedTokens: number;
   reasoningTokens: number;
   timeToFirstTokenMs: number | null;
   generationTokensPerSecond: number | null;
@@ -82,6 +89,16 @@ export type RunEventBody =
       type: 'limit';
       which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'askSeconds';
       detail: string;
+      /** What it got to, of what. Never a bare number. */
+      used: number;
+      budget: number;
+    }
+  | {
+      type: 'warning';
+      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens';
+      used: number;
+      budget: number;
+      detail: string;
     }
   | { type: 'stray'; files: string[] }
   | { type: 'error'; message: string };
@@ -94,6 +111,9 @@ export interface RunLimits {
   turns: number;
   wallSeconds: number;
   outputTokens: number;
+  /** Billed tokens: prompt cache misses plus output. See core's limits.ts. */
+  totalTokens: number;
+  contextTokens: number;
   askSeconds: number;
 }
 
@@ -120,6 +140,8 @@ export interface RunSummary {
   worktree: string;
   turns: number;
   totals: RunTotals;
+  /** The limits in force, which a grant of more room can have changed. */
+  limits: RunLimits;
   createdAt: string;
   startedAt: string | null;
   endedAt: string | null;

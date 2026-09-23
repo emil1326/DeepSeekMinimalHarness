@@ -1,8 +1,10 @@
 import type {
+  ChatMessage,
   Price,
   ResolvedRunConfig,
   RunEvent,
   RunEventBody,
+  RunLimits,
   RunStatus,
   Speaker,
 } from '@emilswork/harness-core';
@@ -17,13 +19,30 @@ export interface WorkerStart {
   /** Where to reach DeepSeek. Overridable so tests can point at a fake. */
   baseUrl: string;
   price?: Price;
+  /**
+   * The conversation to carry on from, for a continuation.
+   *
+   * Whatever this run's own `runId` is, the transcript it was given came from
+   * the run it continues, so the daemon reads that one out and hands it over.
+   */
+  resume?: ChatMessage[];
 }
 
 export type DaemonToWorker =
   | WorkerStart
   | { type: 'message'; text: string; by: Speaker }
   | { type: 'answer'; id: string; text: string; by: Speaker }
-  | { type: 'cancel'; reason: string };
+  | { type: 'cancel'; reason: string }
+  /**
+   * More room, granted while the run is going.
+   *
+   * The alternative was to let a limit be a hard wall: an agent that had spent
+   * forty turns on a repo and could see the last one coming had to stop and lose
+   * the thread. Now it can ask, and the person who launched it can say yes and
+   * have that mean something before the next model call rather than after the
+   * run has already ended.
+   */
+  | { type: 'limits'; limits: Partial<RunLimits> };
 
 export type WorkerToDaemon =
   | { type: 'ready'; pid: number; runId: string }

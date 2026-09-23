@@ -5,14 +5,22 @@ import {
   SandboxRefusal,
   SYSTEM_PROMPT,
   TOOL_NAMES,
+  approaching,
+  checkPassed,
   compact,
   emptyTotals,
+  exceeded,
+  formatCount,
+  limitUse,
   taskMessage,
   totalsOf,
   toolSpecs,
   type ChatMessage,
+  type CumulativeLimit,
+  type LimitUse,
   type Price,
   type ResolvedRunConfig,
+  type RunLimits,
   type RunEventBody,
   type RunStatus,
   type RunTotals,
@@ -20,12 +28,72 @@ import {
   type ToolCall,
 } from '@emilswork/harness-core';
 
+/**
+ * What the run is told when it is nearly out of room.
+ *
+ * Two things matter here. It says the numbers, because "you are running low" is
+ * not actionable and "you have used 10 of 12 turns" is. And it says what to do
+ * about it, including that asking for more room is allowed, because an agent
+ * that does not know it may ask will either stop early or guess.
+ */
+function warnAbout(use: LimitUse): string {
+  const what: Record<CumulativeLimit, string> = {
+    turns: 'turns',
+    wallSeconds: 'seconds of wall clock',
+    outputTokens: 'output tokens',
+    totalTokens: 'billed tokens',
+  };
+  const left =
+    use.which === 'turns'
+      ? `${Math.max(0, use.budget - use.used)} model call${use.budget - use.used === 1 ? '' : 's'}`
+      : `${formatCount(Math.max(0, use.budget - use.used))} ${what[use.which]}`;
+  return (
+    `[harness] You are near a limit: ${formatCount(use.used)} of ${formatCount(use.budget)} ` +
+    `${what[use.which]} used, about ${left} left.\n` +
+    `Finish what you can within it. If you genuinely need more room, call ask with how much ` +
+    `more you need and what is left to do, and the person who launched you can grant it. ` +
+    `If you cannot finish, call finish saying exactly what is done and what is not.`
+  );
+}
+
+/** Why a run stopped, with both numbers, for the event and the report. */
+function whyStopped(use: LimitUse, totals: RunTotals): string {
+  switch (use.which) {
+    case 'turns':
+      return `the run used all ${use.budget} turns`;
+    case 'wallSeconds':
+      return `the run went past ${use.budget} s of wall clock`;
+    case 'outputTokens':
+      return `the run wrote ${formatCount(totals.completionTokens)} output tokens, past the ${formatCount(use.budget)} it may`;
+    case 'totalTokens':
+      return (
+        `the run used ${formatCount(totals.billedTokens)} billed tokens of the ${formatCount(use.budget)} it may, ` +
+        `out of ${formatCount(totals.promptTokens)} prompt tokens sent (${formatCount(totals.cacheHitTokens)} were cache hits, which cost a tenth as much)`
+      );
+  }
+}
+
 export interface LoopOptions {
   sandbox: Sandbox;
   client: DeepSeekClient;
   config: ResolvedRunConfig;
   emit: (body: RunEventBody) => void;
   price?: Price;
+  /**
+   * A conversation to carry on from, when this run continues an earlier one.
+   *
+   * Sent back exactly as the previous run ended with it, because the prompt
+   * prefix is compared byte for byte for the cache and anything rebuilt would
+   * bill as a brand-new conversation. See `core/transcript.ts`.
+   */
+  resume?: ChatMessage[];
+  /**
+   * Called whenever the conversation changes, so the run can be continued later.
+   *
+   * Handed out rather than written here, so the loop stays free of the
+   * filesystem and a test can watch it without one.
+   */
+  onTranscript?: (messages: ChatMessage[]) => void;
 }
 
 export interface LoopControl {
@@ -40,6 +108,15 @@ export interface LoopControl {
     signal: AbortSignal,
   ) => Promise<{ text: string; by: Speaker } | null>;
   now?: () => number;
+  /**
+   * The limits in force, read fresh on every turn.
+   *
+   * A live object rather than `config.limits`, because the launcher can raise
+   * them while the run is going: an agent that is about to run out can ask for
+   * more room, and the answer has to be able to arrive. Mutated in place by the
+   * daemon's `limits` message.
+   */
+  limits?: RunLimits;
 }
 
 export interface LoopResult {
@@ -83,23 +160,36 @@ class TextBuffer {
 /** The agent loop: one model call per turn, a closed set of tools, limits, finish. */
 export async function runAgentLoop(options: LoopOptions, control: LoopControl): Promise<LoopResult> {
   const { sandbox, client, config, emit } = options;
-  const limits = config.limits;
+  // Read from the live object, so a limit raised mid-run is picked up by the
+  // next turn rather than the next run.
+  const limits = control.limits ?? config.limits;
   const clock = control.now ?? ((): number => Date.now());
   const startedAt = clock();
   let totals: RunTotals = emptyTotals();
   let summary: string | null = null;
+  /** Limits already announced, so each is warned about once and not every turn. */
+  const warned = new Set<CumulativeLimit>();
 
-  const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    {
-      role: 'user',
-      content: taskMessage({
-        task: config.task,
-        allow: [...sandbox.allow].sort(),
-        checks: sandbox.checkNames,
-      }),
-    },
-  ];
+  const messages: ChatMessage[] =
+    options.resume !== undefined && options.resume.length > 0
+      ? // The previous conversation, verbatim, so the prefix still matches and
+        // still bills at the cache rate.
+        [...options.resume]
+      : [
+          { role: 'system', content: SYSTEM_PROMPT },
+          {
+            role: 'user',
+            content: taskMessage({
+              task: config.task,
+              allow: [...sandbox.allow].sort(),
+              checks: sandbox.checkNames,
+            }),
+          },
+        ];
+
+  // Offered straight away, so a run that is interrupted on its first turn is
+  // still continuable.
+  options.onTranscript?.(messages);
 
   const specs = toolSpecs(sandbox.checkNames);
   let turn = 0;
@@ -108,24 +198,29 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
     if (control.signal.aborted) return { status: 'cancelled', summary };
 
     const elapsedSeconds = (clock() - startedAt) / 1000;
-    if (elapsedSeconds > limits.wallSeconds) {
-      const detail = `the run went past ${limits.wallSeconds} s of wall clock`;
-      emit({ type: 'limit', which: 'wallSeconds', detail });
+    const uses = limitUse({ turns: turn - 1, elapsedSeconds, totals }, limits);
+
+    const hit = exceeded(uses);
+    if (hit !== null) {
+      const detail = whyStopped(hit, totals);
+      emit({ type: 'limit', which: hit.which, detail, used: hit.used, budget: hit.budget });
       return { status: 'stopped_at_limit', summary };
     }
-    if (totals.completionTokens >= limits.outputTokens) {
-      const detail = `the run wrote ${totals.completionTokens} output tokens, past the ${limits.outputTokens} it may`;
-      emit({ type: 'limit', which: 'outputTokens', detail });
-      return { status: 'stopped_at_limit', summary };
-    }
-    // Prompt plus completion. `outputTokens` above only counts what the model
-    // wrote, so a run that keeps reading large files back into the context is
-    // bounded by nothing else: every turn re-sends the whole conversation.
-    const spent = totals.promptTokens + totals.completionTokens;
-    if (spent >= limits.totalTokens) {
-      const detail = `the run used ${spent} tokens in all, past the ${limits.totalTokens} it may`;
-      emit({ type: 'limit', which: 'totalTokens', detail });
-      return { status: 'stopped_at_limit', summary };
+
+    // Close to a ceiling, and not told yet. Said before the model call, so the
+    // agent can act inside the turn it still has rather than discover the
+    // budget only when it is already spent.
+    for (const near of approaching(uses, warned)) {
+      warned.add(near.which);
+      const detail = warnAbout(near);
+      emit({
+        type: 'warning',
+        which: near.which,
+        used: near.used,
+        budget: near.budget,
+        detail,
+      });
+      messages.push({ role: 'user', content: detail });
     }
 
     emit({ type: 'turn.start', turn });
@@ -148,7 +243,13 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
       const detail =
         `the conversation is ${fitted.tokensAfter} tokens and the budget is ${limits.contextTokens}, ` +
         `even after dropping every tool result that could be dropped`;
-      emit({ type: 'limit', which: 'contextTokens', detail });
+      emit({
+        type: 'limit',
+        which: 'contextTokens',
+        detail,
+        used: fitted.tokensAfter,
+        budget: limits.contextTokens,
+      });
       return { status: 'stopped_at_limit', summary };
     }
     if (fitted.elided.length > 0) {
@@ -198,6 +299,11 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
     totals = totalsOf(totals, outcome.metrics, options.price);
     emit({ type: 'metrics', turn, call: outcome.metrics, totals });
     messages.push(outcome.message);
+    // After the assistant turn and before any tool results, so what is on disk
+    // is always a valid conversation the API would accept: an assistant with
+    // tool_calls and no replies yet is a request that has not been finished, not
+    // a malformed one.
+    options.onTranscript?.(messages);
 
     const calls = outcome.message.tool_calls ?? [];
     if (calls.length === 0) {
@@ -229,7 +335,13 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
         if (answer === null) {
           if (control.signal.aborted) return { status: 'cancelled', summary };
           const detail = `nothing came back within ${limits.askSeconds} s of waiting for an answer`;
-          emit({ type: 'limit', which: 'askSeconds', detail });
+          emit({
+            type: 'limit',
+            which: 'askSeconds',
+            detail,
+            used: limits.askSeconds,
+            budget: limits.askSeconds,
+          });
           return { status: 'stopped_at_limit', summary };
         }
         emit({ type: 'answer', id: call.id, answer: answer.text, by: answer.by });
@@ -273,9 +385,20 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
       }
       index += batch.length - 1;
     }
+    // Once per turn's tool results, not per result: the conversation is only
+    // valid to send at a tool-call boundary anyway.
+    options.onTranscript?.(messages);
   }
 
-  emit({ type: 'limit', which: 'turns', detail: `the run used all ${limits.turns} turns` });
+  // The loop ran out by counting up to `turns`, which is the same thing as the
+  // check at the top of the next iteration but with the numbers still in hand.
+  emit({
+    type: 'limit',
+    which: 'turns',
+    detail: `the run used all ${limits.turns} turns`,
+    used: limits.turns,
+    budget: limits.turns,
+  });
   return { status: 'stopped_at_limit', summary };
 }
 
@@ -329,8 +452,14 @@ async function runTool(sandbox: Sandbox, name: string, args: Record<string, unkn
         return ok(sandbox.replaceInFile(text('path'), text('old'), text('new')));
       case 'create_file':
         return ok(sandbox.createFile(text('path'), text('content')));
-      case 'run_check':
-        return ok(await sandbox.runCheck(text('name')));
+      case 'run_check': {
+        const output = await sandbox.runCheck(text('name'));
+        // `ok` means "and it passed", not just "the call was not refused". A
+        // check that exits 1 used to come back ok, so the CLI painted a failing
+        // typecheck the same as a passing one, and a report built on `ok` would
+        // have read the check as fine.
+        return { result: output, ok: checkPassed(output) };
+      }
       default:
         return { result: `no tool called ${name}`, ok: false };
     }

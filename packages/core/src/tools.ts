@@ -1,6 +1,6 @@
 import type { ToolSpec } from './deepseek.js';
 
-interface ToolDefinition {
+export interface ToolDefinition {
   name: string;
   description: string;
   properties: Record<string, string>;
@@ -20,9 +20,17 @@ function toSpec(definition: ToolDefinition): ToolSpec {
   };
 }
 
-export function toolSpecs(checkNames: string[]): ToolSpec[] {
+/**
+ * The tools, as they are handed to the model.
+ *
+ * Exported so that `dsh tools` and the docs can print the same list the agent is
+ * given rather than a second copy of it that drifts. The catalogue below is the
+ * only thing that knows how to render them; this is the only thing that knows
+ * what they are.
+ */
+export function toolDefinitions(checkNames: string[]): ToolDefinition[] {
   const checks = [...checkNames, 'format'];
-  const definitions: ToolDefinition[] = [
+  return [
     {
       name: 'read_file',
       description: 'Read a file under the repository, with line numbers.',
@@ -76,7 +84,35 @@ export function toolSpecs(checkNames: string[]): ToolSpec[] {
       required: ['summary'],
     },
   ];
-  return definitions.map(toSpec);
+}
+
+export function toolSpecs(checkNames: string[]): ToolSpec[] {
+  return toolDefinitions(checkNames).map(toSpec);
+}
+
+/** One tool, as a person reads it. */
+export interface CatalogueEntry {
+  name: string;
+  description: string;
+  /** The arguments, as a single line. */
+  args: string;
+}
+
+/**
+ * Every tool an agent can call, for `dsh tools` and the docs.
+ *
+ * Deliberately derived from the same definitions the model is handed, so the
+ * index a person reads and the index the agent works from cannot disagree. A
+ * documentation page listing a tool that no longer exists is worse than none.
+ */
+export function toolCatalogue(checkNames: string[] = []): CatalogueEntry[] {
+  return toolDefinitions(checkNames).map((definition) => ({
+    name: definition.name,
+    description: definition.description,
+    args: Object.entries(definition.properties)
+      .map(([name, type]) => `${name}: ${type}${definition.required.includes(name) ? '' : '?'}`)
+      .join(', '),
+  }));
 }
 
 export const TOOL_NAMES = new Set([

@@ -1,3 +1,4 @@
+import { tokens } from './format';
 import type { CallMetrics, RunEvent, Speaker } from './types';
 
 /**
@@ -166,11 +167,26 @@ export function fold(events: RunEvent[]): Block[] {
         break;
       case 'limit':
         openText = null;
+        // Both numbers, always. "6.0M tokens used" is not something a reader can
+        // act on; the question they have is how much room was left, and that
+        // needs the budget beside the total.
         blocks.push({
           kind: 'note',
           key,
           tone: 'warn',
-          text: `stopped at the ${event.which} limit: ${event.detail}`,
+          text: `stopped at the ${event.which} limit: ${tokens(event.used)} of ${tokens(event.budget)} — ${event.detail}`,
+        });
+        break;
+      case 'warning':
+        // The harness telling the agent it is nearly out of room. Shown, because
+        // it is a message the model received and anything the model acted on is
+        // part of the story of why the run ended the way it did.
+        openText = null;
+        blocks.push({
+          kind: 'note',
+          key,
+          tone: 'warn',
+          text: `the harness warned the agent: ${tokens(event.used)} of ${tokens(event.budget)} ${event.which} used`,
         });
         break;
       case 'stray':
@@ -201,7 +217,12 @@ export function lastNote(events: RunEvent[]): string | null {
     if (event === undefined) continue;
     if (event.type === 'stray') return `changed outside the allowed files: ${event.files.join(', ')}`;
     if (event.type === 'error') return event.message;
-    if (event.type === 'limit') return event.detail;
+    if (event.type === 'limit') {
+      // A limit is the run's ending, and it has to read like one. It used to sit
+      // in the same channel as a note, so a run that stopped at a budget looked
+      // like a run that finished and had something to say afterwards.
+      return `stopped at the ${event.which} limit, ${tokens(event.used)} of ${tokens(event.budget)}: ${event.detail}`;
+    }
     if (event.type === 'summary') return null;
   }
   return null;

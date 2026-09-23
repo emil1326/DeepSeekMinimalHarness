@@ -1,4 +1,25 @@
 export { IS_WINDOWS, isInside, matchesGlob, realPath, relNorm, samePath, toPosix } from './paths.js';
+export { GIT_MAX_BUFFER, git, gitFailure, gitOrNull, type GitOptions } from './git.js';
+export { checkPassed, exitCodes } from './checks.js';
+export {
+  readTranscript,
+  transcriptFile,
+  transcriptsDir,
+  writeTranscript,
+  type LoadedTranscript,
+} from './transcript.js';
+export { buildReport, type CheckOutcome, type ReportInput, type RunReport } from './report.js';
+export {
+  WARN_AT,
+  approaching,
+  describeLimit,
+  exceeded,
+  format as formatCount,
+  limitUse,
+  type CumulativeLimit,
+  type LimitReadings,
+  type LimitUse,
+} from './limits.js';
 export {
   CHECK_TIMEOUT_MS,
   NEVER_READ_DIRS,
@@ -88,7 +109,16 @@ export {
   type CompactResult,
   type Elision,
 } from './context.js';
-export { SYSTEM_PROMPT, TOOL_NAMES, taskMessage, toolSpecs } from './tools.js';
+export {
+  SYSTEM_PROMPT,
+  TOOL_NAMES,
+  taskMessage,
+  toolCatalogue,
+  toolDefinitions,
+  toolSpecs,
+  type CatalogueEntry,
+  type ToolDefinition,
+} from './tools.js';
 export {
   DEFAULT_BASE_URL,
   daemonConfigFile,

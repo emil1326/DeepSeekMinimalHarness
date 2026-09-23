@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import {
+  DEFAULT_LIMITS,
   emptyTotals,
   isTerminal,
   metricsVersionOf,
@@ -9,6 +10,7 @@ import {
   type ResolvedRunConfig,
   type RunEvent,
   type RunEventBody,
+  type RunLimits,
   type RunStatus,
   type RunTotals,
 } from '@emilswork/harness-core';
@@ -181,6 +183,23 @@ export class Store {
   }
 
   /**
+   * Change a run's limits, and give the new ones back.
+   *
+   * Stored so that everything reading the run afterwards — `dsh show`, the
+   * report, a continuation — quotes the limits it is actually working to rather
+   * than the ones in the task file, which are now history.
+   */
+  setLimits(runId: string, patch: Partial<RunLimits>): RunLimits {
+    const row = this.row(runId);
+    if (row === null) throw new Error(`no run called ${runId}`);
+    const config = JSON.parse(row.config_json) as ResolvedRunConfig;
+    const limits = { ...config.limits, ...patch };
+    config.limits = limits;
+    this.db.prepare('UPDATE runs SET config_json = ? WHERE id = ?').run(JSON.stringify(config), runId);
+    return limits;
+  }
+
+  /**
    * Keep a running run's progress in the row, not just in the supervisor.
    *
    * Found live: `list`, `show` and the UI read the row, and the row was only
@@ -251,21 +270,26 @@ function parseTotals(json: string | null): RunTotals {
 }
 
 function toDetail(row: RunRow, owners: number): RunDetail {
+  const config = JSON.parse(row.config_json) as ResolvedRunConfig;
   return {
     id: row.id,
     name: row.name,
     status: row.status as RunStatus,
-    model: (JSON.parse(row.config_json) as ResolvedRunConfig).model,
-    worktree: (JSON.parse(row.config_json) as ResolvedRunConfig).worktree,
+    model: config.model,
+    worktree: config.worktree,
     turns: row.turns,
     totals: parseTotals(row.totals_json),
+    // Merged over the defaults, because a task file written before a limit
+    // existed has no value for it and the row is read by a report that has to
+    // quote a real number.
+    limits: { ...DEFAULT_LIMITS, ...config.limits },
     createdAt: row.created_at,
     startedAt: row.started_at,
     endedAt: row.ended_at,
     detail: row.detail,
     detached: row.detached === 1,
     owners,
-    config: JSON.parse(row.config_json) as ResolvedRunConfig,
+    config,
     summary: row.summary,
   };
 }

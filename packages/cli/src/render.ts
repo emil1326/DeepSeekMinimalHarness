@@ -1,4 +1,5 @@
 import type { RunEvent, RunStatus, RunTotals } from '@emilswork/harness-core';
+import { formatCount } from '@emilswork/harness-core';
 
 const CODES = {
   reset: '\u001b[0m',
@@ -98,7 +99,19 @@ export class Renderer {
         );
         break;
       case 'limit':
-        this.write(`${this.colour('yellow', `stopped at the ${event.which} limit:`)} ${event.detail}\n`);
+        // Both numbers, so the reader can see how far past it went and whether
+        // it was close. `6.0M used` on its own answers nothing.
+        this.write(
+          `${this.colour('yellow', `stopped at the ${event.which} limit:`)} ${formatCount(event.used)} of ${formatCount(event.budget)} — ${event.detail}\n`,
+        );
+        break;
+      case 'warning':
+        // The harness talking to the agent. Shown because it is a message the
+        // model acted on, and because "it knew and still ran out" is a very
+        // different story from "nobody told it".
+        this.write(
+          `${this.colour('yellow', 'warning:')} ${event.which} at ${formatCount(event.used)} of ${formatCount(event.budget)}; the agent has been told\n`,
+        );
         break;
       case 'stray':
         this.write(
@@ -165,7 +178,16 @@ function truncate(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit)}\n    [...] ${text.length - limit} more` : text;
 }
 
-function indent(text: string, prefix: string): string {
+/** A colour, by name, for the commands that print their own output. */
+export function colour(
+  enabled: boolean,
+  code: 'reset' | 'dim' | 'bold' | 'red' | 'green' | 'yellow' | 'blue' | 'cyan',
+  text: string,
+): string {
+  return paint(enabled, code, text);
+}
+
+export function indent(text: string, prefix: string): string {
   return text
     .split('\n')
     .map((line) => prefix + line)

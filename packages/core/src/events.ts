@@ -35,6 +35,17 @@ export interface RunTotals {
   promptTokens: number;
   cacheHitTokens: number;
   completionTokens: number;
+  /**
+   * What this run actually costs tokens for: prompt misses plus output.
+   *
+   * Not `promptTokens + completionTokens`, which is what `totalTokens` used to
+   * count and why so many real runs died at it. A repo-reading run is 95-97%
+   * cache hits, and a cache hit costs about a tenth of a miss. Counting them at
+   * full price bounded nothing that was worth bounding and killed runs that had
+   * spent almost nothing: three of the seven dead runs on this machine stopped
+   * at a `totalTokens` ceiling while being 96% cached.
+   */
+  billedTokens: number;
   /** Of `completionTokens`, how many were thinking rather than answer. */
   reasoningTokens: number;
   timeToFirstTokenMs: number | null;
@@ -91,6 +102,27 @@ export type RunEventBody =
       type: 'limit';
       which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'askSeconds';
       detail: string;
+      /** What it got to. `used` of `budget`, so a reader is never shown a bare number. */
+      used: number;
+      budget: number;
+    }
+  /**
+   * A limit is close, and the agent is told before it arrives.
+   *
+   * Real runs died at 80% of a budget nobody mentioned to them: seven of the
+   * nine runs on this machine stopped at a limit, and in every case the agent
+   * had no warning and no chance to finish what it was doing, ask for more room,
+   * or stop tidily. A limit that arrives as a surprise is a limit that wasted
+   * whatever came before it.
+   */
+  | {
+      type: 'warning';
+      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens';
+      /** Already used, and the ceiling it is heading for. */
+      used: number;
+      budget: number;
+      /** What the harness told the agent, verbatim. */
+      detail: string;
     }
   | { type: 'stray'; files: string[] }
   | { type: 'error'; message: string };
@@ -116,6 +148,7 @@ export function emptyTotals(): RunTotals {
     promptTokens: 0,
     cacheHitTokens: 0,
     completionTokens: 0,
+    billedTokens: 0,
     reasoningTokens: 0,
     timeToFirstTokenMs: null,
     generationTokensPerSecond: null,

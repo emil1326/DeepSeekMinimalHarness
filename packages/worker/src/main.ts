@@ -13,12 +13,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  DEFAULT_LIMITS,
   DeepSeekClient,
   Sandbox,
   SandboxRefusal,
   readApiKey,
   realPath,
+  writeTranscript,
   type RunEventBody,
+  type RunLimits,
   type RunStatus,
   type Speaker,
 } from '@emilswork/harness-core';
@@ -41,6 +44,14 @@ const waiting = new Map<string, (answer: { text: string; by: Speaker } | null) =
 let cancelReason: string | null = null;
 /** Set once the sandbox exists, so a cancel can kill the checks it started. */
 let running: Sandbox | undefined;
+/**
+ * The limits in force, mutated in place.
+ *
+ * The loop reads this object on every turn, so a `limits` message from the
+ * daemon takes effect on the next model call rather than the next run. It starts
+ * from the task's own limits and is handed over as `control.limits` in `start`.
+ */
+const limits: RunLimits = { ...DEFAULT_LIMITS };
 
 function cancel(reason: string): void {
   if (cancelReason !== null) return;
@@ -74,6 +85,13 @@ process.on('message', (raw: DaemonToWorker) => {
   }
   if (raw.type === 'cancel') {
     cancel(raw.reason);
+    return;
+  }
+  if (raw.type === 'limits') {
+    // Mutated in place, because the loop holds this object and reads it on every
+    // turn. Replacing it would leave the loop reading the old numbers.
+    Object.assign(limits, raw.limits);
+    return;
   }
 });
 
@@ -115,6 +133,9 @@ async function start(config: WorkerStart): Promise<void> {
     });
     running = sandbox;
 
+    // The task's own limits, into the live object the loop reads.
+    Object.assign(limits, config.config.limits);
+
     const client = new DeepSeekClient({
       apiKey: readApiKey(),
       baseUrl: config.baseUrl,
@@ -136,11 +157,24 @@ async function start(config: WorkerStart): Promise<void> {
           signal.addEventListener('abort', onAbort, { once: true });
           waiting.set(id, finish);
         }),
+      // The live object, so a grant that arrives mid-run is picked up.
+      limits,
     };
 
     emit({ type: 'status', status: 'running' });
     const result = await runAgentLoop(
-      { sandbox, client, config: config.config, emit, ...(config.price ? { price: config.price } : {}) },
+      {
+        sandbox,
+        client,
+        config: config.config,
+        emit,
+        ...(config.price ? { price: config.price } : {}),
+        ...(config.resume ? { resume: config.resume } : {}),
+        // Written as the run goes, so a run that stops at a limit can be
+        // carried on from exactly where it got to, with its prefix intact and
+        // therefore with the prompt cache still hitting.
+        onTranscript: (messages) => writeTranscript(config.runId, messages),
+      },
       control,
     );
     reportStray(root, sandbox);
@@ -157,5 +191,16 @@ async function start(config: WorkerStart): Promise<void> {
 /** Anything changed outside the allowed files is reported, whatever caused it. */
 function reportStray(root: string, sandbox: Sandbox): void {
   const stray = strayChanges(root, sandbox.allow);
-  if (stray.length > 0) emit({ type: 'stray', files: stray });
+  if (stray.failure !== null) {
+    // Said out loud rather than passed over. "Could not tell" and "nothing
+    // stray" are different answers, and reporting the second when the first is
+    // true is how the loudest control in the harness used to lie on a dirty
+    // worktree.
+    emit({
+      type: 'error',
+      message: `could not check for stray changes: ${stray.failure}`,
+    });
+    return;
+  }
+  if (stray.files.length > 0) emit({ type: 'stray', files: stray.files });
 }

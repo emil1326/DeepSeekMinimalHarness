@@ -1,4 +1,11 @@
-import type { ResolvedRunConfig, RunEvent, RunStatus, RunTotals, Speaker } from '@emilswork/harness-core';
+import type {
+  ResolvedRunConfig,
+  RunEvent,
+  RunLimits,
+  RunStatus,
+  RunTotals,
+  Speaker,
+} from '@emilswork/harness-core';
 
 export interface RunSummary {
   id: string;
@@ -8,6 +15,15 @@ export interface RunSummary {
   worktree: string;
   turns: number;
   totals: RunTotals;
+  /**
+   * The limits in force, which is not the same as the task's own by now: a run
+   * that was granted more room carries the new figures here.
+   *
+   * On the summary rather than only on the detail, because "6.0M" is only
+   * meaningful next to the 8M it is heading for, and the list view is where
+   * somebody looks to see which run is about to stop.
+   */
+  limits: RunLimits;
   createdAt: string;
   startedAt: string | null;
   endedAt: string | null;
@@ -39,6 +55,16 @@ export interface CreateRunBody {
   /** The task JSON file, read and validated by the daemon. */
   taskPath: string;
   detached?: boolean;
+  /**
+   * A run whose conversation this one should carry on from.
+   *
+   * The transcript is replayed verbatim so the prompt prefix still matches and
+   * the cache still hits. Anything that rebuilt the conversation would be a new
+   * conversation that happens to know things, and would bill as one.
+   */
+  continueFrom?: string;
+  /** Limits to override, for a continuation that was granted more room. */
+  limits?: Partial<RunLimits>;
 }
 
 export interface MessageBody {
@@ -51,7 +77,14 @@ export interface AnswerBody {
   text: string;
   by?: Speaker;
 }
-
+/** `POST /runs/:id/limits`. Absolute figures, not deltas. */
+export interface LimitsBody {
+  turns?: number;
+  wallSeconds?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  contextTokens?: number;
+}
 export interface DiffResponse {
   diff: string;
   /** Changed files that are not on the allow list, reported loudly. */

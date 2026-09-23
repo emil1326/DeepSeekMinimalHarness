@@ -1,10 +1,17 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { isTerminal, type PriceTable, type RunEvent, type RunStatus } from '@emilswork/harness-core';
+import {
+  buildReport,
+  gitOrNull,
+  isTerminal,
+  type PriceTable,
+  type RunEvent,
+  type RunLimits,
+  type RunStatus,
+} from '@emilswork/harness-core';
 import { strayChanges } from '@emilswork/harness-worker';
 import type { Auth } from './auth.js';
 import type { Supervisor } from './supervisor.js';
@@ -14,6 +21,7 @@ import type {
   ApiErrorBody,
   CreateRunBody,
   DiffResponse,
+  LimitsBody,
   MessageBody,
   RunDetail,
   RunSummary,
@@ -232,7 +240,10 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
             return send(response, 400, { error: 'taskPath is required' });
           }
           try {
-            const detail = supervisor.createRun(body.taskPath, body.detached === true);
+            const detail = supervisor.createRun(body.taskPath, body.detached === true, {
+              ...(body.continueFrom === undefined ? {} : { continueFrom: body.continueFrom }),
+              ...(body.limits === undefined ? {} : { limits: body.limits }),
+            });
             return send(response, 201, { id: detail.id, detail });
           } catch (error) {
             if (error instanceof TaskError) {
@@ -279,9 +290,34 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
       if (detail === null) return send(response, 404, { error: `no run called ${diffRoute[1]}` });
       const body: DiffResponse = {
         diff: gitDiff(detail.worktree),
-        stray: strayChanges(detail.worktree, detail.config.allow),
+        stray: strayChanges(detail.worktree, detail.config.allow).files,
       };
       return send(response, 200, body);
+    }
+
+    const reportRoute = /^\/runs\/([^/]+)\/report$/.exec(url.pathname);
+    if (request.method === 'GET' && reportRoute?.[1] !== undefined) {
+      const detail = store.getRun(reportRoute[1]);
+      if (detail === null) return send(response, 404, { error: `no run called ${reportRoute[1]}` });
+      const stray = strayChanges(detail.worktree, detail.config.allow);
+      return send(response, 200, {
+        report: buildReport({
+          id: detail.id,
+          name: detail.name,
+          status: detail.status,
+          model: detail.model,
+          task: detail.config.task,
+          allowed: detail.config.allow,
+          limits: detail.limits,
+          turns: detail.turns,
+          totals: detail.totals,
+          summary: detail.summary,
+          events: store.eventsAfter(detail.id, 0, 100_000),
+          changed: changedFiles(detail.worktree),
+          stray: stray.files,
+          strayFailure: stray.failure,
+        }),
+      });
     }
 
     const messageRoute = /^\/runs\/([^/]+)\/messages$/.exec(url.pathname);
@@ -318,6 +354,31 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
       if (store.getRun(runId) === null) return send(response, 404, { error: `no run called ${runId}` });
       supervisor.cancel(runId, 'cancelled from the CLI');
       return send(response, 200, { ok: true });
+    }
+
+    const limitsRoute = /^\/runs\/([^/]+)\/limits$/.exec(url.pathname);
+    if (request.method === 'POST' && limitsRoute?.[1] !== undefined) {
+      return void readJson<LimitsBody>(request)
+        .then((body) => {
+          const patch = limitsPatch(body);
+          if (patch === null) {
+            return send(response, 400, {
+              error:
+                'give at least one of turns, wallSeconds, outputTokens, totalTokens or contextTokens, as a positive whole number',
+            });
+          }
+          try {
+            return send(response, 200, {
+              ok: true,
+              limits: supervisor.raiseLimits(limitsRoute[1] as string, patch),
+            });
+          } catch (error) {
+            // Not going: a stopped run cannot be given room in place, it has to
+            // be continued, and saying which is more useful than "conflict".
+            return send(response, 409, { error: (error as Error).message });
+          }
+        })
+        .catch((error: Error) => send(response, 400, { error: error.message }));
     }
 
     return send(response, 404, { error: `no route for ${request.method ?? 'GET'} ${url.pathname}` });
@@ -380,17 +441,46 @@ async function readJson<T>(request: http.IncomingMessage): Promise<T> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T;
 }
 
+/** Every path git reports as changed, for the report's file lists. */
+function changedFiles(worktree: string): string[] {
+  const status = gitOrNull(['status', '--porcelain', '-uall'], { cwd: worktree });
+  if (status === null) return [];
+  return status
+    .split('\n')
+    .map((line) => line.slice(2).trim())
+    .filter((line) => line !== '')
+    .map((entry) => {
+      const renamed = entry.split(' -> ');
+      return (renamed[renamed.length - 1] ?? entry).replace(/^"|"$/g, '');
+    });
+}
+
 function gitDiff(worktree: string): string {
-  const run = (args: string[]): string | null => {
-    try {
-      return execFileSync('git', args, { cwd: worktree, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
-    } catch {
-      return null;
-    }
-  };
-  const againstHead = run(['diff', 'HEAD']);
+  // Through the shared helper, which is where `windowsHide` and the buffer size
+  // live. Without the flag a detached daemon put a console window on the user's
+  // screen every time somebody opened the Diff panel.
+  const againstHead = gitOrNull(['diff', 'HEAD'], { cwd: worktree });
   if (againstHead !== null) return againstHead;
-  return run(['diff']) ?? '';
+  return gitOrNull(['diff'], { cwd: worktree }) ?? '';
+}
+
+/**
+ * The limits in a `POST /runs/:id/limits` body, or null if there are none.
+ *
+ * Values are *absolute*, not deltas: `{ turns: 60 }` means sixty turns, not
+ * sixty more. The CLI turns `--turns +30` into an absolute figure before it gets
+ * here, so that two grants in a row cannot compound by accident through a
+ * message that got delivered twice.
+ */
+function limitsPatch(body: LimitsBody): Partial<RunLimits> | null {
+  const patch: Partial<RunLimits> = {};
+  for (const name of ['turns', 'wallSeconds', 'outputTokens', 'totalTokens', 'contextTokens'] as const) {
+    const value = body[name];
+    if (value === undefined) continue;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) return null;
+    patch[name] = value;
+  }
+  return Object.keys(patch).length === 0 ? null : patch;
 }
 
 function contentType(file: string): string {

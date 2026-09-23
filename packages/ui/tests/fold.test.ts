@@ -44,6 +44,7 @@ const totals: RunTotals = {
   promptTokens: 1000,
   cacheHitTokens: 600,
   completionTokens: 120,
+  billedTokens: 520,
   reasoningTokens: 90,
   timeToFirstTokenMs: 300,
   generationTokensPerSecond: 133.3,
@@ -175,7 +176,7 @@ describe('folding the event log', () => {
 
   it('turns limits, strays and errors into loud notes', () => {
     const blocks = fold([
-      event({ type: 'limit', which: 'turns', detail: 'used all 12 turns' }),
+      event({ type: 'limit', which: 'turns', detail: 'used all 12 turns', used: 12, budget: 12 }),
       event({ type: 'stray', files: ['src/other.ts', 'package.json'] }),
       event({ type: 'error', message: 'DeepSeek answered 503' }),
     ]);
@@ -185,6 +186,43 @@ describe('folding the event log', () => {
     expect(notes[1]).toMatchObject({ tone: 'bad' });
     expect(notes[1]?.kind === 'note' && notes[1].text).toContain('src/other.ts, package.json');
     expect(notes[2]).toMatchObject({ tone: 'bad', text: 'DeepSeek answered 503' });
+  });
+
+  it('says a limit as used-of-budget, never a bare number', () => {
+    // "6.0M tokens used" is not a sentence anybody can act on. The question is
+    // how much room is left, and that needs both numbers.
+    const blocks = fold([
+      event({
+        type: 'limit',
+        which: 'totalTokens',
+        detail: 'the run used 8.0M billed tokens of the 8.0M it may',
+        used: 8_041_954,
+        budget: 8_000_000,
+      }),
+    ]);
+    const note = blocks.find((block) => block.kind === 'note');
+    if (note?.kind !== 'note') throw new Error('unreachable');
+    expect(note.text).toContain('8.0M of 8.0M');
+    expect(note.text).toContain('totalTokens');
+  });
+
+  it('shows the harness warning the agent, so a limit is not a surprise', () => {
+    // The warning is a message to the model as well as an event, so it belongs
+    // in the chat where the reader can see what the agent was told.
+    const blocks = fold([
+      event({ type: 'turn.start', turn: 9 }),
+      event({
+        type: 'warning',
+        which: 'turns',
+        used: 10,
+        budget: 12,
+        detail: '[harness] You are near a limit: 10 of 12 turns used',
+      }),
+    ]);
+    const note = blocks.find((block) => block.kind === 'note');
+    if (note?.kind !== 'note') throw new Error('unreachable');
+    expect(note.tone).toBe('warn');
+    expect(note.text).toContain('10 of 12');
   });
 
   it('explains a retry while it is happening, so a stall is not a mystery', () => {

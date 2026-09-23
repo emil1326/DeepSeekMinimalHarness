@@ -126,6 +126,14 @@ export function totalsOf(previous: RunTotals, metrics: CallMetrics, price: Price
     promptTokens: previous.promptTokens + metrics.promptTokens,
     cacheHitTokens: previous.cacheHitTokens + metrics.cacheHitTokens,
     completionTokens: previous.completionTokens + metrics.completionTokens,
+    // Cache misses plus output: what the call is actually charged for. A cache
+    // hit is roughly a tenth of a miss, so counting it at full price made
+    // `totalTokens` a bad measure of cost and killed runs that had spent
+    // almost nothing. See `RunTotals.billedTokens`.
+    billedTokens:
+      previous.billedTokens +
+      Math.max(0, metrics.promptTokens - metrics.cacheHitTokens) +
+      metrics.completionTokens,
     reasoningTokens: previous.reasoningTokens + metrics.reasoningTokens,
     timeToFirstTokenMs,
     // The most recent measurement, not a mean of speeds: averaging tokens per

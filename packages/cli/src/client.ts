@@ -10,6 +10,7 @@ import {
   type RunStatus,
 } from '@emilswork/harness-core';
 import { daemonEntry, type RunDetail, type RunSummary } from '@emilswork/harness-daemon';
+import type { RunReport } from '@emilswork/harness-core';
 
 /** Nothing is running and nothing could be started. */
 export class DaemonUnreachable extends Error {
@@ -108,6 +109,10 @@ export class DaemonClient {
 
   runs(): Promise<{ runs: RunSummary[] }> {
     return this.json<{ runs: RunSummary[] }>('GET', '/runs');
+  }
+
+  report(runId: string): Promise<{ report: RunReport }> {
+    return this.json<{ report: RunReport }>('GET', `/runs/${runId}/report`);
   }
 
   /** Started automatically by the first CLI call if it is not running. */
