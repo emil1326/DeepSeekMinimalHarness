@@ -400,6 +400,87 @@ describe('the sandbox, hardened further', () => {
   });
 });
 
+describe('search, as it behaves live', () => {
+  const TARGET = 'src/searchable.ts';
+  const box = (): Sandbox => new Sandbox({ root: repo, allow: [TARGET], profile: PROFILE });
+
+  beforeEach(() => {
+    fs.writeFileSync(
+      path.join(repo, TARGET),
+      [
+        'const first = 1;',
+        'const second = 2;',
+        '// attempt, retry, retries, attempts, and retrying all on one line',
+        'export const third = 3;',
+        '',
+      ].join('\n'),
+    );
+  });
+
+  it('prints a line once however many times the pattern matches on it', () => {
+    // Found live. A five-way alternation matched five times on one line, and
+    // the line was printed five times: a seven-hit result came back as fifteen
+    // lines, which reads as fifteen hits and spends the hit budget on one line.
+    const result = box().search('attempt|retry|retries|attempts|retrying');
+    const lines = result.split('\n').filter((line) => line.includes('searchable.ts'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('attempt, retry, retries, attempts, and retrying');
+  });
+
+  it('still reports the same line count when the pattern matches once per line', () => {
+    // The control for the dedupe above: it must not swallow genuine hits. Lines
+    // 1, 2 and 4 match; line 4 matches both alternatives and is still one line.
+    const result = box().search('const|export');
+    const lines = result.split('\n').filter((line) => line.includes('searchable.ts'));
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain(':1:');
+    expect(lines[2]).toContain(':4:');
+    expect(lines[2]).toContain('export const third = 3;');
+  });
+
+  it('reads a leading (?i) as the i flag instead of refusing it', () => {
+    // Found live. This is how every model that learned regex on Python writes a
+    // case-insensitive search, and it cost a whole turn: the refusal said only
+    // "Invalid group", so the model worked it out and rewrote the pattern.
+    const result = box().search('(?i)SECOND');
+    expect(result).toContain('const second = 2;');
+    // The rewrite is stated, because the model asked for something and got
+    // something equivalent. Silence would misreport what was searched for.
+    expect(result).toContain("read the leading (?i) as the 'i' flag");
+  });
+
+  it('combines leading flags the way the equivalent RegExp would', () => {
+    fs.writeFileSync(path.join(repo, TARGET), 'const a = 1;\nconst multiline = 2;\n');
+    const insensitive = box().search('(?i)MULTILINE');
+    expect(insensitive).toContain('const multiline = 2;');
+    // `s` makes `.` cross a newline, which is what a model asking for `(?s)`
+    // wants. Without it this cannot match.
+    const dotAll = box().search('(?s)const a = 1;.const multiline');
+    expect(dotAll).toContain('const a = 1;');
+  });
+
+  it('leaves a pattern with no inline flags completely alone', () => {
+    const result = box().search('second');
+    expect(result).not.toContain('read the leading');
+    expect(result).toContain('const second = 2;');
+  });
+
+  it('names the fix when a flag cannot be rewritten, rather than saying Invalid group', () => {
+    // A mid-pattern flag has no JavaScript equivalent, so it is refused, but the
+    // refusal has to teach, or the model burns a turn exactly as it did live.
+    const result = box().search('const(?i)second');
+    expect(result).toContain('JavaScript has no inline flags');
+    expect(result).toContain('[Aa]');
+    expect(result).not.toBe('failed: that is not a valid regular expression');
+  });
+
+  it('says what to write instead for a pattern that is simply broken', () => {
+    const result = box().search('const (');
+    expect(result).toContain('not a valid regular expression');
+    expect(result).toContain('JavaScript regex');
+  });
+});
+
 describe('containment is checked on the real path', () => {
   it('refuses a junction that points outside the worktree', () => {
     const link = path.join(repo, 'src', 'esc');

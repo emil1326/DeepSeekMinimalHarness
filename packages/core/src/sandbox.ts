@@ -1,7 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ChildProcess } from 'node:child_process';
-import { closestNames, explainAmbiguous, explainMissing } from './diagnose.js';
+import {
+  closestNames,
+  explainAmbiguous,
+  explainBadPattern,
+  explainMissing,
+  rewriteInlineFlags,
+} from './diagnose.js';
 import { isInside, matchesGlob, realPath, relNorm, toPosix } from './paths.js';
 import { killTree, resolveExecutable, spawnTool, UnsafeCommandError } from './process.js';
 import type { CheckSpec, Profile } from './profile.js';
@@ -237,11 +243,16 @@ export class Sandbox {
   }
 
   search(pattern: string, target = '.'): string {
+    // Inline flags first, because a model that writes `(?i)` wants a
+    // case-insensitive search and refusing costs it a turn. A leading `(?i)`
+    // means the whole pattern, which is exactly the `i` flag.
+    const rewritten = rewriteInlineFlags(pattern);
+    const source = rewritten === null ? pattern : rewritten.pattern;
     let regex: RegExp;
     try {
-      regex = new RegExp(pattern);
+      regex = new RegExp(source, rewritten?.flags ?? '');
     } catch (error) {
-      return `failed: that is not a valid regular expression (${(error as Error).message})`;
+      return explainBadPattern(pattern, (error as Error).message);
     }
     const base = this.resolve(target);
     const files: string[] = [];
@@ -283,6 +294,7 @@ export class Sandbox {
     files.push(...allowedLinks);
 
     const hits: string[] = [];
+    let truncated = false;
     for (const file of files) {
       let size = Number.POSITIVE_INFINITY;
       try {
@@ -309,10 +321,19 @@ export class Sandbox {
       for (const found of eachMatch(text, regex, SEARCH_HITS - hits.length)) {
         const line = text.slice(found.from, found.to).trim().slice(0, 200);
         hits.push(`${shown}:${found.line}: ${line}`);
-        if (hits.length >= SEARCH_HITS) return `${hits.join('\n')}\n[stopped at ${SEARCH_HITS} hits]`;
+      }
+      if (hits.length >= SEARCH_HITS) {
+        truncated = true;
+        break;
       }
     }
-    return hits.join('\n') || '(no matches)';
+    const lines = [...hits];
+    if (truncated) lines.push(`[stopped at ${SEARCH_HITS} hits]`);
+    // Say when a pattern was rewritten, because the model asked for something
+    // and got something equivalent but not identical back. Silence there would
+    // be a small lie about what was actually searched for.
+    if (rewritten !== null) lines.push(`[${rewritten.note}]`);
+    return lines.join('\n') || '(no matches)';
   }
 
   replaceInFile(target: string, oldText: string, newText: string): string {
@@ -516,6 +537,12 @@ interface FoundMatch {
  * `m` is added so anchors behave as they did when each line was tested on its
  * own, and the line numbers are tracked incrementally: counting newlines from
  * the start for each match would be quadratic on a file with many hits.
+ *
+ * One entry per line, not per match. A line holding three matches used to be
+ * printed three times, which read as three hits, spent three lines of the
+ * budget on identical text, and could exhaust `limit` on a single line of a
+ * single file. Measured live: a search for a five-way alternation printed a
+ * seven-hit result as fifteen lines.
  */
 function eachMatch(text: string, regex: RegExp, limit: number): FoundMatch[] {
   if (limit <= 0) return [];
@@ -542,6 +569,10 @@ function eachMatch(text: string, regex: RegExp, limit: number): FoundMatch[] {
     cursor = at;
     const lineStart = text.lastIndexOf('\n', at) + 1;
     const lineEnd = text.indexOf('\n', at);
+    // Matches arrive in order, so the previous entry is on the same line
+    // exactly when its start matches. Skipping costs nothing and keeps one
+    // line from filling the whole result.
+    if (found[found.length - 1]?.from === lineStart) continue;
     found.push({ line, from: lineStart, to: lineEnd === -1 ? text.length : lineEnd });
     if (found.length >= limit) break;
   }

@@ -163,6 +163,82 @@ export function explainAmbiguous(path: string, haystack: string, needle: string,
   ].join('\n');
 }
 
+/**
+ * Inline flags from Python, PCRE and Java, which JavaScript does not have.
+ *
+ * `(?i)foo` is how every model that learned regex on Python writes a
+ * case-insensitive search, and it is the single most common way a `search` call
+ * gets refused. Measured live: the model wrote `(?i)(attempt|retry)` , was told
+ * only "Invalid group", and spent a whole turn working out that it should have
+ * written `[Aa]ttempt` instead.
+ *
+ * At the start of a pattern, `(?i)`, `(?s)` and `(?m)` mean what the JavaScript
+ * `i`, `s` and `m` flags mean for the entire pattern, so translating them is
+ * exact rather than a guess. Anywhere else an inline flag only applies from that
+ * point on, and there is no JavaScript equivalent, so that case is refused with
+ * the rewrite spelled out instead.
+ */
+const INLINE_FLAGS = /^\(\?([ims]+)\)(?!:)/;
+
+export interface FlagRewrite {
+  /** Equivalent JavaScript pattern. */
+  pattern: string;
+  /** Flags to add, from the same rewrite. */
+  flags: string;
+  /** What was changed, to say so in the result. */
+  note: string;
+}
+
+/** A flag group anywhere, leading or not, for telling the two cases apart. */
+const ANY_INLINE_FLAGS = /\(\?[ims]+[:)]/;
+
+/**
+ * Rewrite a leading inline flag group into `RegExp` flags.
+ *
+ * Returns `null` when the pattern does not start with one, which is the common
+ * case and must stay free of any work.
+ */
+export function rewriteInlineFlags(pattern: string): FlagRewrite | null {
+  const leading = INLINE_FLAGS.exec(pattern);
+  if (leading === null) return null;
+  const letters = leading[1] ?? '';
+  const named = letters
+    .split('')
+    .map((letter) => `'${letter}'`)
+    .join(' and ');
+  return {
+    pattern: pattern.slice(leading[0].length),
+    flags: letters,
+    note: `read the leading (?${letters}) as the ${named} flag, which is what it means`,
+  };
+}
+
+/** What to say when a pattern is not a JavaScript regular expression. */
+export function explainBadPattern(pattern: string, message: string): string {
+  const inline = ANY_INLINE_FLAGS.exec(pattern);
+  if (inline !== null) {
+    // Leading is handled before this is reached, so anything here is part-way
+    // through the pattern, where JavaScript genuinely cannot express it.
+    return [
+      `failed: JavaScript has no inline flags, so ${inline[0]} cannot be used part-way through a pattern.`,
+      'Put the whole pattern in a group and anchor it instead, or spell the alternatives out:',
+      '[Aa] for a case-insensitive a, and (?i) at the very start for a case-insensitive pattern.',
+    ].join('\n');
+  }
+  if (/\(\?</.test(pattern)) {
+    return [
+      `failed: ${message}`,
+      'JavaScript this engine is running has no lookbehind.',
+      'Match the surrounding text instead, or search for something shorter and read the file.',
+    ].join('\n');
+  }
+  return [
+    `failed: that is not a valid regular expression (${message})`,
+    'This is JavaScript regex: no (?i) inline flags part-way through, no possessive quantifiers, no \\A or \\z.',
+    'Ordinary alternatives, groups and character classes all work.',
+  ].join('\n');
+}
+
 /** A short edit distance, for suggesting a filename the model probably meant. */
 export function distance(a: string, b: string): number {
   if (a === b) return 0;
