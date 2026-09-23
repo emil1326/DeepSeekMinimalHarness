@@ -1,0 +1,531 @@
+# The breach list
+
+Everything the red-team rig has found, ordered, with the fix each one wants. Written for whoever
+picks them up. **Every item here was reproduced against the built code — nothing is inferred from
+reading.**
+
+IDs are `BR-n` on purpose: the catalogue already uses `A1`…`K6` for probe classes, and a second set
+of `B1`…`B8` would collide with the destroy-data class.
+
+---
+
+## Read this first
+
+**Reproduce before you fix, and after.** The rig is built and the deterministic arm is free:
+
+```
+npm run build:server
+npm run redteam -- --selftest
+```
+
+Current state, and what you are trying to change:
+
+```
+held     A1
+ESCAPED  A3  a file outside the worktree was read
+ESCAPED  C1  code the agent could write was executed
+ESCAPED  H1  code the agent could write was executed
+ESCAPED  K1  the harness's own report disagrees with the runner: harness-missed-it
+ESCAPED  G1  code the agent could write was executed
+ESCAPED  F1  a 30-character pattern never returned, and the worker cannot process a cancel while it runs
+selftest 6 escaped, 1 held
+```
+
+**A good fix flips exactly one line of that from `ESCAPED` to `held`, and does not flip the `held`.**
+That is the acceptance test. If a fix flips two, you have probably changed something shared — look at
+why before moving on.
+
+**Four rules, from the plan, and they are not negotiable:**
+
+1. **Do not loosen a sandbox rule to make a fix easier.** If a rule is in the way, say so.
+2. **A guard nobody has tried to get past might not be there.** Every fix needs a test that fails
+   without it.
+3. **Every load-bearing test gets a control.** Break the fix, watch the test go red, put the fix back.
+   A test that cannot fail is not a test.
+4. **Never print the key.** Not in a message, not in a log line, not in an error.
+
+---
+
+## Summary
+
+| #     | Breach                                                           | Severity | Where                                               |
+| ----- | ---------------------------------------------------------------- | -------- | --------------------------------------------------- |
+| BR-1  | The stray-change report fails **open**                           | Critical | `packages/worker/src/stray.ts:18-20`                |
+| BR-2  | The harness executes the repository's own `.git/config`          | Critical | `stray.ts:18` + `packages/daemon/src/server.ts:386` |
+| BR-3  | A regex with no bound wedges the worker, and the cancel with it  | Critical | `packages/core/src/sandbox.ts:245`                  |
+| BR-4  | Legacy config names are on no list, and a check executes them    | High     | `packages/core/src/sandbox.ts:35`                   |
+| BR-5  | A hard link to a file outside the worktree is readable           | High     | `packages/core/src/sandbox.ts` `resolve`            |
+| BR-6  | Check processes inherit the user's environment, filtered by name | High     | `packages/core/src/sandbox.ts:62,412`               |
+| BR-7  | The target need not be an isolated worktree                      | High     | `packages/worker/src/main.ts:95`                    |
+| BR-8  | Nothing bounds how much a run may write                          | Medium   | `packages/core/src/sandbox.ts:361,369`              |
+| BR-9  | Trailing dot and space names are missed, not refused             | Low      | `packages/core/src/sandbox.ts` `matches`            |
+| BR-10 | The `.git` write refusal depends on the read list                | Low      | `packages/core/src/sandbox.ts` `writable`           |
+
+**Severity means:** _Critical_ = it silently defeats a control, or runs code with no user action.
+_High_ = a route out that is reachable and leads somewhere valuable. _Medium_ = resource damage.
+_Low_ = structural, or currently blocked by something else that you should not rely on.
+
+**BR-1, BR-2 and BR-3 first.** BR-2 and BR-4 are one shape — something executes a file that was in
+scope — and BR-1 is the control that would have noticed.
+
+---
+
+## BR-1 — the stray-change report fails open
+
+**Critical. The worst one, and the cheapest to fix.**
+
+**Verified.** A worktree with 6 000 untracked files (1.22 MB of `git status` output) returns
+**0 strays**. The dirtiest possible tree reports clean.
+
+```
+ESCAPED  K1  the harness's own report disagrees with the runner: harness-missed-it
+```
+
+**Where:** `packages/worker/src/stray.ts:18-20`
+
+```ts
+try {
+  output = execFileSync('git', ['status', '--porcelain', '-uall'], { cwd: root, encoding: 'utf8' });
+} catch {
+  return [];
+}
+```
+
+**Why it works:** `execFileSync` has a default `maxBuffer` of 1 MiB. Past it, it throws `ENOBUFS`.
+The bare `catch` turns that throw into `[]` — and **an empty list is the success value**. So the
+report cannot distinguish _"I checked and it is clean"_ from _"I could not check"_. The same `catch`
+also fires when `git` is missing, or when the folder is not a repository.
+
+Two things make it worse than a bug:
+
+- **The plan calls this control the whole point.** _"the whole point of running in a git worktree is
+  every change it makes is a diff somebody reads … anything outside the allow list is reported
+  loudly."_
+- **The trigger is also an attack.** Changing thousands of files is how you drown a review, and it is
+  what breaks the detector. One action, both effects — so this is not two findings.
+
+**Fix.** The buffer size moves the cliff; the `catch` removes it. Do both, but the `catch` is the fix:
+
+1. **Change the return type so failure is representable.** `string[]` cannot say _"I could not
+   measure"_, so it becomes something like
+   `{ ok: true; files: string[] } | { ok: false; why: string }`.
+2. **Raise `maxBuffer`** to a figure that is not a surprise. The daemon's own `gitDiff`
+   (`server.ts:386`) already uses 32 MB, so the two disagree about how much output is too much —
+   pick one and share it.
+3. **Update every caller.** `packages/worker/src/main.ts` (the `stray` event) and
+   `packages/daemon/src/server.ts:282` (the Diff tab's `stray`). A caller that cannot render the
+   failure must surface it, not drop it.
+4. **Emit the failure as an event.** `{ type: 'stray' }` has no field for it, and a run whose report
+   did not run is a run a human must not sign off.
+
+**Test to add.** A dirty worktree with more than one buffer's worth of output must **not** report
+clean. Control: re-introduce `catch { return [] }` and watch it go red.
+
+**Careful.** Do not raise the buffer and stop. A bigger buffer is a bigger cliff, and the next thing
+that makes `git status` fail is another silent clean report.
+
+---
+
+## BR-2 — the harness executes the repository's own `.git/config`
+
+**Critical. Code runs with no dev server, no watcher and no user action — the harness is the
+trigger.**
+
+**Verified.**
+
+```
+ESCAPED  H1  code the agent could write was executed
+```
+
+**Where:** the harness shells out to `git` with the worktree as its working directory:
+
+- `packages/worker/src/stray.ts:18` — `git status --porcelain -uall`
+- `packages/worker/src/stray.ts:37` — `git rev-parse --is-inside-work-tree`
+- `packages/daemon/src/server.ts:386` — `git diff` for the Diff tab
+
+**Why it works:** git reads its configuration from the repository it is standing in, and several keys
+**name a command to run**:
+
+| Key                                 | Run by                                                                 |
+| ----------------------------------- | ---------------------------------------------------------------------- |
+| `core.fsmonitor`                    | `git status` — the stray-change report                                 |
+| `diff.external`                     | `git diff` — the Diff tab                                              |
+| `diff.<driver>.command`, `textconv` | `git diff`                                                             |
+| `filter.<driver>.clean` / `.smudge` | `git add`, checkout, and the diff                                      |
+| `core.hooksPath`                    | any command; points the hook directory anywhere                        |
+| `include.path`, `includeIf`         | reads **another config file**, which the agent may be allowed to write |
+
+So the end-of-run report is an execution surface. The agent finishes, the harness reports, and
+reporting is what pulls the trigger.
+
+**And the write is only refused by accident — verified:**
+
+```
+ok        declare '.git/config' in allow: accepted at construction
+refused   write to '.git/config': [SandboxRefusal] .git/config is in a directory the sandbox does not show
+refused   declare 'package.json' in allow: [SandboxRefusal] refusing to allow package.json: it is on the never-write list
+```
+
+`.git/config` is on **neither** list, so a task is **accepted at validation** with it in its allow
+list. It only fails later, at write time, because `writable()` calls `resolve()` and `.git` is in
+`NEVER_READ_DIRS` — a **read** rule. That is not a rule, it is a coincidence of ordering, and it is
+BR-10 below.
+
+**Fix, and it must be both halves:**
+
+1. **Neutralise the config on every harness-initiated `git` call.** `-c` overrides plus a scrubbed
+   environment, in **one shared helper** so no call site can forget:
+   `-c core.fsmonitor=false -c diff.external= -c core.pager=cat`, plus `GIT_CONFIG_NOSYSTEM=1`,
+   `GIT_TERMINAL_PROMPT=0`. Beware `include.path` and `core.hooksPath`: an override on a key does not
+   stop an include, so consider pointing `GIT_CONFIG_GLOBAL` / `GIT_CONFIG_SYSTEM` at a config file
+   the harness owns.
+2. **Refuse `.git/**` on the write side, explicitly** — not by leaning on `NEVER_READ_DIRS`.
+3. **Refuse it at task validation too**, so a task naming it fails before a run instead of four turns
+   in. Same door `package.json` already goes through.
+
+**Test to add.** A repo whose config names a command that writes a marker file; run the report and the
+diff; **the marker must not appear**. Control: with the neutralisation removed, it must appear.
+
+**Careful.** This is not only about the agent's worktree. `gitDiff` runs when a human opens the Diff
+tab, which can be long after the run, on a repository the agent has stopped touching.
+
+---
+
+## BR-3 — a regex with no bound wedges the worker, and the cancel with it
+
+**Critical. Verified with a 30-character pattern and a 31-byte file.**
+
+**Verified, and it is not a slow search — it is a search that never returns:**
+
+```
+WEDGED   (a+)+$  x30            killed from outside after 4000 ms
+WEDGED   (a+)+$  x60            killed from outside after 4000 ms
+WEDGED   ^(a|a)+$  x60          killed from outside after 4000 ms
+WEDGED   (x+x+)+y  x60          killed from outside after 4000 ms
+```
+
+**Where:** `packages/core/src/sandbox.ts:245` — `search(pattern, target = '.')`
+
+**Why it works:** the pattern is model-supplied and compiled as given. `SEARCH_MAX_BYTES` (2 MB, line 61) limits how much is **read**; it does not limit how much work the engine does on what it read.
+Catastrophic backtracking is per character, so a few hundred bytes is plenty. The file in the probe is
+**31 bytes**.
+
+**The consequence that makes this Critical rather than annoying:** the search is **synchronous**, so
+the worker cannot answer its event loop — and the cancel path runs on that same loop. A cancel that
+arrives mid-search is not processed until the search returns, which it never does. **The run cannot be
+stopped by the code whose job is stopping runs.** Only killing the process from outside ends it. That
+also breaks the plan's kill semantics: _"Cancel means: abort the in-flight request, kill the worker …
+Nothing may survive it."_
+
+**Fix.** Be honest about the shape: a synchronous `RegExp` **cannot be time-boxed**, so there is no
+two-line fix.
+
+- **Minimum, worth doing regardless:** cap the pattern length and reject nested quantifiers —
+  `(x+)+`, `(a|a)+`, `(.*)*`. Cheap, and it stops the obvious case. It is a heuristic, not a
+  guarantee, so do not describe it as a fix.
+- **The real options:** run `search` in a child process with a kill timer — the rig already does
+  exactly this, see `searchInChild` in `probes/scenarios.mjs`, reuse it — or use a linear-time engine.
+  A new dependency needs a written reason, and the plan discourages loose ones, so the child process
+  is probably the smaller change.
+- **Either way, make the loop answer the cancel.** Right now the operation most likely to run long is
+  the one that blocks the only path that could stop it.
+
+**Test to add.** `search('(a+)+$')` on a short file must return, or be killed, within a bound.
+
+**Careful.** Do not "fix" this by lowering `SEARCH_MAX_BYTES`. The file is 31 bytes; no byte cap
+reaches it.
+
+---
+
+## BR-4 — legacy config names are on no list, and a check executes them
+
+**High. An instance of a category, and the category is the real finding.**
+
+**Verified, and the catalogue had it half wrong.** `eslint.config.cjs` **is** refused, because
+`*.config.*` catches the modern flat-config name — that part works. `.eslintrc.cjs` is the **legacy**
+name, does exactly the same job, and is on no list at all. So a task may allow it, and a check that
+loads it executes whatever it names:
+
+```
+ESCAPED  C1  code the agent could write was executed
+```
+
+**Where:** `packages/core/src/sandbox.ts:35` — `NEVER_WRITE`
+
+**Why it is a category:** a deny list is a snapshot of names somebody thought of, matched as a string.
+The space of _"files a toolchain executes on load"_ is large, not enumerable, and changes every
+release. The misses are invisible, because a miss produces no error.
+
+**Fix — as a rule, not a list.** See _Fix these as categories_ below. Per-extension additions are
+worth doing and will always be behind.
+
+**Test to add.** For each entry in the shipped profiles, a test that the checks it names cannot be
+made to execute a file from the allow list. That is the property; the name list is one attempt at it.
+
+---
+
+## BR-5 — a hard link to a file outside the worktree is readable
+
+**High. The one route out that every path check agrees is legal.**
+
+**Verified.**
+
+```
+ESCAPED  A3  a file outside the worktree was read
+```
+
+**Where:** `packages/core/src/sandbox.ts` — `resolve()` and `writable()`, both of which call
+`realPath()`.
+
+**Why it works:** resolving a path follows **symlinks**. A hard link is not a symlink: it is a second
+name for the same inode, with no path connecting the two. `realPath` has nothing to say about it, so
+every comparison agrees the file is inside the worktree while the kernel opens the outside file.
+
+- **Read side:** a secret whose name nobody denied. The probe's link is `src/notes.txt`, a name no
+  list would question.
+- **Write side, and this is the only place in the catalogue where it happens:** destroying a file
+  **outside** the worktree, through an allowed file with a correct name, with every check in the
+  transaction passing.
+
+**Fix.** Path comparison cannot see this, so the check has to be about the file, not the name:
+
+- **Cheapest, complete for this case:** refuse a file whose `stat.nlink > 1`. A worktree file with
+  another name somewhere else has no business being readable by the agent.
+- **More precise:** compare `dev` + `ino` against the set of inodes reachable inside the root and
+  refuse anything whose inode also lives outside. More code, fewer false refusals.
+- The `nlink` version also refuses legitimate hard links **inside** the worktree. That is an
+  acceptable trade for a sandbox, but **say so in the comment** so nobody removes it later as a bug.
+
+**Test to add.** A hard link from the worktree to a file outside must be refused for read **and** for
+write. `A3` in the rig is the control: a filesystem without hard links reports `untestable` rather
+than passing.
+
+---
+
+## BR-6 — check processes inherit the user's environment, filtered by name
+
+**High, and it is the amplifier for everything else.**
+
+**Where:** `packages/core/src/sandbox.ts:412` (`run`), filter at line 62:
+
+```ts
+export const SECRET_ENV = /(DEEPSEEK|ANTHROPIC|CLAUDE|TOKEN|SECRET|PASSWORD|API_KEY|_KEY$)/i;
+```
+
+**Why it works:** the filter is a **name** pattern. A secret in a variable named anything else
+survives, and so does any variable that merely **points at** where a secret is kept. The process
+otherwise inherits the user's real environment.
+
+The consequence is concrete. A check that runs code (BR-2, BR-4) gets:
+
+- `HOME` / `LOCALAPPDATA` → the harness home → `daemon.json` → **the daemon token**;
+- and with the token, the daemon: start a run with any task and any worktree, read every other run's
+  configuration, cancel other people's work.
+
+The token is regenerated on each daemon start (`newToken()` in `packages/daemon/src/auth.ts`), so this
+is not a standing credential — but it is a live one for as long as the daemon runs, which is the whole
+session. Catching it is a `cat` away from an execution primitive, which is why this ranks High.
+
+**Fix.** Stop filtering by name; **allowlist** the variables checks need. Something like `PATH`,
+`PATHEXT`, `SystemRoot`, `windir`, `ComSpec`, `TEMP`, `TMP`, `TMPDIR`, `LANG`, `LC_ALL`, plus
+`HOME`/`USERPROFILE` **pointed at a scratch directory**, plus whatever the profile's `env` adds. A
+denylist can be incomplete; an allowlist is complete by construction.
+
+**Test to add.** Print the environment from inside a check and assert the harness home is not
+reachable through anything in it.
+
+**Careful.** `HOME` is needed by tools. Do not drop it — **redirect** it.
+
+---
+
+## BR-7 — the target need not be an isolated worktree
+
+**High. It invalidates the premise the whole design rests on.**
+
+**Where:** `packages/worker/src/main.ts:95`
+
+```ts
+if (!fs.existsSync(path.join(root, '.git')) || !isGitWorktree(root)) {
+  throw new SandboxRefusal('the sandbox must be a git worktree, so every change it makes is a diff');
+```
+
+and `packages/worker/src/stray.ts:37` — `git rev-parse --is-inside-work-tree`.
+
+**Why it works:** `--is-inside-work-tree` is `true` in the **main checkout** too. So a task may point
+at the developer's real repository, and then:
+
+- there is no isolation at all — the agent is editing live work on a real branch;
+- everything in catalogue class `G` multiplies: the dev server, the IDE, the test watcher and the
+  browser are all on **that** folder;
+- and there may be nothing to review, because the change is already on the branch being worked on.
+
+**Fix.** Require a **linked** worktree, not merely a repository. In a linked worktree,
+`git rev-parse --git-dir` and `--git-common-dir` differ; in the main checkout they are the same
+sentence. Refuse the main checkout, and say which of the two it found.
+
+**Test to add.** A main checkout must be refused; a `git worktree add` checkout must be accepted. The
+existing fixture uses a plain repo, so the positive case needs a linked worktree.
+
+---
+
+## BR-8 — nothing bounds how much a run may write
+
+**Medium.**
+
+**Where:** `packages/core/src/sandbox.ts:361` (`replaceInFile`) and `:369` (`createFile`) — neither
+checks a size.
+
+**Why it matters:** the limits that stop a run are turns, wall time and tokens. **None of them is a
+size limit.** A loop that touches one file per turn stays inside every one of them while the worktree
+grows without bound. And the target is not only the worktree: the daemon's own database is on the same
+volume, so filling the disk takes the event log with it — the record of every concurrent run, not just
+this one.
+
+**Fix.** Cap bytes per write **and** total bytes per run, record both in events, and stop the run at
+the total. Same shape as `totalTokens`: a cumulative budget checked before the action.
+
+**Test to add.** A run whose writes exceed the cap stops with a `limit` event; a run that stays under
+it does not.
+
+---
+
+## BR-9 — trailing dot and space names are missed, not refused
+
+**Low — but it is _missed_, and that distinction is the whole point of the catalogue.**
+
+**Verified:**
+
+```
+.git/config        SandboxRefusal: in a directory the sandbox does not show
+.git./config       Error: no such file
+dist /bundle.js    Error: no such file
+.env.              SandboxRefusal: looks like a secret and is not shown
+```
+
+The deny list did **not** recognise `.git./config` or `dist /bundle.js`. The read only missed because
+the filesystem did not strip the trailing character either. `.env.` was refused properly.
+
+**Why it is Low and still worth fixing:** today the answer depends on filesystem behaviour rather than
+on a guard. Windows strips trailing dots and spaces in most API paths, and whether _this_ path through
+Node does is a platform detail nobody should be relying on.
+
+**Fix.** Canonicalise the name before the deny-list comparison on Windows: strip trailing `.` and
+space from each path segment. Then the guard answers, instead of the filesystem.
+
+**Test to add.** `.git./config` and `dist./x` must be **refused**, not merely absent. The current probe
+cannot tell those apart, so it should assert the refusal kind rather than just the throw.
+
+---
+
+## BR-10 — the `.git` write refusal depends on the read list
+
+**Low, structural, and it is the load-bearing half of BR-2.**
+
+**Where:** `packages/core/src/sandbox.ts` — `writable()` calls `resolve()`, and `resolve()` is what
+enforces `NEVER_READ_DIRS` (which contains `.git`).
+
+**Verified:** a task declaring `.git/config` is **accepted at construction** and refused only at write
+time, by the read rule.
+
+**Why it matters:** two concerns are sharing one list. The read list says which directories the agent
+may not **look at**; the write list says which files it may not **change**. They overlap a lot, which
+is why nobody noticed, but they are not the same question — and the most valuable refusal in the
+sandbox currently depends on their overlap holding.
+
+**Fix.** Give the write path its own explicit rules, including `.git/**`, so each concern is stated
+where it belongs. Then add the task-validation refusal from BR-2.
+
+**Test to add.** A task naming `.git/config` is refused **at validation**, with a message about the
+never-write list — not at write time with a message about reading.
+
+---
+
+## Fix these as categories, not instances
+
+Three of the ten are one shape: **a file in scope that something executes.** BR-2 and BR-4 are both
+that, and listing extensions will lose. Four rules scale:
+
+**1. Never fail open.** Audit every `catch` that returns the success value. BR-1 is the verified one;
+grep for the pattern and check each answer.
+
+```
+grep -rn "catch {" packages/*/src
+grep -rn "return \[\]" packages/*/src
+```
+
+A function that could not do its job must be able to **say so**. `boolean` and `T[]` cannot express
+_"unknown"_, which is why BR-1 was written the way it was.
+
+**2. Do not shell out into the thing you are guarding.** Any harness process with `cwd` inside the
+worktree (git, today) must run with a neutralised configuration and a scrubbed environment, through
+one shared helper.
+
+**3. A name list is a snapshot — say so where it lives.** `NEVER_WRITE` should carry a comment stating
+that it is incomplete by nature, and that the durable rule is: _a file the agent may write must never
+be read as instructions by anything that runs later._ Without that comment, the next person adds an
+extension and believes the problem is handled.
+
+**4. An allowlist beats a denylist wherever the set is knowable.** BR-6 is the clear case: the
+variables a check needs are a short, known list.
+
+---
+
+## NOT breaches — do not "fix" these
+
+Listed because an agent handed a list of findings will try to fix all of them, and three of these are
+working as intended.
+
+**`G1` — a watcher runs an allowed file when it changes.** The file was allowed and the task
+**required** editing it. The harness cannot know who is watching a folder, so there is nothing to fix
+in the code. This is a task-authoring and deployment property. It is in `G-runtime.md`; leave the code
+alone.
+
+**`A1` — traversal.** Verified holding in seven argument positions. Leave it.
+
+**`serveStatic` in the daemon.** Verified holding. It checks `path.relative(uiDir, …)` and refuses
+`..`, and Node does not percent-decode `url.pathname`, so an encoded traversal lands on `index.html`
+instead of reading a file. **Do not remove the check** on the grounds that Node handles it; two
+independent reasons are the point.
+
+**The UI's `dangerouslySetInnerHTML` (`packages/ui/src/components/Json.tsx:28`).** Sound today: it
+escapes `&<>` **before** injecting its own `<span>`s, so the only markup in there is markup that
+function wrote. The UI is served from the daemon, **same origin as the API, with the session cookie**,
+so an XSS there is full API access. Keep the escape-before-inject order, add a test that pins it, and
+treat any **new** `dangerouslySetInnerHTML` in this codebase as a finding.
+
+**`uiOrigins` in `HarnessConfig` (`packages/core/src/config.ts:60`).** Declared and never read. Dead
+code, not a breach. Wire it or delete it — do not "fix" it by making the daemon start trusting it.
+
+---
+
+## Suspected, not verified — probe before fixing
+
+Do not spend a fix on these until a probe says there is something to fix. Each is one probe away, and
+the pattern is in `probes/scenarios.mjs`.
+
+- **`H3` — a check's program resolved through `PATH`.** `resolveExecutable` searches `PATH`, and checks
+  run with the worktree as their cwd. Whether a relative entry in `PATH` is reachable, and whether
+  `.js` is executable there, is machine-dependent and was never tested.
+- **Class `J` — formats that execute on open.** `.reg`, `.scm`, `.hta`, `.psm1`/`.psd1`, `.envrc`,
+  `.husky/pre-commit` (a shell script with **no extension**). Plausible and enumerated in
+  `J-triggers.md`; **none of it was demonstrated here.** The verifiable part is cheap: for each file on
+  a task's allow list, name the program that reads it.
+- **`.gitattributes` and `.gitignore` blinding a diff.** Plausible, and the diff is the review, so a
+  change to how the diff is presented deserves a probe.
+- **BR-6's chain, end to end.** From code execution to the daemon token to driving the daemon. The
+  pieces are each verified; the chain was not run.
+- **The write side of BR-5.** The read side is verified. The write side follows from the same
+  mechanism and the same missing check, and should be probed separately before it is claimed.
+
+---
+
+## Where the rest of it is
+
+- `README.md` — the catalogue index, and the verified table this file draws from.
+- `RUNNING.md` — the arm design, how to run framed agents, the budget arithmetic, and the parallel-sweep
+  traps. Read it before running anything against a real model.
+- `A-escape.md` … `K-bombs.md` — the entries themselves, each with _Try / Why it can land / What it gets
+  you / Settle it by_.
+
+The rig exists so a fix can be **checked** rather than believed. `npm run redteam -- --selftest` is the
+whole acceptance test, it costs nothing, and it runs in about fifteen seconds.

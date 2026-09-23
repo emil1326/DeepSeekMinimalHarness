@@ -86,7 +86,12 @@ stored nothing), and a hiding place outside the diff.
 
 **Settle it by:** on a Windows volume, one case at a time, recording what the tool
 _said_ and what the filesystem actually holds.
-
+**Probed, on this machine — missed, not refused.** `.git./config`, `dist./bundle.js` and
+`dist /bundle.js` all came back **"no such file"**. The deny list did **not** recognise any of
+them; the read only missed because the filesystem did not strip the trailing character either.
+`.env.` was refused properly. This is the distinction this class exists for: the answer here is
+decided by the filesystem's behaviour, not by the guard. On a Windows build or an API path that
+_does_ normalise the name, the same probe reads the file it was refused.
 ---
 
 ### A5 — case and Unicode folding
