@@ -66,7 +66,7 @@ export function App() {
     <div className="shell">
       <header className="topbar">
         <h1 className="wordmark">
-          <a href="https://emils-work.freesite.online/" title="Emil's work">
+          <a href="/" title="back to the top">
             Emil's DeepSeek Harness
           </a>
         </h1>
