@@ -48,25 +48,25 @@ why before moving on.
 
 ## Summary
 
-| #     | Breach                                                                        | Severity | Where                                               |
-| ----- | ----------------------------------------------------------------------------- | -------- | --------------------------------------------------- |
-| BR-1  | The stray-change report fails **open**                                        | Critical | `packages/worker/src/stray.ts:18-20`                |
-| BR-2  | The harness executes the repository's own `.git/config`                       | Critical | `stray.ts:18` + `packages/daemon/src/server.ts:386` |
-| BR-3  | A regex with no bound wedges the worker, and the cancel with it               | Critical | `packages/core/src/sandbox.ts:245`                  |
-| BR-4  | The never-write list catches each toolchain's **primary** name and no variant | High     | `packages/core/src/sandbox.ts:35`                   |
-| BR-5  | A hard link to a file outside the worktree is readable                        | High     | `packages/core/src/sandbox.ts` `resolve`            |
-| BR-6  | Check processes inherit the user's environment, filtered by name              | High     | `packages/core/src/sandbox.ts:62,412`               |
-| BR-7  | The target need not be an isolated worktree                                   | High     | `packages/worker/src/main.ts:95`                    |
-| BR-8  | Nothing bounds how much a run may write                                       | Medium   | `packages/core/src/sandbox.ts:361,369`              |
-| BR-9  | Trailing dot and space names are missed, not refused                          | Low      | `packages/core/src/sandbox.ts` `matches`            |
-| BR-10 | The `.git` write refusal depends on the read list                             | Low      | `packages/core/src/sandbox.ts` `writable`           |
-| BR-11 | The speaker of a message is taken from the request body                       | Medium   | `packages/daemon/src/server.ts:295,311`             |
-| BR-12 | `Origin: null` is accepted                                                    | Low      | `packages/daemon/src/auth.ts:68`                    |
-
-**Severity means:** _Critical_ = it silently defeats a control, or runs code with no user action.
-_High_ = a route out that is reachable and leads somewhere valuable. _Medium_ = resource damage or a
-record that lies. _Low_ = structural, or currently blocked by something else that you should not rely
-on.
+| #                                                                                                     | Breach                                                                        | Severity | Where                                               |
+| ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | -------- | --------------------------------------------------- |
+| BR-1                                                                                                  | The stray-change report fails **open**                                        | Critical | `packages/worker/src/stray.ts:18-20`                |
+| BR-2                                                                                                  | The harness executes the repository's own `.git/config`                       | Critical | `stray.ts:18` + `packages/daemon/src/server.ts:386` |
+| BR-3                                                                                                  | A regex with no bound wedges the worker, and the cancel with it               | Critical | `packages/core/src/sandbox.ts:245`                  |
+| BR-4                                                                                                  | The never-write list catches each toolchain's **primary** name and no variant | High     | `packages/core/src/sandbox.ts:35`                   |
+| BR-5                                                                                                  | A hard link to a file outside the worktree is readable                        | High     | `packages/core/src/sandbox.ts` `resolve`            |
+| BR-6                                                                                                  | Check processes inherit the user's environment, filtered by name              | High     | `packages/core/src/sandbox.ts:62,412`               |
+| BR-7                                                                                                  | The target need not be an isolated worktree                                   | High     | `packages/worker/src/main.ts:95`                    |
+| BR-8                                                                                                  | Nothing bounds how much a run may write                                       | Medium   | `packages/core/src/sandbox.ts:361,369`              |
+| BR-9                                                                                                  | Trailing dot and space names are missed, not refused                          | Low      | `packages/core/src/sandbox.ts` `matches`            |
+| BR-10                                                                                                 | The `.git` write refusal depends on the read list                             | Low      | `packages/core/src/sandbox.ts` `writable`           |
+| BR-11                                                                                                 | The speaker of a message is taken from the request body                       | Medium   | `packages/daemon/src/server.ts:295,311`             |
+| BR-12                                                                                                 | `Origin: null` is accepted                                                    | Low      | `packages/daemon/src/auth.ts:68`                    |
+| BR-13                                                                                                 | The served UI is guarded by a directory name, and never verified              | Low      | `packages/daemon/src/server.ts:345`                 |
+| **Severity means:** _Critical_ = it silently defeats a control, or runs code with no user action.     |
+| _High_ = a route out that is reachable and leads somewhere valuable. _Medium_ = resource damage or a  |
+| record that lies. _Low_ = structural, or currently blocked by something else that you should not rely |
+| on.                                                                                                   |
 
 **BR-1, BR-2 and BR-3 first.** BR-2 and BR-4 are one shape — something executes a file that was in
 scope — and BR-1 is the control that would have noticed.
@@ -604,9 +604,64 @@ the CLI keeps working.
 
 ---
 
+## BR-13 — the daemon serves the UI from disk with no integrity check
+
+**Low today, and the highest consequence in this document if it ever stops holding.**
+
+**Verified.** Two things, and they are two different facts:
+
+```
+packages/daemon/dist/public/index.html   SandboxRefusal: in a directory the sandbox does not show
+packages/daemon/dist/public/assets/*.js  SandboxRefusal: in a directory the sandbox does not show
+public/index.html  (no `dist` segment)   ALLOWED
+```
+
+and `packages/daemon/src/server.ts:345`:
+
+```ts
+response.writeHead(200, { 'content-type': contentType(target) });
+return void response.end(fs.readFileSync(target));
+```
+
+**1. The write is refused, and for the wrong reason.** `packages/daemon/dist/public` is refused
+because the path contains a `dist` segment, and `dist` is in `NEVER_READ_DIRS`. Remove the segment —
+`public/index.html` — and the same write is **allowed**. So the guarantee that the served UI cannot be
+changed is not a rule about served assets; it is an accident of a directory name. That is the same
+shape as BR-10, and it is the second place where a read list is silently doing write duty.
+
+**2. The serving side checks nothing.** No ETag, no hash, no comparison against the build. The daemon
+re-reads the file on **every request** — which is deliberate, and it is what makes `npm run build:ui`
+need no restart, so the design choice that makes the dev loop pleasant is the same one that makes this
+fragile.
+
+**Why the consequence would be the worst here.** The UI is served from the daemon's own origin, so it
+is **same-origin with the API and carries the session cookie**. A page that replaced `index.html`
+would not be a defaced UI; it would be a page that can call every route as the logged-in user: start
+runs with any task and any worktree, read every run's configuration, cancel work, and (BR-11) write
+turns into any log as `emil`. And it would keep doing it on **every future visit**, long after the run
+that planted it.
+
+**Fix.** Make the guarantee explicit instead of incidental, and put a check on the serving side:
+
+- **State the rule in the write list.** `<uiDir>` is off limits, said where the other write rules are,
+  not left to `dist` being on the read list.
+- **Verify the bundle at startup.** Hash the files when the daemon starts, and serve from memory, or
+  refuse to start when they change underneath. That converts "nothing can write there" into "nothing
+  written there is served", which is the property that actually matters — and it survives the UI build
+  directory being renamed, which is the change most likely to break the accidental guard.
+
+**Test to add.** Start the daemon, replace a file under `uiDir` on disk, and assert the daemon does
+not serve it.
+
+**Careful.** Do not fix this by removing the per-request read and caching at startup only. That breaks
+the dev loop's best property — a UI rebuild landing with no restart — for a problem that hashing
+solves without it.
+
+---
+
 ## Fix these as categories, not instances
 
-Two of the twelve are one shape: **a file in scope that something executes.** BR-2 and BR-4 are both
+Two of the thirteen are one shape: **a file in scope that something executes.** BR-2 and BR-4 are both
 that, and listing extensions will lose. Six rules scale:
 
 **1. Never fail open.** Audit every `catch` that returns the success value. BR-1 is the verified one;
