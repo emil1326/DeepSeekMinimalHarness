@@ -1,0 +1,6 @@
+node_modules
+dist
+package-lock.json
+legacy
+# The spec as Emil wrote it. Reformatting somebody's document is not a favour.
+PLAN.md

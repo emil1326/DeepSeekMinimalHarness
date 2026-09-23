@@ -8,3 +8,12 @@ __pycache__/
 api_key
 .env
 .env.*
+
+# Node workspaces.
+node_modules/
+dist/
+*.tsbuildinfo
+.vite/
+
+# Screenshots taken while looking at the UI.
+.preview-*.png

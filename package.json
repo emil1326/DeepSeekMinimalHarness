@@ -1,0 +1,40 @@
+{
+  "name": "@emilswork/harness",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Emil's DeepSeek Harness: a daemon running sandboxed DeepSeek agents, a CLI that drives it, and a UI to watch them.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "node tools/dev.mjs",
+    "dev:server": "node tools/dev.mjs --no-ui",
+    "build": "npm run build:core && npm run build:worker && npm run build:daemon && npm run build:cli && npm run build:ui",
+    "build:server": "npm run build:core && npm run build:worker && npm run build:daemon && npm run build:cli",
+    "build:core": "npm run build -w @emilswork/harness-core",
+    "build:worker": "npm run build -w @emilswork/harness-worker",
+    "build:daemon": "npm run build -w @emilswork/harness-daemon",
+    "build:cli": "npm run build -w @emilswork/harness-cli",
+    "build:ui": "npm run build -w @emilswork/harness-ui",
+    "typecheck": "tsc -p tsconfig.json && tsc -p packages/ui/tsconfig.json",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run build && npm run test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1",
+    "vitest": "^5.0.1"
+  }
+}

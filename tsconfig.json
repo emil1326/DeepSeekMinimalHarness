@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@emilswork/harness-core": ["packages/core/src/index.ts"],
+      "@emilswork/harness-worker": ["packages/worker/src/index.ts"],
+      "@emilswork/harness-daemon": ["packages/daemon/src/index.ts"]
+    }
+  },
+  "include": [
+    "packages/core/src/**/*.ts",
+    "packages/core/tests/**/*.ts",
+    "packages/worker/src/**/*.ts",
+    "packages/worker/tests/**/*.ts",
+    "packages/daemon/src/**/*.ts",
+    "packages/daemon/tests/**/*.ts",
+    "packages/cli/src/**/*.ts",
+    "packages/cli/tests/**/*.ts",
+    "vitest.config.ts"
+  ]
+}
