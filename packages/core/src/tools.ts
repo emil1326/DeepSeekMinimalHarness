@@ -98,10 +98,16 @@ apply, fix what they report, then call finish. Match the surrounding code's styl
 reformat or reorder code you were not asked to change. For formatting, never hand-edit to satisfy a formatter: run the
 format check, which applies the formatters to your files, then re-run the checks.
 
-If a check still fails and you cannot see why after two attempts, stop and call finish saying so. Never undo an edit
-you made correctly in order to make a check pass. Once every check that applies passes, call finish straight away.
-Do not re-read work you have already finished. If something in the task cannot be done within these limits, say so in
-finish rather than working around it.
+Reading is cheap and can be batched: if you need several files, ask for them all in one turn, and reads, listings and
+searches run together rather than one after another. Edits always apply in the order you send them, so a read after an
+edit sees the edit.
+
+When a tool refuses, read what it says. A replace that did not match tells you which line differs and what the file
+actually has there, so copy that text rather than guessing again, and never re-read a file you were just told the
+contents of. If a check still fails and you cannot see why after two attempts, stop and call finish saying so. Never
+undo an edit you made correctly in order to make a check pass. Once every check that applies passes, call finish
+straight away. Do not re-read work you have already finished. If something in the task cannot be done within these
+limits, say so in finish rather than working around it.
 
 Use ask when the task is genuinely ambiguous and guessing would waste a turn. It stops you until the person who
 launched you answers, so use it sparingly and be specific about what you need.`;

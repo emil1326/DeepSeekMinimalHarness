@@ -157,14 +157,10 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
       return { status: 'finished', summary };
     }
 
-    for (const call of calls) {
+    for (let index = 0; index < calls.length; index += 1) {
+      const call = calls[index] as ToolCall;
       const name = call.function.name;
-      let args: Record<string, unknown> = {};
-      try {
-        args = JSON.parse(call.function.arguments || '{}') as Record<string, unknown>;
-      } catch {
-        args = {};
-      }
+      const args = parseArgs(call);
       emit({ type: 'tool.call', turn, id: call.id, name, args });
 
       if (name === 'finish') {
@@ -194,22 +190,56 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
         continue;
       }
 
-      const outcomeOfTool = await runTool(sandbox, name, args);
+      // Reads are independent of each other, so a model that asks for four
+      // files at once waits for one round trip instead of four. Writes and
+      // checks stay strictly in order: two edits to the same file must land in
+      // the order they were written, and two formatters fighting over one file
+      // is not a speed-up.
+      const batch: ToolCall[] = [call];
+      if (READ_ONLY.has(name)) {
+        for (let next = index + 1; next < calls.length; next += 1) {
+          const candidate = calls[next] as ToolCall;
+          if (!READ_ONLY.has(candidate.function.name)) break;
+          batch.push(candidate);
+        }
+      }
+
+      const outcomes = await Promise.all(
+        batch.map((each) => runTool(sandbox, each.function.name, parseArgs(each))),
+      );
+
       if (control.signal.aborted) return { status: 'cancelled', summary };
-      pushToolResult(messages, call, outcomeOfTool.result);
-      emit({
-        type: 'tool.result',
-        turn,
-        id: call.id,
-        name,
-        ok: outcomeOfTool.ok,
-        result: outcomeOfTool.result,
-      });
+      for (const [at, each] of batch.entries()) {
+        const outcomeOfTool = outcomes[at] as ToolOutcome;
+        pushToolResult(messages, each, outcomeOfTool.result);
+        emit({
+          type: 'tool.result',
+          turn,
+          id: each.id,
+          name: each.function.name,
+          ok: outcomeOfTool.ok,
+          result: outcomeOfTool.result,
+        });
+      }
+      index += batch.length - 1;
     }
   }
 
   emit({ type: 'limit', which: 'turns', detail: `the run used all ${limits.turns} turns` });
   return { status: 'stopped_at_limit', summary };
+}
+
+/** Tools with no side effects, and therefore safe to run several of at once. */
+const READ_ONLY = new Set(['read_file', 'list_dir', 'search']);
+
+/** A tool call's arguments, or an empty object when the model wrote nonsense. */
+function parseArgs(call: ToolCall): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(call.function.arguments || '{}');
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
 }
 
 function pushToolResult(messages: ChatMessage[], call: ToolCall, content: string): void {

@@ -62,6 +62,17 @@ export {
   type ToolSpec,
   type Usage,
 } from './deepseek.js';
+export {
+  closestNames,
+  distance,
+  escapeLiteral,
+  explainAmbiguous,
+  explainMissing,
+  findMatches,
+  findNearMatches,
+  loosePattern,
+  type NearMatch,
+} from './diagnose.js';
 export { SYSTEM_PROMPT, TOOL_NAMES, taskMessage, toolSpecs } from './tools.js';
 export {
   DEFAULT_BASE_URL,

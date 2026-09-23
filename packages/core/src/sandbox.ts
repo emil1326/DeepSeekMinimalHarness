@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ChildProcess } from 'node:child_process';
+import { closestNames, explainAmbiguous, explainMissing } from './diagnose.js';
 import { isInside, matchesGlob, realPath, relNorm, toPosix } from './paths.js';
 import { killTree, resolveExecutable, spawnTool, UnsafeCommandError } from './process.js';
 import type { CheckSpec, Profile } from './profile.js';
@@ -105,6 +106,13 @@ export class Sandbox {
       if (NEVER_WRITE.some((pattern) => this.matches(allowed, pattern))) {
         throw new SandboxRefusal(`refusing to allow ${allowed}: it is on the never-write list`);
       }
+      // A secret name is refused on the way in rather than discovered at write
+      // time, so a task that names one fails before the run instead of four
+      // turns in. `resolve` still refuses it too; this is the earlier door.
+      const name = path.posix.basename(allowed);
+      if (SECRET_NAMES.some((pattern) => this.matches(name, pattern))) {
+        throw new SandboxRefusal(`refusing to allow ${allowed}: it looks like a secret`);
+      }
     }
   }
 
@@ -160,14 +168,59 @@ export class Sandbox {
   // --- the tools ---------------------------------------------------------
 
   readFile(target: string, start = 1, end?: number | null): string {
-    const text = fs.readFileSync(this.resolve(target), 'utf8').replace(/\r\n/g, '\n');
-    const lines = text.split('\n');
+    const full = this.resolve(target);
+    let raw: string;
+    try {
+      raw = fs.readFileSync(full, 'utf8');
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'EISDIR') throw error;
+      // Not a refusal: the sandbox let this through and the path missed. The
+      // message says which path, and what is next to it, because that is the
+      // difference between one turn and three.
+      const hint = this.nearbyHint(target);
+      const failure = new Error(
+        code === 'EISDIR'
+          ? `${toPosix(this.normalise(target))} is a directory; use list_dir.${hint}`
+          : `no such file: ${toPosix(this.normalise(target))}${hint}`,
+      ) as NodeJS.ErrnoException;
+      failure.code = code;
+      throw failure;
+    }
+    const text = raw.includes('\r\n') ? raw.replace(/\r\n/g, '\n') : raw;
     const from = Math.max(1, Math.trunc(start));
-    const to = Math.min(lines.length, end ? Math.trunc(end) : from + READ_LINES - 1);
-    const body: string[] = [];
-    for (let n = from; n <= to; n += 1) body.push(`${n}\t${lines[n - 1] ?? ''}`);
-    const more = to < lines.length ? `\n[${lines.length} lines in all; read more with start/end]` : '';
+    const wanted = end ? Math.max(from, Math.trunc(end)) : from + READ_LINES - 1;
+
+    // Only the window is split. Splitting the whole file would allocate an
+    // array with an entry per line, so reading 40 lines of a 100,000-line file
+    // used to cost 100,000 strings. A read is the tool an agent calls most, and
+    // that was the most expensive thing in it.
+    const window = sliceLines(text, from, wanted);
+    if (window.lines.length === 0) {
+      return `(nothing: line ${from} is past the end; ${toPosix(this.normalise(target))} has ${window.total} lines)`;
+    }
+    const body = window.lines.map((line, index) => `${from + index}\t${line}`);
+    const more =
+      window.last < window.total ? `\n[${window.total} lines in all; read more with start/end]` : '';
     return body.join('\n') + more;
+  }
+
+  /** "did you mean" for a path that was not there, cheap enough to always do. */
+  private nearbyHint(target: string): string {
+    const rel = this.normalise(target);
+    const parent = path.dirname(rel);
+    const wanted = path.basename(rel);
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(this.resolve(parent === '.' ? '.' : parent)).filter((name) => {
+        return !SECRET_NAMES.some((pattern) => this.matches(name, pattern));
+      });
+    } catch {
+      return '';
+    }
+    const close = closestNames(wanted, entries);
+    if (close.length === 0) return '';
+    return `\nthe closest name${close.length === 1 ? '' : 's'} there: ${close.join(', ')}`;
   }
 
   listDir(target = '.'): string {
@@ -184,22 +237,50 @@ export class Sandbox {
   }
 
   search(pattern: string, target = '.'): string {
-    const regex = new RegExp(pattern);
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern);
+    } catch (error) {
+      return `failed: that is not a valid regular expression (${(error as Error).message})`;
+    }
     const base = this.resolve(target);
     const files: string[] = [];
+    const links: string[] = [];
     const walk = (folder: string): void => {
       for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
         // Pruned here, not just refused per file: node_modules is often a
         // junction to a whole dependency tree and target holds gigabytes.
         if (NEVER_READ_DIRS.has(entry.name)) continue;
+        if (SECRET_NAMES.some((deny) => this.matches(entry.name, deny))) continue;
         const child = path.join(folder, entry.name);
-        if (entry.isDirectory()) walk(child);
-        // Symlinked directories are not followed, same as os.walk's default.
-        else if (entry.isFile()) files.push(child);
+        if (entry.isDirectory()) {
+          walk(child);
+          continue;
+        }
+        if (!entry.isFile()) {
+          // A symlink, a socket, a device: `readdir` already told us so, and it
+          // is the only kind of entry whose real path could be somewhere else.
+          // Those few go through the full containment check; the thousands of
+          // ordinary files do not pay for it.
+          if (entry.isSymbolicLink()) links.push(child);
+          continue;
+        }
+        files.push(child);
       }
     };
     if (pathIsDirectory(base)) walk(base);
     else files.push(base);
+
+    // Only the links need resolving, and the answer is cached across them.
+    const allowedLinks = new Set<string>();
+    for (const link of links) {
+      try {
+        allowedLinks.add(this.resolve(toPosix(path.relative(this.root, link))));
+      } catch {
+        // Points outside, carries a denied name, or is broken. Not shown.
+      }
+    }
+    files.push(...allowedLinks);
 
     const hits: string[] = [];
     for (const file of files) {
@@ -212,16 +293,22 @@ export class Sandbox {
       if (size > SEARCH_MAX_BYTES) continue;
       let text: string;
       try {
-        text = fs.readFileSync(this.resolve(toPosix(path.relative(this.root, file))), 'utf8');
+        text = fs.readFileSync(file, 'utf8');
       } catch {
-        // Refused by the sandbox, or unreadable. Either way it is not shown.
+        // Unreadable, or vanished between the walk and the read.
         continue;
       }
-      const lines = text.split(/\r?\n/);
-      for (let n = 1; n <= lines.length; n += 1) {
-        const line = lines[n - 1] ?? '';
-        if (!regex.test(line)) continue;
-        hits.push(`${toPosix(path.relative(this.root, file))}:${n}: ${line.trim().slice(0, 200)}`);
+      const shown = toPosix(path.relative(this.root, file));
+      // Matched against the whole text rather than line by line. Testing each
+      // line meant splitting every file in the tree into an array of lines
+      // first, which for a large repo allocates more than the search reads:
+      // the common case is a pattern that matches nothing, and it was paying
+      // full price for a result of "(no matches)". `m` is what keeps `^` and
+      // `$` meaning start and end of a line, which is what the per-line test
+      // did before.
+      for (const found of eachMatch(text, regex, SEARCH_HITS - hits.length)) {
+        const line = text.slice(found.from, found.to).trim().slice(0, 200);
+        hits.push(`${shown}:${found.line}: ${line}`);
         if (hits.length >= SEARCH_HITS) return `${hits.join('\n')}\n[stopped at ${SEARCH_HITS} hits]`;
       }
     }
@@ -244,7 +331,10 @@ export class Sandbox {
       }
     }
     if (count !== 1) {
-      return `refused: the old text matched ${count} times; it must match exactly once`;
+      // Both of these are named exactly, because a model that knows why it
+      // missed fixes it on the next turn instead of re-reading the file.
+      const shown = toPosix(this.normalise(target));
+      return count === 0 ? explainMissing(shown, text, before) : explainAmbiguous(shown, text, before, count);
     }
     text = text.replace(before, after);
     fs.writeFileSync(full, newline === '\n' ? text : text.replace(/\n/g, newline), 'utf8');
@@ -376,4 +466,84 @@ function pathIsDirectory(target: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * The lines `from`..`to` of `text`, 1-based and inclusive, without splitting the
+ * whole file. `total` counts the same way `split('\n')` would, so a file ending
+ * in a newline still reports the trailing empty line rather than one more.
+ */
+function sliceLines(
+  text: string,
+  from: number,
+  to: number,
+): { lines: string[]; total: number; last: number } {
+  const lines: string[] = [];
+  let line = 1;
+  let start = 0;
+  let at = text.indexOf('\n');
+  for (;;) {
+    const end = at === -1 ? text.length : at;
+    if (line >= from && line <= to) lines.push(text.slice(start, end));
+    if (at === -1) break;
+    if (line >= to) {
+      // Enough lines collected. Count the rest for the total without building
+      // any more strings, so a 40-line read of a 100,000-line file stays cheap.
+      let extra = 0;
+      for (let index = at + 1; index < text.length; index += 1) {
+        if (text[index] === '\n') extra += 1;
+      }
+      return { lines, total: line + extra + 1, last: line };
+    }
+    line += 1;
+    start = at + 1;
+    at = text.indexOf('\n', start);
+  }
+  return { lines, total: line, last: line };
+}
+
+interface FoundMatch {
+  /** 1-based line the match starts on. */
+  line: number;
+  /** Offsets of the whole line, for the snippet. */
+  from: number;
+  to: number;
+}
+
+/**
+ * Every match of `regex` in `text`, with the line it is on, up to `limit`.
+ *
+ * `m` is added so anchors behave as they did when each line was tested on its
+ * own, and the line numbers are tracked incrementally: counting newlines from
+ * the start for each match would be quadratic on a file with many hits.
+ */
+function eachMatch(text: string, regex: RegExp, limit: number): FoundMatch[] {
+  if (limit <= 0) return [];
+  const flags = regex.flags.includes('m') ? regex.flags : `${regex.flags}m`;
+  const scoped = new RegExp(regex.source, flags.includes('g') ? flags : `${flags}g`);
+  const found: FoundMatch[] = [];
+  let cursor = 0;
+  let line = 1;
+  for (;;) {
+    const match = scoped.exec(text);
+    if (match === null) break;
+    const at = match.index;
+    // A pattern that can match nothing would otherwise loop for ever.
+    if (match[0] === '') {
+      scoped.lastIndex += 1;
+      continue;
+    }
+    while (cursor < at) {
+      const newline = text.indexOf('\n', cursor);
+      if (newline === -1 || newline >= at) break;
+      line += 1;
+      cursor = newline + 1;
+    }
+    cursor = at;
+    const lineStart = text.lastIndexOf('\n', at) + 1;
+    const lineEnd = text.indexOf('\n', at);
+    found.push({ line, from: lineStart, to: lineEnd === -1 ? text.length : lineEnd });
+    if (found.length >= limit) break;
+  }
+  return found;
 }

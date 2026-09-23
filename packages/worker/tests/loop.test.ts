@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   DeepSeekClient,
   Sandbox,
@@ -12,6 +12,9 @@ import { createFixture } from './fixture.js';
 
 const fixture = createFixture();
 afterAll(() => fixture.cleanup());
+// Every test starts from the same two files. Without this, one test's edit is
+// the next test's starting state, and the failures look like logic bugs.
+beforeEach(() => fixture.reset());
 
 class TestControl implements LoopControl {
   readonly controller = new AbortController();
@@ -176,7 +179,7 @@ describe('the agent loop', () => {
     );
 
     const results = result.events.filter((event) => event.type === 'tool.result');
-    expect(results[0]?.type === 'tool.result' && results[0].result).toContain('matched 2 times');
+    expect(results[0]?.type === 'tool.result' && results[0].result).toContain('appears 2 times');
     expect(results[1]?.type === 'tool.result' && results[1].result.startsWith('refused')).toBe(true);
     expect(results[2]?.type === 'tool.result' && results[2].result.startsWith('refused')).toBe(true);
     expect(result.status).toBe('finished');
@@ -286,5 +289,127 @@ describe('the agent loop', () => {
     const result = await pending;
     expect(result.status).toBe('cancelled');
     await server.close();
+  });
+});
+
+describe('ordering and batching of tool calls', () => {
+  it('answers a turn of several reads in the order they were asked for', async () => {
+    const control = new TestControl();
+    const result = await drive(
+      [
+        {
+          toolCalls: [
+            { name: 'read_file', args: { path: 'src/a.ts' } },
+            { name: 'read_file', args: { path: 'src/b.ts' } },
+            { name: 'list_dir', args: { path: 'src' } },
+          ],
+        },
+        // A second turn, so the next request carries the tool messages and they
+        // can be checked for order and pairing.
+        { toolCalls: [{ name: 'finish', args: { summary: 'read them all' } }] },
+      ],
+      {},
+      control,
+    );
+
+    const results = result.events.filter((event) => event.type === 'tool.result');
+    expect(results.map((event) => (event.type === 'tool.result' ? event.name : ''))).toEqual([
+      'read_file',
+      'read_file',
+      'list_dir',
+      'finish',
+    ]);
+    // Each result belongs to its own call, not to whichever happened to finish.
+    const reads = results.filter((event) => event.type === 'tool.result' && event.name === 'read_file');
+    expect(reads[0]?.type === 'tool.result' && reads[0].result).toContain('export const a');
+    expect(reads[1]?.type === 'tool.result' && reads[1].result).toContain('export const b');
+
+    // One tool message per call, in the same order, each with the id of the call
+    // it answers: the API pairs them by id, and a mismatch is a 400 from
+    // DeepSeek rather than a wrong answer.
+    const second = messagesOf(result, 1);
+    const toolMessages = second.filter((message) => message.role === 'tool');
+    expect(toolMessages).toHaveLength(3);
+    expect(toolMessages[0]?.content).toContain('export const a');
+    expect(toolMessages[1]?.content).toContain('export const b');
+    expect(toolMessages.map((message) => message.tool_call_id)).toEqual(['call_1_0', 'call_1_1', 'call_1_2']);
+    await result.server.close();
+  });
+
+  it('keeps a write in order with the reads around it', async () => {
+    // The load-bearing case. If a write were batched with the reads, the second
+    // read could come back before the edit and the model would be told the file
+    // still says what it just changed.
+    const control = new TestControl();
+    const result = await drive(
+      [
+        {
+          toolCalls: [
+            { name: 'read_file', args: { path: 'src/a.ts' } },
+            { name: 'replace_in_file', args: { path: 'src/a.ts', old: '= 1', new: '= 5' } },
+            { name: 'read_file', args: { path: 'src/a.ts' } },
+            { name: 'finish', args: { summary: 'changed it' } },
+          ],
+        },
+      ],
+      {},
+      control,
+    );
+
+    const reads = result.events.filter((event) => event.type === 'tool.result' && event.name === 'read_file');
+    expect(reads[0]?.type === 'tool.result' && reads[0].result).toContain('= 1');
+    expect(reads[1]?.type === 'tool.result' && reads[1].result).toContain('= 5');
+    await result.server.close();
+  });
+
+  it('runs two edits to one file in the order they were written', async () => {
+    const control = new TestControl();
+    const result = await drive(
+      [
+        {
+          toolCalls: [
+            { name: 'replace_in_file', args: { path: 'src/a.ts', old: '= 1', new: '= 2' } },
+            { name: 'replace_in_file', args: { path: 'src/a.ts', old: '= 2', new: '= 3' } },
+            { name: 'finish', args: { summary: 'twice' } },
+          ],
+        },
+      ],
+      {},
+      control,
+    );
+
+    const edits = result.events.filter(
+      (event) => event.type === 'tool.result' && event.name === 'replace_in_file',
+    );
+    // The second edit only matches because the first one already landed.
+    expect(edits[0]?.type === 'tool.result' && edits[0].result).toBe('replaced');
+    expect(edits[1]?.type === 'tool.result' && edits[1].result).toBe('replaced');
+    expect(fixture.read('src/a.ts')).toBe('export const a = 3;\n');
+    await result.server.close();
+  });
+
+  it('hands the model a readable reason when a replace misses', async () => {
+    // The point of the diagnostics. This text is in the file with different
+    // indentation, and the result says so rather than just refusing.
+    const control = new TestControl();
+    const result = await drive(
+      [
+        {
+          toolCalls: [
+            { name: 'replace_in_file', args: { path: 'src/a.ts', old: '    export const a = 1;', new: 'x' } },
+            { name: 'finish', args: { summary: 'gave up' } },
+          ],
+        },
+      ],
+      {},
+      control,
+    );
+
+    const first = result.events.find((event) => event.type === 'tool.result');
+    const text = first?.type === 'tool.result' ? first.result : '';
+    expect(text).toContain('whitespace');
+    expect(text).toContain('line 1');
+    expect(text).toContain('export const a = 1;');
+    await result.server.close();
   });
 });

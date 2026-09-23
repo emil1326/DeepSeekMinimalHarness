@@ -35,6 +35,19 @@ npm run build
 
 The key lives in `~/.deepseek/api_key`. Just the key, nothing else.
 
+## Working on it
+
+```
+npm run dev
+```
+
+Rebuilds on save, restarts the daemon when its code changes, and serves the UI
+with hot reload on `http://localhost:5173`. It takes over your real daemon, so it
+interrupts whatever was running; `-- --home X` gives it one of its own instead.
+A save in the UI is instant, a save in the daemon's code is about a second, and
+both beat the 14 seconds of running `npm run build:server` by hand. How it works
+and what it gets wrong is in `docs/dev.md`.
+
 ## Using it
 
 A task is a JSON file:
@@ -134,7 +147,10 @@ packages/cli      the dsh command
 packages/ui       the React front end
 profiles/         the check profiles (outside any worktree)
 legacy/           dsx.py and its tests, kept until the port passed them
+tools/dev.mjs     the dev loop
+tools/preview.mjs a scripted run to look at the UI with
 docs/api.md       the daemon's API
+docs/dev.md       the dev loop, and what it restarts
 PLAN.md           what this was meant to be, and whether it got there
 ```
 

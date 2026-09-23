@@ -20,6 +20,8 @@ export interface Fixture {
   /** The path of a freshly written task file, for the daemon, which reads it itself. */
   taskPath(name: string, task: Record<string, unknown>): string;
   writeTask(name: string, task: Record<string, unknown>): ResolvedRunConfig;
+  /** Puts the two files back as they were, so one test cannot lean on another. */
+  reset(): void;
   read(relative: string): string;
   cleanup(): void;
 }
@@ -32,8 +34,11 @@ export function createFixture(): Fixture {
   // before git is asked to work in it.
   fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
   git(repo, ['init', '-q']);
-  fs.writeFileSync(path.join(repo, 'src', 'a.ts'), 'export const a = 1;\n');
-  fs.writeFileSync(path.join(repo, 'src', 'b.ts'), 'export const b = 2;\n');
+  const reset = (): void => {
+    fs.writeFileSync(path.join(repo, 'src', 'a.ts'), 'export const a = 1;\n');
+    fs.writeFileSync(path.join(repo, 'src', 'b.ts'), 'export const b = 2;\n');
+  };
+  reset();
   git(repo, ['add', '-A']);
   git(repo, ['commit', '-q', '-m', 'start']);
 
@@ -58,6 +63,7 @@ export function createFixture(): Fixture {
     base,
     repo,
     profile,
+    reset,
     taskPath(name, task) {
       const file = path.join(base, `${name}.json`);
       fs.writeFileSync(

@@ -13,7 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   IS_WINDOWS,
   Sandbox,
@@ -166,12 +166,32 @@ async function runSuite(normalise?: (value: string) => string): Promise<Map<stri
     'package.json',
     'tsconfig.json',
     'scripts/run.ps1',
+    // Secret names are refused on the way in, not discovered at write time.
+    // Two of these are dot-dependent, so the control covers them as well.
+    '.env',
+    'src/.env.local',
+    'keys/id_rsa.key',
+    'api_key',
+    'src/secret-notes.txt',
+    'credentials.json',
   ]) {
+    // `normalise` is passed through, so these take part in the control too.
+    // Without it they would keep passing with the bug reinstated, and a guard
+    // the control cannot see is a guard the control does not cover.
     note(
       `allowing ${bad} is refused`,
-      refused(() => new Sandbox({ root: repo, allow: [bad], profile: PROFILE })),
+      refused(
+        () =>
+          new Sandbox({ root: repo, allow: [bad], profile: PROFILE, ...(normalise ? { normalise } : {}) }),
+      ),
     );
   }
+
+  // The control for the allow list: an ordinary name is not refused.
+  note(
+    'allowing an ordinary file is fine',
+    !refused(() => new Sandbox({ root: repo, allow: ['src/d.ts'], profile: PROFILE })),
+  );
 
   // A check process must not inherit the key or any session token.
   process.env.DEEPSEEK_TEST_KEY = 'leak';
@@ -227,11 +247,156 @@ describe('the sandbox', () => {
       .filter(([, ok]) => !ok)
       .map(([label]) => label)
       .sort();
+    // Everything the bug can reach, and nothing else. The bug only eats a
+    // *leading* dot, so `.env` and `.github/...` fall through while
+    // `src/.env.local` and `keys/x.key` do not: those never started with a dot,
+    // and listing them here would be claiming coverage the control does not have.
     expect(failed).toEqual(
-      ['.env is not shown', './.git is not shown either', '.git is not shown', '../ cannot escape'].sort(),
+      [
+        '.env is not shown',
+        './.git is not shown either',
+        '.git is not shown',
+        '../ cannot escape',
+        'allowing .env is refused',
+        'allowing .github/workflows/ci.yml is refused',
+      ].sort(),
     );
-    // And the suite really does cover more than those four.
-    expect(results.size).toBeGreaterThan(25);
+    // And the suite really does cover more than those six.
+    expect(results.size).toBeGreaterThan(30);
+  });
+});
+
+describe('the sandbox, hardened further', () => {
+  // Its own file with known content. The ported suite above mutates `src/a.ts`
+  // (it rewrites `= 1` to `= 3`), so reusing it here would make these tests
+  // depend on the order the describes happen to run in.
+  const TARGET = 'src/hardened.ts';
+  const CONTENT = ['export const a = 1;', 'export const b = 2;', ''].join('\n');
+  const reset = (): void => {
+    fs.writeFileSync(path.join(repo, TARGET), CONTENT);
+  };
+  const box = (allow: string[] = [TARGET]): Sandbox => new Sandbox({ root: repo, allow, profile: PROFILE });
+
+  beforeEach(() => reset());
+
+  it('refuses a file symlink that points outside the worktree, in a search', () => {
+    // This is the control for the search fast path. Search no longer resolves
+    // every file, because `readdir` already says which ones are links and only
+    // those can point somewhere else. If that reasoning is wrong, this fails.
+    const link = path.join(repo, 'src', 'leak.txt');
+    try {
+      fs.symlinkSync(outside, link, 'file');
+    } catch {
+      // No permission to make links here; the junction test covers the same rule.
+      return;
+    }
+    try {
+      expect(box().search('not yours')).not.toContain('not yours');
+      expect(box().listDir('src')).toContain('leak.txt');
+      // And reading it directly is still refused, so the two agree.
+      expect(refused(() => box().readFile('src/leak.txt'))).toBe(true);
+    } finally {
+      fs.rmSync(link, { force: true });
+    }
+  });
+
+  it('does not follow a symlinked directory in a search', () => {
+    const link = path.join(repo, 'src', 'esc-dir');
+    try {
+      fs.symlinkSync(outsideDir, link, IS_WINDOWS ? 'junction' : 'dir');
+    } catch {
+      return;
+    }
+    try {
+      expect(box().search('OUTSIDE_MARKER')).not.toContain('OUTSIDE_MARKER');
+    } finally {
+      fs.rmSync(link, { force: true });
+    }
+  });
+
+  it('reports a pattern that is not a regular expression instead of throwing', () => {
+    const message = box().search('([unclosed', 'src');
+    expect(message.startsWith('failed:')).toBe(true);
+    expect(message).toContain('not a valid regular expression');
+  });
+
+  it('says a directory is a directory rather than failing obscurely', () => {
+    let message = '';
+    try {
+      box().readFile('src');
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('is a directory');
+    expect(message).toContain('list_dir');
+  });
+
+  it('suggests a close name when a read misses', () => {
+    let message = '';
+    try {
+      box().readFile('src/hardened.tsx');
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('no such file');
+    expect(message).toContain('hardened.ts');
+  });
+
+  it('keeps a missing file a miss rather than a refusal', () => {
+    // Load-bearing: if a missing file were a refusal, the lstrip bug could hide
+    // behind it, which is exactly how it hid in the prototype.
+    expect(refused(() => box().readFile('src/nothing-here.ts'))).toBe(false);
+  });
+
+  it('says so when a read starts past the end of the file', () => {
+    const message = box().readFile(TARGET, 900);
+    expect(message).toContain('past the end');
+    expect(message).toContain('3 lines');
+  });
+
+  it('refuses to allow a secret name before the run starts', () => {
+    expect(refused(() => new Sandbox({ root: repo, allow: ['.env'], profile: PROFILE }))).toBe(true);
+    expect(refused(() => new Sandbox({ root: repo, allow: ['src/../.env'], profile: PROFILE }))).toBe(true);
+    expect(refused(() => new Sandbox({ root: repo, allow: ['keys/x.key'], profile: PROFILE }))).toBe(true);
+  });
+
+  it('has a second door: a secret name forced into the allow set is refused at write time', () => {
+    // The constructor is the first door. This reaches past it, the way a future
+    // refactor might, and insists `resolve` still refuses on its own. A guard
+    // with only one door is one careless change away from being no guard.
+    const forced = new Sandbox({ root: repo, allow: [TARGET], profile: PROFILE });
+    (forced as unknown as { allow: Set<string> }).allow.add('.env');
+    expect(refused(() => forced.createFile('.env', 'x'))).toBe(true);
+    expect(refused(() => forced.replaceInFile('.env', 'TOKEN', 'x'))).toBe(true);
+    expect(refused(() => forced.readFile('.env'))).toBe(true);
+  });
+
+  it('explains a miss with the line and the text the file actually has', () => {
+    const result = box().replaceInFile(TARGET, '    export const a = 1;', 'x');
+    expect(result).toContain('whitespace');
+    expect(result).toContain('export const a = 1;');
+    expect(result).toContain('line 1');
+  });
+
+  it('says which line of a replacement is wrong when nothing matches', () => {
+    const result = box().replaceInFile(TARGET, 'export const a = 1;\nexport const b = 9;', 'x');
+    expect(result).toContain('Line 2 of what you sent');
+    expect(result).toContain('b = 9');
+  });
+
+  it('lists the lines when the old text is ambiguous', () => {
+    fs.writeFileSync(path.join(repo, 'src', 'd.ts'), 'const k = 1;\nconst k = 1;\n');
+    const withD = new Sandbox({ root: repo, allow: ['src/d.ts'], profile: PROFILE });
+    const result = withD.replaceInFile('src/d.ts', 'const k = 1;', 'x');
+    expect(result).toContain('appears 2 times');
+    expect(result).toContain('Lines 1, 2');
+  });
+
+  it('leaves the file untouched when it refuses', () => {
+    // A refusal that half-applied would be worse than either outcome.
+    box().replaceInFile(TARGET, 'export const b = 9;', 'x');
+    box().createFile(TARGET, 'overwritten');
+    expect(fs.readFileSync(path.join(repo, TARGET), 'utf8')).toBe(CONTENT);
   });
 });
 
