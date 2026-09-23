@@ -65,6 +65,15 @@ export type RunEventBody =
   | { type: 'metrics'; turn: number; call: CallMetrics; totals: RunTotals }
   | { type: 'summary'; text: string }
   /**
+   * A model call was refused with something worth trying again, and is waiting.
+   *
+   * Without this a `429` or a `503` looks like the model thinking for eight
+   * seconds: the run just sits there, `dsh list` shows a run that has not moved,
+   * and the eventual stall is indistinguishable from a slow model. The client
+   * has had an `onRetry` hook all along; nothing was listening to it.
+   */
+  | { type: 'retry'; turn: number; attempt: number; status: number; waitMs: number }
+  /**
    * The message list was shortened to fit the model's window.
    *
    * Worth an event of its own: the model's view of the conversation changed, so

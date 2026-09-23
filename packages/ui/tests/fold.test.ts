@@ -186,6 +186,29 @@ describe('folding the event log', () => {
     expect(notes[2]).toMatchObject({ tone: 'bad', text: 'DeepSeek answered 503' });
   });
 
+  it('explains a retry while it is happening, so a stall is not a mystery', () => {
+    // Without this the run just sits there for up to eight seconds and there is
+    // nothing anywhere to say why. A rate limit during a wide sweep is the
+    // normal case, not the rare one.
+    const blocks = fold([
+      event({ type: 'turn.start', turn: 3 }),
+      event({ type: 'retry', turn: 3, attempt: 1, status: 429, waitMs: 900 }),
+    ]);
+    const note = blocks.find((block) => block.kind === 'note');
+    if (note?.kind !== 'note') throw new Error('unreachable');
+    expect(note.tone).toBe('warn');
+    expect(note.text).toBe('the model answered 429; trying again in 0.9s (attempt 1)');
+  });
+
+  it('says "could not be reached" when there was no answer to quote', () => {
+    // A status of 0 is a network failure: the request never got a reply, so
+    // printing "answered 0" would be inventing one.
+    const blocks = fold([event({ type: 'retry', turn: 1, attempt: 2, status: 0, waitMs: 1600 })]);
+    const note = blocks.find((block) => block.kind === 'note');
+    if (note?.kind !== 'note') throw new Error('unreachable');
+    expect(note.text).toBe('the model could not be reached; trying again in 1.6s (attempt 2)');
+  });
+
   it('reports the loudest thing, or nothing once there is a summary', () => {
     expect(lastNote([event({ type: 'stray', files: ['a.ts'] })])).toContain('a.ts');
     expect(lastNote([event({ type: 'error', message: 'boom' })])).toBe('boom');

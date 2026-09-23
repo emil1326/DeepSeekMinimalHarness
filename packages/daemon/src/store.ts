@@ -170,6 +170,25 @@ export class Store {
     this.db.prepare('UPDATE runs SET detail = ? WHERE id = ?').run(text, runId);
   }
 
+  /**
+   * Keep a running run's progress in the row, not just in the supervisor.
+   *
+   * Found live: `list`, `show` and the UI read the row, and the row was only
+   * written when a `status` event arrived. A normal run emits `status: running`
+   * once at the start and nothing again until it ends, so a run that was 44
+   * turns deep and 200,000 prompt tokens in still reported 0 turns and 0 tokens
+   * to every one of those readers, and reported the real figures only once it
+   * had finished and there was nothing left to watch.
+   *
+   * Called once per turn from the metrics event, so the cost is one small UPDATE
+   * per model call, against a model call that takes most of a second.
+   */
+  progress(runId: string, turns: number, totals: RunTotals): void {
+    this.db
+      .prepare('UPDATE runs SET turns = ?, totals_json = ? WHERE id = ?')
+      .run(turns, JSON.stringify(totals), runId);
+  }
+
   getRun(runId: string): RunDetail | null {
     const row = this.row(runId);
     if (row === null) return null;

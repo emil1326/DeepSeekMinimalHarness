@@ -153,7 +153,13 @@ export class Supervisor {
       const body = raw.body;
       this.append(runId, body, raw.at);
       if (body.type === 'turn.start') state.turns = Math.max(state.turns, body.turn);
-      if (body.type === 'metrics') state.totals = body.totals;
+      if (body.type === 'metrics') {
+        state.totals = body.totals;
+        // Written through to the row as well as kept in hand, so a reader of the
+        // row sees progress while the run is still going. See `Store.progress`.
+        this.store.progress(runId, state.turns, state.totals);
+        this.onRunChange?.(runId);
+      }
       if (body.type === 'question') state.pending.push(body.id);
       if (body.type === 'answer') state.pending = state.pending.filter((id) => id !== body.id);
       if (body.type === 'stray') {

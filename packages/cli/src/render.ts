@@ -78,6 +78,14 @@ export class Renderer {
       case 'metrics':
         this.write(`${paint(this.options.color, 'dim', metricsLine(event.call, event.totals))}\n`);
         break;
+      case 'retry':
+        // Said before the wait, so a stall is explained while it is happening
+        // rather than discovered afterwards. A status of 0 is a network error,
+        // which never reached the API and so has no code to print.
+        this.write(
+          `${this.colour('yellow', event.status === 0 ? 'network error,' : `${event.status},`)} retrying in ${(event.waitMs / 1000).toFixed(1)}s (attempt ${event.attempt})\n`,
+        );
+        break;
       case 'summary':
         this.write(`\n${paint(this.options.color, 'bold', '--- summary ---')}\n${event.text}\n`);
         break;

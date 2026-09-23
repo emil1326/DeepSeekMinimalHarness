@@ -163,6 +163,49 @@ describe('the daemon', () => {
     expect(metrics?.type === 'metrics' && metrics.call.promptTokens).toBeGreaterThan(0);
   });
 
+  it("reports a run's progress while it is still running, not only once it stops", async () => {
+    // Found live. `state.turns` and `state.totals` were kept in the supervisor
+    // and written to the row only when a `status` event arrived, which for a
+    // normal run is once at the start. A run that was 44 turns and 200,000
+    // prompt tokens deep reported 0 and 0 to `dsh list`, `dsh show` and the UI,
+    // and reported the real numbers only once it had finished, when there was
+    // nothing left to watch. The second turn is deliberately slow, so the run is
+    // still going when the row is read.
+    daemon = await startTestDaemon([
+      { toolCalls: [{ name: 'list_dir', args: { path: '.' } }], completionTokens: 40 },
+      { text: 'still thinking about it', delayMs: 4000 },
+    ]);
+    const taskPath = daemon.fixture.taskPath('progress', {});
+    const created = await daemon.request('POST', '/runs', { body: { taskPath } });
+    const runId = String(created.body.id);
+
+    // POST queues the run and an attach is what starts it, so the socket has to
+    // be held open for the run to be live while the row is read.
+    const socket = daemon.attach(runId);
+    await new Promise<void>((resolve) => socket.once('open', () => resolve()));
+
+    type Row = { status: string; turns: number; totals: { completionTokens: number } };
+    const deadline = Date.now() + 15_000;
+    let seen: Row | null = null;
+    while (Date.now() < deadline) {
+      const detail = await daemon.request('GET', `/runs/${runId}`);
+      const row = detail.body as unknown as Row;
+      if (row.turns > 0) {
+        seen = row;
+        break;
+      }
+      await delay(30);
+    }
+    socket.close();
+
+    expect(seen).not.toBeNull();
+    if (seen === null) throw new Error('unreachable');
+    // The point: progress is readable while the run is still going.
+    expect(seen.status).toBe('running');
+    expect(seen.turns).toBeGreaterThanOrEqual(1);
+    expect(seen.totals.completionTokens).toBeGreaterThan(0);
+  });
+
   it('refuses a task whose profile is inside the worktree', async () => {
     daemon = await startTestDaemon(ONE_EDIT);
     const insideProfile = path.join(daemon.fixture.repo, 'profile.json');

@@ -179,6 +179,11 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
         signal: control.signal,
         onText: (delta) => buffer.push(delta),
         onReasoning: (delta) => thoughts.push(delta),
+        // A 429 or a 503 costs up to eight seconds of waiting before the next
+        // attempt, and until this existed nothing at all recorded it: the run
+        // simply sat there, and the stall was indistinguishable from a slow
+        // model. The client had the hook; nothing was listening.
+        onRetry: (info) => emit({ type: 'retry', turn, ...info }),
       });
     } catch (error) {
       buffer.drain();

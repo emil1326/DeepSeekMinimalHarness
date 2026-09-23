@@ -138,6 +138,21 @@ export function fold(events: RunEvent[]): Block[] {
         openText = null;
         blocks.push({ kind: 'summary', key, text: event.text });
         break;
+      case 'retry':
+        // Explained while it is happening, because the alternative is a run that
+        // looks stalled. Sentence style rather than the CLI's terse one: this is
+        // read by someone wondering whether the harness has died.
+        openText = null;
+        blocks.push({
+          kind: 'note',
+          key,
+          tone: 'warn',
+          text:
+            event.status === 0
+              ? `the model could not be reached; trying again in ${(event.waitMs / 1000).toFixed(1)}s (attempt ${event.attempt})`
+              : `the model answered ${event.status}; trying again in ${(event.waitMs / 1000).toFixed(1)}s (attempt ${event.attempt})`,
+        });
+        break;
       case 'context':
         // The model's view of the conversation changed. Worth a line, because
         // it is the difference between "it forgot" and "it never knew".

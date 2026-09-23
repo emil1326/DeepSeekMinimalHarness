@@ -287,6 +287,46 @@ describe('the agent loop', () => {
     await result.server.close();
   });
 
+  it('says a rate limit out loud instead of silently stalling', async () => {
+    // Found live. The client had an `onRetry` hook and the worker never wired it
+    // up, so a 429 cost up to eight seconds of backoff with nothing recorded
+    // anywhere: the run just sat there, and the stall was indistinguishable from
+    // the model being slow. A 429 is exactly what a wide sweep does.
+    const control = new TestControl();
+    const result = await drive(
+      [{ status: 429 }, { toolCalls: [{ name: 'finish', args: { summary: 'survived a 429' } }] }],
+      {},
+      control,
+    );
+
+    expect(result.status).toBe('finished');
+    const retries = result.events.filter((event) => event.type === 'retry');
+    expect(retries).toHaveLength(1);
+    const first = retries[0];
+    if (first?.type !== 'retry') throw new Error('unreachable');
+    expect(first.status).toBe(429);
+    expect(first.attempt).toBe(1);
+    expect(first.waitMs).toBeGreaterThanOrEqual(400);
+    // The turn it happened in, so the notice lands in the right place.
+    expect(first.turn).toBe(1);
+    // And the run really did retry rather than the first attempt being used.
+    expect(result.requests.length).toBeGreaterThanOrEqual(2);
+    await result.server.close();
+  });
+
+  it('does not invent a retry notice for a run that never retried', async () => {
+    // The control. A notice on every run would train a reader to ignore it, and
+    // would make the cost of a clean run look worse than it is.
+    const control = new TestControl();
+    const result = await drive(
+      [{ toolCalls: [{ name: 'finish', args: { summary: 'clean' } }] }],
+      {},
+      control,
+    );
+    expect(result.events.filter((event) => event.type === 'retry')).toHaveLength(0);
+    await result.server.close();
+  });
+
   it('cancels mid-stream and reports cancelled', async () => {
     const control = new TestControl();
     const server = await startFakeDeepSeek([{ text: 'never mind', delayMs: 5000, tokenDelayMs: 200 }]);

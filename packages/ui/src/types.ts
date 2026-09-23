@@ -67,6 +67,7 @@ export type RunEventBody =
   | { type: 'message'; by: Speaker; text: string }
   | { type: 'metrics'; turn: number; call: CallMetrics; totals: RunTotals }
   | { type: 'summary'; text: string }
+  | { type: 'retry'; turn: number; attempt: number; status: number; waitMs: number }
   | {
       type: 'context';
       turn: number;

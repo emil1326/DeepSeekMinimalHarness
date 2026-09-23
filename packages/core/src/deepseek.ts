@@ -52,6 +52,13 @@ export interface StreamRequest {
   /** Aborted the instant a run is cancelled. */
   signal?: AbortSignal;
   temperature?: number;
+  /**
+   * A retryable refusal arrived and the client is about to wait and try again.
+   *
+   * Per call rather than per client, next to `onText`, because the caller is the
+   * one that knows which turn this is.
+   */
+  onRetry?: (info: { attempt: number; status: number; waitMs: number }) => void;
   /** The answer, as it streams. */
   onText?: (delta: string) => void;
   /** The model thinking, as it streams. Arrives before the answer. */
@@ -82,7 +89,6 @@ export interface DeepSeekOptions {
   baseUrl?: string;
   requestTimeoutMs?: number;
   maxRetries?: number;
-  onRetry?: (info: { attempt: number; status: number; waitMs: number }) => void;
 }
 
 const RETRYABLE_STATUS = (status: number): boolean => status === 429 || status === 408 || status >= 500;
@@ -100,14 +106,12 @@ export class DeepSeekClient {
   private readonly apiKey: string;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
-  private readonly onRetry: DeepSeekOptions['onRetry'];
 
   constructor(options: DeepSeekOptions) {
     this.apiKey = options.apiKey;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
     this.timeoutMs = options.requestTimeoutMs ?? 15 * 60 * 1000;
     this.maxRetries = options.maxRetries ?? 3;
-    this.onRetry = options.onRetry;
   }
 
   async stream(request: StreamRequest): Promise<StreamOutcome> {
@@ -120,7 +124,9 @@ export class DeepSeekClient {
         if (!retryable || attempt >= this.maxRetries || request.signal?.aborted) throw error;
         const status = error instanceof DeepSeekError ? error.status : 0;
         const waitMs = Math.min(8000, 400 * 2 ** attempt) + Math.floor(Math.random() * 250);
-        this.onRetry?.({ attempt: attempt + 1, status, waitMs });
+        // Told before the wait, not after, so a reader sees the stall coming
+        // rather than being told about it once it is over.
+        request.onRetry?.({ attempt: attempt + 1, status, waitMs });
         await sleep(waitMs, request.signal);
         attempt += 1;
       }

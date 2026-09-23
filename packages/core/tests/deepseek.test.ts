@@ -151,17 +151,44 @@ describe('the DeepSeek client', () => {
     const server = await startFakeDeepSeek([{ status: 429 }, { status: 429 }, { text: 'third time lucky' }]);
     try {
       const retries: number[] = [];
-      const client = new DeepSeekClient({
-        apiKey: key,
-        baseUrl: server.url,
-        onRetry: (info) => retries.push(info.status),
-      });
+      const client = new DeepSeekClient({ apiKey: key, baseUrl: server.url });
       const outcome = await client.stream({
         model: 'deepseek-flash',
         messages: [{ role: 'user', content: 'go' }],
+        // Per call, next to onText, because the caller is the one that knows
+        // which turn is being retried.
+        onRetry: (info) => retries.push(info.status),
       });
       expect(outcome.message.content).toBe('third time lucky');
       expect(retries).toEqual([429, 429]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it('says how long it will wait, before it waits', async () => {
+    // The point of the hook is to explain a stall while it is happening, so the
+    // wait has to be reported before the sleep rather than after it.
+    const server = await startFakeDeepSeek([{ status: 429 }, { text: 'ok' }]);
+    try {
+      const waits: number[] = [];
+      const seen: string[] = [];
+      const client = new DeepSeekClient({ apiKey: key, baseUrl: server.url });
+      const outcome = await client.stream({
+        model: 'deepseek-flash',
+        messages: [{ role: 'user', content: 'go' }],
+        onRetry: (info) => {
+          waits.push(info.waitMs);
+          seen.push(`waiting ${info.waitMs}ms`);
+        },
+        onText: () => seen.push('text arrived'),
+      });
+      expect(outcome.message.content).toBe('ok');
+      // One retry, with a real wait, and the wait came first.
+      expect(waits).toHaveLength(1);
+      expect(waits[0] ?? 0).toBeGreaterThanOrEqual(400);
+      expect(seen[0]).toBe(`waiting ${waits[0] ?? 0}ms`);
+      expect(seen).toContain('text arrived');
     } finally {
       await server.close();
     }
