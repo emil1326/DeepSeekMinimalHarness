@@ -64,7 +64,25 @@ export type RunEventBody =
   | { type: 'message'; by: Speaker; text: string }
   | { type: 'metrics'; turn: number; call: CallMetrics; totals: RunTotals }
   | { type: 'summary'; text: string }
-  | { type: 'limit'; which: 'turns' | 'wallSeconds' | 'outputTokens' | 'askSeconds'; detail: string }
+  /**
+   * The message list was shortened to fit the model's window.
+   *
+   * Worth an event of its own: the model's view of the conversation changed, so
+   * a reader deciding whether to trust the answer needs to know it happened.
+   */
+  | {
+      type: 'context';
+      turn: number;
+      dropped: number;
+      subjects: string[];
+      tokensBefore: number;
+      tokensAfter: number;
+    }
+  | {
+      type: 'limit';
+      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'askSeconds';
+      detail: string;
+    }
   | { type: 'stray'; files: string[] }
   | { type: 'error'; message: string };
 

@@ -22,8 +22,9 @@ export default tseslint.config(
     },
   },
   {
-    // The preview script is plain Node, not TypeScript, so it needs its globals.
-    files: ['tools/**/*.mjs'],
+    // The preview script and the probe rig are plain Node, not TypeScript, so
+    // they need their globals.
+    files: ['tools/**/*.mjs', 'probes/**/*.mjs'],
     languageOptions: {
       ecmaVersion: 2023,
       sourceType: 'module',
@@ -33,6 +34,7 @@ export default tseslint.config(
         fetch: 'readonly',
         URL: 'readonly',
         TextDecoder: 'readonly',
+        AbortSignal: 'readonly',
         performance: 'readonly',
         setTimeout: 'readonly',
         setInterval: 'readonly',

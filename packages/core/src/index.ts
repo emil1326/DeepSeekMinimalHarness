@@ -75,6 +75,15 @@ export {
   loosePattern,
   type NearMatch,
 } from './diagnose.js';
+export {
+  CHARS_PER_TOKEN,
+  compact,
+  estimateTokens,
+  largestToolResult,
+  type CompactOptions,
+  type CompactResult,
+  type Elision,
+} from './context.js';
 export { SYSTEM_PROMPT, TOOL_NAMES, taskMessage, toolSpecs } from './tools.js';
 export {
   DEFAULT_BASE_URL,

@@ -67,7 +67,19 @@ export type RunEventBody =
   | { type: 'message'; by: Speaker; text: string }
   | { type: 'metrics'; turn: number; call: CallMetrics; totals: RunTotals }
   | { type: 'summary'; text: string }
-  | { type: 'limit'; which: 'turns' | 'wallSeconds' | 'outputTokens' | 'askSeconds'; detail: string }
+  | {
+      type: 'context';
+      turn: number;
+      dropped: number;
+      subjects: string[];
+      tokensBefore: number;
+      tokensAfter: number;
+    }
+  | {
+      type: 'limit';
+      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'askSeconds';
+      detail: string;
+    }
   | { type: 'stray'; files: string[] }
   | { type: 'error'; message: string };
 

@@ -81,6 +81,14 @@ export class Renderer {
       case 'summary':
         this.write(`\n${paint(this.options.color, 'bold', '--- summary ---')}\n${event.text}\n`);
         break;
+      case 'context':
+        // The model's view of the conversation just changed. Say so, and say
+        // what went, so a reader can tell whether the answer still has its
+        // bearings.
+        this.write(
+          `${this.colour('yellow', 'context trimmed:')} dropped ${event.dropped} earlier result${event.dropped === 1 ? '' : 's'} to fit the window (${event.subjects.join(', ')})\n`,
+        );
+        break;
       case 'limit':
         this.write(`${this.colour('yellow', `stopped at the ${event.which} limit:`)} ${event.detail}\n`);
         break;

@@ -138,6 +138,17 @@ export function fold(events: RunEvent[]): Block[] {
         openText = null;
         blocks.push({ kind: 'summary', key, text: event.text });
         break;
+      case 'context':
+        // The model's view of the conversation changed. Worth a line, because
+        // it is the difference between "it forgot" and "it never knew".
+        openText = null;
+        blocks.push({
+          kind: 'note',
+          key,
+          tone: 'info',
+          text: `forgot ${event.dropped} earlier result${event.dropped === 1 ? '' : 's'} to fit the window: ${event.subjects.join(', ')}`,
+        });
+        break;
       case 'limit':
         openText = null;
         blocks.push({

@@ -5,6 +5,7 @@ import {
   SandboxRefusal,
   SYSTEM_PROMPT,
   TOOL_NAMES,
+  compact,
   emptyTotals,
   taskMessage,
   totalsOf,
@@ -117,6 +118,15 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
       emit({ type: 'limit', which: 'outputTokens', detail });
       return { status: 'stopped_at_limit', summary };
     }
+    // Prompt plus completion. `outputTokens` above only counts what the model
+    // wrote, so a run that keeps reading large files back into the context is
+    // bounded by nothing else: every turn re-sends the whole conversation.
+    const spent = totals.promptTokens + totals.completionTokens;
+    if (spent >= limits.totalTokens) {
+      const detail = `the run used ${spent} tokens in all, past the ${limits.totalTokens} it may`;
+      emit({ type: 'limit', which: 'totalTokens', detail });
+      return { status: 'stopped_at_limit', summary };
+    }
 
     emit({ type: 'turn.start', turn });
 
@@ -125,6 +135,34 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
     // this only puts it into the conversation.
     for (const message of control.takeMessages()) {
       messages.push({ role: 'user', content: `[${message.by}] ${message.text}` });
+    }
+
+    // The message list grows every turn and every turn re-sends all of it, so
+    // before the request goes out it is shortened to fit. Old tool results are
+    // what gets forgotten, because they can be fetched again. Measured: the
+    // model's ceiling is 1,048,576 tokens and past it the API answers 400, which
+    // is not retryable, so without this the whole run was lost at the point it
+    // needed to forget something instead.
+    const fitted = compact(messages, { budget: limits.contextTokens });
+    if (fitted.impossible) {
+      const detail =
+        `the conversation is ${fitted.tokensAfter} tokens and the budget is ${limits.contextTokens}, ` +
+        `even after dropping every tool result that could be dropped`;
+      emit({ type: 'limit', which: 'contextTokens', detail });
+      return { status: 'stopped_at_limit', summary };
+    }
+    if (fitted.elided.length > 0) {
+      // The model's view changed, so the reader is told. Keep the live list in
+      // step, because the next turn appends to it.
+      messages.splice(0, messages.length, ...fitted.messages);
+      emit({
+        type: 'context',
+        turn,
+        dropped: fitted.elided.length,
+        subjects: fitted.elided.map((elision) => `${elision.name} ${elision.subject}`),
+        tokensBefore: fitted.tokensBefore,
+        tokensAfter: fitted.tokensAfter,
+      });
     }
 
     const buffer = new TextBuffer((text) => emit({ type: 'text.delta', turn, text }));

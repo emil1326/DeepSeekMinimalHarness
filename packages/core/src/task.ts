@@ -13,6 +13,8 @@ export const limitsSchema = z
     turns: z.number().int().positive().optional(),
     wallSeconds: z.number().int().positive().optional(),
     outputTokens: z.number().int().positive().optional(),
+    totalTokens: z.number().int().positive().optional(),
+    contextTokens: z.number().int().positive().optional(),
     askSeconds: z.number().int().positive().optional(),
   })
   .strict();
@@ -37,6 +39,16 @@ export interface RunLimits {
   turns: number;
   wallSeconds: number;
   outputTokens: number;
+  /** Prompt plus completion, in all. The bound on what a run costs. */
+  totalTokens: number;
+  /**
+   * The request budget, well under the model's real ceiling.
+   *
+   * Measured at 1,048,576 tokens, which is the whole window including the reply.
+   * This is deliberately lower: it is the point at which the harness forgets old
+   * tool results rather than sending a request the API will refuse.
+   */
+  contextTokens: number;
   askSeconds: number;
 }
 
@@ -44,6 +56,14 @@ export const DEFAULT_LIMITS: RunLimits = {
   turns: 12,
   wallSeconds: 900,
   outputTokens: 40_000,
+  // Above every per-run figure the catalogue's arms use, so it only fires on a
+  // runaway: `outputTokens` counts what the model wrote, and a tool-using run's
+  // bill is mostly the prompt it reads back every turn, which nothing else caps.
+  totalTokens: 2_000_000,
+  // Below the model's 1,048,576, so there is room for the reply and for the
+  // estimate in `context.ts` being an estimate. Hitting this compacts; it does
+  // not end the run.
+  contextTokens: 700_000,
   askSeconds: 3_600,
 };
 

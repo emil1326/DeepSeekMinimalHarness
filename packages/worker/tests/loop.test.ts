@@ -1,4 +1,6 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DeepSeekClient,
   Sandbox,
@@ -302,6 +304,106 @@ describe('the agent loop', () => {
     const result = await pending;
     expect(result.status).toBe('cancelled');
     await server.close();
+  });
+});
+
+describe('keeping a run inside the model window', () => {
+  /** About 8,900 tokens by the estimate in core, so three cannot share a 12,000 budget. */
+  function writeBigFile(): void {
+    const lines = Array.from({ length: 1200 }, (_, index) => `export const row_${index} = ${index};`);
+    fs.writeFileSync(path.join(fixture.repo, 'src', 'big.ts'), `${lines.join('\n')}\n`);
+  }
+
+  // The big file is written by these tests and is not part of the fixture, so it
+  // is removed again. Left behind, it would show up in another test's directory
+  // listing and read as a failure of something unrelated.
+  afterEach(() => {
+    fs.rmSync(path.join(fixture.repo, 'src', 'big.ts'), { force: true });
+  });
+
+  it('forgets older reads once the conversation would not fit', async () => {
+    writeBigFile();
+    const control = new TestControl();
+    const result = await drive(
+      [
+        { toolCalls: [{ name: 'read_file', args: { path: 'src/big.ts' } }] },
+        { toolCalls: [{ name: 'read_file', args: { path: 'src/big.ts' } }] },
+        { toolCalls: [{ name: 'read_file', args: { path: 'src/big.ts' } }] },
+        { toolCalls: [{ name: 'finish', args: { summary: 'read it three times' } }] },
+      ],
+      { allow: ['src/a.ts', 'src/big.ts'], limits: { contextTokens: 12_000 } },
+      control,
+    );
+
+    expect(result.status).toBe('finished');
+
+    // The event is the point: a reader has to know the model's view changed, or
+    // an answer that contradicts an earlier read looks like a bug in the model.
+    const trimmed = result.events.filter((event) => event.type === 'context');
+    expect(trimmed.length).toBeGreaterThan(0);
+    const first = trimmed[0];
+    if (first?.type !== 'context') throw new Error('unreachable');
+    expect(first.dropped).toBeGreaterThan(0);
+    expect(first.subjects.join(' ')).toContain('big.ts');
+    expect(first.tokensAfter).toBeLessThan(first.tokensBefore);
+
+    // And it actually reached the wire: the last request has a notice in it
+    // where a file's contents used to be.
+    const last = messagesOf(result, result.requests.length - 1);
+    const toolMessages = last.filter((message) => message.role === 'tool');
+    const notices = toolMessages.filter(
+      (message) => typeof message.content === 'string' && message.content.includes('dropped to make room'),
+    );
+    expect(notices.length).toBeGreaterThan(0);
+    // The pairing rule the API enforces: one tool reply per call id, always.
+    const callIds = last.flatMap((message) => (message.tool_calls ?? []).map((call) => call.id));
+    const replyIds = toolMessages.map((message) => message.tool_call_id);
+    expect(replyIds).toEqual(callIds);
+    await result.server.close();
+  });
+
+  it('leaves a conversation that fits exactly as it was', async () => {
+    const control = new TestControl();
+    const result = await drive(
+      [
+        { toolCalls: [{ name: 'read_file', args: { path: 'src/a.ts' } }] },
+        { toolCalls: [{ name: 'read_file', args: { path: 'src/b.ts' } }] },
+        { toolCalls: [{ name: 'finish', args: { summary: 'done' } }] },
+      ],
+      {},
+      control,
+    );
+
+    // Nothing was dropped, so nothing should have been announced. A `context`
+    // event on every run would train the reader to ignore it.
+    expect(result.events.filter((event) => event.type === 'context')).toHaveLength(0);
+    expect(result.status).toBe('finished');
+    await result.server.close();
+  });
+
+  it('stops the run when even a fully trimmed conversation cannot fit', async () => {
+    writeBigFile();
+    const control = new TestControl();
+    const result = await drive(
+      [
+        { toolCalls: [{ name: 'read_file', args: { path: 'src/big.ts' } }] },
+        { toolCalls: [{ name: 'read_file', args: { path: 'src/big.ts' } }] },
+        { toolCalls: [{ name: 'finish', args: { summary: 'never reached' } }] },
+      ],
+      // Below a single read, so there is nothing left to drop that would help.
+      { allow: ['src/a.ts', 'src/big.ts'], limits: { contextTokens: 500 } },
+      control,
+    );
+
+    expect(result.status).toBe('stopped_at_limit');
+    const limit = result.events.find((event) => event.type === 'limit');
+    if (limit?.type !== 'limit') throw new Error('unreachable');
+    expect(limit.which).toBe('contextTokens');
+    expect(limit.detail).toContain('even after dropping every tool result');
+    // Stopping is the point. Letting the request go out would get a 400 back,
+    // which is not retryable, so the run would be lost rather than stopped.
+    expect(result.events.filter((event) => event.type === 'error')).toHaveLength(0);
+    await result.server.close();
   });
 });
 
