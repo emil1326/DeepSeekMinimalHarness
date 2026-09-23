@@ -1,0 +1,416 @@
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { WebSocketServer, type WebSocket } from 'ws';
+import { isTerminal, type PriceTable, type RunEvent, type RunStatus } from '@emilswork/harness-core';
+import { strayChanges } from '@emilswork/harness-worker';
+import type { Auth } from './auth.js';
+import type { Supervisor } from './supervisor.js';
+import { summarise, type Store } from './store.js';
+import type {
+  AnswerBody,
+  ApiErrorBody,
+  CreateRunBody,
+  DiffResponse,
+  MessageBody,
+  RunDetail,
+  RunSummary,
+  StatsResponse,
+} from './protocol.js';
+import { TaskError } from '@emilswork/harness-core';
+
+const HEARTBEAT_MS = 5000;
+const DEAD_AFTER_MS = 15_000;
+const MAX_BODY = 1_000_000;
+
+export interface ServerOptions {
+  store: Store;
+  supervisor: Supervisor;
+  auth: Auth;
+  prices?: PriceTable;
+  /** The built UI, served from the daemon so `dsh ui` is the only way in. */
+  uiDir?: string;
+  /** Called after the reply to `POST /daemon/stop`, so `dsh daemon stop` is clean. */
+  onStop?: () => void;
+}
+
+export interface HarnessServer {
+  port: number;
+  close(): Promise<void>;
+}
+
+export async function startServer(options: ServerOptions): Promise<HarnessServer> {
+  const { store, supervisor, auth } = options;
+  const runSubscribers = new Map<string, Set<WebSocket>>();
+  const noticeSubscribers = new Set<WebSocket>();
+  const heartbeats = new WeakMap<WebSocket, { lastPong: number; runId: string | null }>();
+
+  const listen = (port: number): Promise<http.Server> =>
+    new Promise((resolve) => {
+      const server = http.createServer(handleHttp);
+      server.on('upgrade', handleUpgrade);
+      server.listen(port, '127.0.0.1', () => resolve(server));
+    });
+
+  const httpServer = await listen(0);
+  auth.setPort(portOf(httpServer));
+
+  const wss = new WebSocketServer({ noServer: true });
+
+  const interval = setInterval(() => {
+    const now = Date.now();
+    for (const client of wss.clients) {
+      const info = heartbeats.get(client);
+      if (info === undefined) continue;
+      // A half-open connection: the socket still looks alive, nothing is there.
+      if (now - info.lastPong > DEAD_AFTER_MS) {
+        client.terminate();
+        continue;
+      }
+      client.ping();
+    }
+  }, HEARTBEAT_MS);
+
+  function notify(): void {
+    const payload = JSON.stringify({ type: 'notice', runId: null });
+    for (const client of noticeSubscribers) {
+      if (client.readyState === client.OPEN) client.send(payload);
+    }
+  }
+
+  supervisor.onEvent = (event: RunEvent): void => {
+    const subscribers = runSubscribers.get(event.runId);
+    if (subscribers !== undefined) {
+      const payload = JSON.stringify({ type: 'event', event });
+      for (const client of subscribers) {
+        if (client.readyState === client.OPEN) client.send(payload);
+      }
+    }
+    if (event.type === 'status' && isTerminal(event.status)) {
+      const bye = JSON.stringify({ type: 'bye', status: event.status });
+      for (const client of subscribers ?? []) {
+        if (client.readyState === client.OPEN) client.send(bye);
+      }
+    }
+    notify();
+  };
+  supervisor.onRunChange = (): void => notify();
+
+  function subscribersFor(runId: string): Set<WebSocket> {
+    const existing = runSubscribers.get(runId);
+    if (existing !== undefined) return existing;
+    const created = new Set<WebSocket>();
+    runSubscribers.set(runId, created);
+    return created;
+  }
+
+  function handleUpgrade(
+    request: http.IncomingMessage,
+    socket: import('node:stream').Duplex,
+    head: Buffer,
+  ): void {
+    const refuse = (code: string, message: string): void => {
+      socket.write(`HTTP/1.1 ${code} ${message}\r\nConnection: close\r\n\r\n`);
+      socket.destroy();
+    };
+    if (!auth.checkHost(request.headers.host)) return refuse('403', 'Forbidden');
+    if (!auth.checkOrigin(request.headers.origin)) return refuse('403', 'Forbidden');
+
+    const url = new URL(request.url ?? '/', `http://${request.headers.host ?? '127.0.0.1'}`);
+    const bearer =
+      auth.checkBearer(request.headers.authorization) || auth.checkCookie(request.headers.cookie);
+    const queryToken = url.searchParams.get('token');
+    const authorised = bearer || (queryToken !== null && auth.checkBearer(`Bearer ${queryToken}`));
+    if (!authorised) return refuse('401', 'Unauthorized');
+
+    const attach = /^\/runs\/([^/]+)\/attach$/.exec(url.pathname);
+    const isNotices = url.pathname === '/events';
+    if (attach === null && !isNotices) return refuse('404', 'Not Found');
+
+    wss.handleUpgrade(request, socket, head, (client) => {
+      heartbeats.set(client, { lastPong: Date.now(), runId: attach?.[1] ?? null });
+      client.on('pong', () => {
+        const info = heartbeats.get(client);
+        if (info !== undefined) info.lastPong = Date.now();
+      });
+      client.on('close', () => {
+        const info = heartbeats.get(client);
+        if (info?.runId != null) {
+          runSubscribers.get(info.runId)?.delete(client);
+          supervisor.ownerLost(info.runId);
+        } else {
+          noticeSubscribers.delete(client);
+        }
+      });
+
+      if (isNotices) {
+        noticeSubscribers.add(client);
+        client.send(JSON.stringify({ type: 'notice', runId: null }));
+        return;
+      }
+
+      const runId = attach?.[1] ?? '';
+      void attachRun(client, runId);
+    });
+  }
+
+  async function attachRun(client: WebSocket, runId: string): Promise<void> {
+    const detail = store.getRun(runId);
+    if (detail === null) {
+      client.send(JSON.stringify({ type: 'bye', status: 'failed' }));
+      client.close();
+      return;
+    }
+    subscribersFor(runId).add(client);
+    const events = store.eventsAfter(runId, 0);
+    client.send(
+      JSON.stringify({ type: 'hello', detail: { ...detail, owners: supervisor.ownersOf(runId) }, events }),
+    );
+    if (isTerminal(detail.status)) {
+      client.send(JSON.stringify({ type: 'bye', status: detail.status }));
+      supervisor.ownerAttached(runId);
+      return;
+    }
+    // Attaching is what starts a run that was left queued, and is what ties its
+    // lifetime to this connection.
+    supervisor.ownerAttached(runId);
+  }
+
+  // --- HTTP ---------------------------------------------------------------
+
+  function handleHttp(request: http.IncomingMessage, response: http.ServerResponse): void {
+    const url = new URL(request.url ?? '/', `http://${request.headers.host ?? '127.0.0.1'}`);
+
+    if (!auth.checkHost(request.headers.host) || !auth.checkOrigin(request.headers.origin)) {
+      return send(response, 403, { error: 'this daemon only answers its own host and origin' });
+    }
+
+    // The UI logs in through a one-time ticket, so the token never rides in a URL.
+    if (request.method === 'GET' && url.pathname === '/ui/session') {
+      if (!auth.redeemTicket(url.searchParams.get('ticket'))) {
+        return send(response, 403, { error: 'that ticket is spent or unknown' });
+      }
+      response.writeHead(302, { 'set-cookie': auth.sessionCookie(), location: '/' });
+      response.end();
+      return;
+    }
+
+    const authed =
+      auth.checkBearer(request.headers.authorization) || auth.checkCookie(request.headers.cookie);
+
+    if (request.method === 'GET' && url.pathname.startsWith('/assets')) {
+      return serveStatic(response, url.pathname);
+    }
+    if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
+      return serveStatic(response, '/index.html');
+    }
+
+    if (!authed) {
+      return send(response, 401, { error: 'a bearer token or a session cookie is required' });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/ui/ticket') {
+      return send(response, 200, { ticket: auth.issueTicket() });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/health') {
+      return send(response, 200, { ok: true, pid: process.pid, port: portOf(httpServer) });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/daemon/stop') {
+      send(response, 200, { ok: true });
+      setTimeout(() => options.onStop?.(), 50);
+      return;
+    }
+
+    if (request.method === 'POST' && url.pathname === '/runs') {
+      return void readJson<CreateRunBody>(request)
+        .then((body) => {
+          if (typeof body.taskPath !== 'string' || body.taskPath === '') {
+            return send(response, 400, { error: 'taskPath is required' });
+          }
+          try {
+            const detail = supervisor.createRun(body.taskPath, body.detached === true);
+            return send(response, 201, { id: detail.id, detail });
+          } catch (error) {
+            if (error instanceof TaskError) {
+              return send(response, 400, { error: 'the task file is not valid', problems: error.problems });
+            }
+            return send(response, 400, { error: (error as Error).message });
+          }
+        })
+        .catch((error: Error) => send(response, 400, { error: error.message }));
+    }
+
+    if (request.method === 'GET' && url.pathname === '/runs') {
+      const runs: RunSummary[] = store.listRuns((runId) => supervisor.ownersOf(runId));
+      return send(response, 200, { runs });
+    }
+
+    if (request.method === 'GET' && url.pathname === '/stats') {
+      const stats: StatsResponse = {
+        runs: store.countRuns(),
+        models: summarise(store.allMetrics(), options.prices),
+      };
+      return send(response, 200, stats);
+    }
+
+    const eventsRoute = /^\/runs\/([^/]+)\/events$/.exec(url.pathname);
+    if (request.method === 'GET' && eventsRoute?.[1] !== undefined) {
+      const after = Number(url.searchParams.get('after') ?? '0');
+      const runId = eventsRoute[1];
+      if (store.getRun(runId) === null) return send(response, 404, { error: `no run called ${runId}` });
+      return send(response, 200, { events: store.eventsAfter(runId, Number.isFinite(after) ? after : 0) });
+    }
+
+    const single = /^\/runs\/([^/]+)$/.exec(url.pathname);
+    if (request.method === 'GET' && single?.[1] !== undefined) {
+      const detail = store.getRun(single[1]);
+      if (detail === null) return send(response, 404, { error: `no run called ${single[1]}` });
+      const withOwners: RunDetail = { ...detail, owners: supervisor.ownersOf(detail.id) };
+      return send(response, 200, withOwners);
+    }
+
+    const diffRoute = /^\/runs\/([^/]+)\/diff$/.exec(url.pathname);
+    if (request.method === 'GET' && diffRoute?.[1] !== undefined) {
+      const detail = store.getRun(diffRoute[1]);
+      if (detail === null) return send(response, 404, { error: `no run called ${diffRoute[1]}` });
+      const body: DiffResponse = {
+        diff: gitDiff(detail.worktree),
+        stray: strayChanges(detail.worktree, detail.config.allow),
+      };
+      return send(response, 200, body);
+    }
+
+    const messageRoute = /^\/runs\/([^/]+)\/messages$/.exec(url.pathname);
+    if (request.method === 'POST' && messageRoute?.[1] !== undefined) {
+      return void readJson<MessageBody>(request)
+        .then((body) => {
+          if (typeof body.text !== 'string' || body.text === '') {
+            return send(response, 400, { error: 'text is required' });
+          }
+          supervisor.sendMessage(messageRoute[1] as string, body.text, body.by ?? 'claude');
+          return send(response, 200, { ok: true });
+        })
+        .catch((error: Error) => send(response, 400, { error: error.message }));
+    }
+
+    const answerRoute = /^\/runs\/([^/]+)\/answers$/.exec(url.pathname);
+    if (request.method === 'POST' && answerRoute?.[1] !== undefined) {
+      return void readJson<AnswerBody>(request)
+        .then((body) => {
+          if (typeof body.text !== 'string') return send(response, 400, { error: 'text is required' });
+          try {
+            const id = supervisor.answer(answerRoute[1] as string, body.id, body.text, body.by ?? 'claude');
+            return send(response, 200, { ok: true, id });
+          } catch (error) {
+            return send(response, 409, { error: (error as Error).message });
+          }
+        })
+        .catch((error: Error) => send(response, 400, { error: error.message }));
+    }
+
+    const cancelRoute = /^\/runs\/([^/]+)\/cancel$/.exec(url.pathname);
+    if (request.method === 'POST' && cancelRoute?.[1] !== undefined) {
+      const runId = cancelRoute[1];
+      if (store.getRun(runId) === null) return send(response, 404, { error: `no run called ${runId}` });
+      supervisor.cancel(runId, 'cancelled from the CLI');
+      return send(response, 200, { ok: true });
+    }
+
+    return send(response, 404, { error: `no route for ${request.method ?? 'GET'} ${url.pathname}` });
+  }
+
+  function serveStatic(response: http.ServerResponse, urlPath: string): void {
+    const uiDir = options.uiDir;
+    if (uiDir === undefined || !fs.existsSync(uiDir)) {
+      return send(response, 404, { error: 'the UI is not built; run npm run build:ui' });
+    }
+    const target = path.join(uiDir, urlPath);
+    const inside = path.relative(uiDir, path.resolve(target));
+    if (inside.startsWith('..') || path.isAbsolute(inside)) {
+      return send(response, 403, { error: 'no' });
+    }
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) {
+      const index = path.join(uiDir, 'index.html');
+      if (fs.existsSync(index)) {
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+        return void response.end(fs.readFileSync(index));
+      }
+      return send(response, 404, { error: 'not found' });
+    }
+    response.writeHead(200, { 'content-type': contentType(target) });
+    return void response.end(fs.readFileSync(target));
+  }
+
+  return {
+    port: portOf(httpServer),
+    close: async (): Promise<void> => {
+      clearInterval(interval);
+      for (const client of wss.clients) client.terminate();
+      wss.close();
+      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    },
+  };
+}
+
+function portOf(server: http.Server): number {
+  const address = server.address();
+  return address !== null && typeof address === 'object' ? address.port : 0;
+}
+
+function send(response: http.ServerResponse, status: number, body: unknown): void {
+  const text = JSON.stringify(body);
+  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+  response.end(text);
+}
+
+async function readJson<T>(request: http.IncomingMessage): Promise<T> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const buffer = chunk as Buffer;
+    size += buffer.length;
+    if (size > MAX_BODY) throw new Error('that body is too big');
+    chunks.push(buffer);
+  }
+  if (chunks.length === 0) return {} as T;
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as T;
+}
+
+function gitDiff(worktree: string): string {
+  const run = (args: string[]): string | null => {
+    try {
+      return execFileSync('git', args, { cwd: worktree, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+    } catch {
+      return null;
+    }
+  };
+  const againstHead = run(['diff', 'HEAD']);
+  if (againstHead !== null) return againstHead;
+  return run(['diff']) ?? '';
+}
+
+function contentType(file: string): string {
+  const extension = path.extname(file).toLowerCase();
+  const types: Record<string, string> = {
+    '.html': 'text/html; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.svg': 'image/svg+xml',
+    '.woff2': 'font/woff2',
+    '.png': 'image/png',
+    '.ico': 'image/x-icon',
+    '.map': 'application/json; charset=utf-8',
+  };
+  return types[extension] ?? 'application/octet-stream';
+}
+
+export function defaultUiDir(): string {
+  return fileURLToPath(new URL('./public', import.meta.url));
+}
+
+export type { ApiErrorBody, RunStatus };
