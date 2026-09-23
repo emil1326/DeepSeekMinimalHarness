@@ -40,6 +40,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -267,8 +268,14 @@ def ask(model: str, messages: list[dict], tools: list[dict]) -> dict:
     request.add_header("Authorization", "Bearer " + KEY_FILE.read_text(encoding="utf8").strip())
     request.add_header("Content-Type", "application/json")
     try:
+        started = time.perf_counter()
         with urllib.request.urlopen(request, timeout=900) as reply:
-            return json.loads(reply.read())
+            answer = json.loads(reply.read())
+        # Wall time of the whole call, so the speed derived from it is end to
+        # end: prompt processing and the network are in it, not only decoding.
+        # Separating those needs streaming and a first-token time.
+        answer["_seconds"] = time.perf_counter() - started
+        return answer
     except urllib.error.HTTPError as error:
         raise SystemExit(f"DeepSeek answered {error.code}: {error.read().decode(errors='replace')[:500]}")
 
@@ -303,13 +310,21 @@ def main() -> None:
         {"role": "user", "content": task_path.read_text(encoding="utf8")
          + "\n\nFiles you may change: " + ", ".join(sorted(box.allow))},
     ]
-    spent = {"in": 0, "out": 0}
+    spent = {"in": 0, "out": 0, "cached": 0, "seconds": 0.0}
     summary, turn = None, 0
     for turn in range(1, args.turns + 1):
         answer = ask(args.model, messages, tools)
         usage = answer.get("usage", {})
+        out_tokens = usage.get("completion_tokens", 0)
+        seconds = answer.get("_seconds", 0.0)
         spent["in"] += usage.get("prompt_tokens", 0)
-        spent["out"] += usage.get("completion_tokens", 0)
+        spent["out"] += out_tokens
+        spent["cached"] += usage.get("prompt_cache_hit_tokens", 0)
+        spent["seconds"] += seconds
+        box.record({"turn": turn, "model_call": {
+            "seconds": round(seconds, 3), "prompt_tokens": usage.get("prompt_tokens", 0),
+            "cache_hit_tokens": usage.get("prompt_cache_hit_tokens", 0), "completion_tokens": out_tokens,
+            "tokens_per_second_end_to_end": round(out_tokens / seconds, 1) if seconds else None}})
         message = answer["choices"][0]["message"]
         messages.append({k: v for k, v in message.items() if k in ("role", "content", "tool_calls")})
         calls = message.get("tool_calls") or []
@@ -343,7 +358,11 @@ def main() -> None:
     status = subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout
     changed = [line[3:].strip().strip('"') for line in status.splitlines() if line.strip()]
     stray = [c for c in changed if box.rel_norm(c) not in box.allow]
-    print(f"turns {turn} | tokens in {spent['in']}, out {spent['out']} | log {log.name}")
+    print(f"turns {turn} | tokens in {spent['in']} ({spent['cached']} from DeepSeek's cache), "
+          f"out {spent['out']} | log {log.name}")
+    if spent["seconds"]:
+        print(f"model time {spent['seconds']:.1f} s over {turn} calls | "
+              f"{spent['out'] / spent['seconds']:.0f} output tokens/s end to end")
     print("changed:", ", ".join(changed) or "(nothing)")
     if stray:
         print("STRAY CHANGES OUTSIDE THE ALLOWED FILES:", ", ".join(stray))
