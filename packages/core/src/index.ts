@@ -83,6 +83,7 @@ export {
   loadHarnessConfig,
   readApiKey,
   runsDbFile,
+  uiHostnames,
   writePrivateJson,
   writePrivateText,
   type DaemonRecord,

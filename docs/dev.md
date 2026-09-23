@@ -101,8 +101,72 @@ cross-site page still gets a `401`.
 sign in  http://localhost:5173/ui/session?ticket=...
 ```
 
-That is the normal login, just rewritten to the Vite origin. The ticket is good
-once and for a minute.
+That is the normal login, just rewritten to the Vite origin — `localhost` or the
+name you gave it, below. The ticket is good once and for a minute.
+
+## Calling the UI something else
+
+`http://localhost:5173` is the default and stays the default. To reach the UI at
+a name instead — `http://EmilsHarnessUI:5173` — two things have to happen, and the
+first is not something any program here can do for you.
+
+**The name has to point at this machine.** That is a line in the hosts file:
+
+```
+127.0.0.1 EmilsHarnessUI          # %SystemRoot%\System32\drivers\etc\hosts
+```
+
+The file is writable by administrators only, so it needs a terminal started as
+one.
+
+**Then name it in `config.json`**, in the harness home
+(`%LOCALAPPDATA%\EmilsDeepSeekHarness\config.json`):
+
+```json
+{
+  "prices": {},
+  "uiHosts": ["EmilsHarnessUI"]
+}
+```
+
+One field, three readers, all built from the same list:
+
+| Who        | What it does with it                                           |
+| ---------- | -------------------------------------------------------------- |
+| the loop   | sends the browser there, and passes the name on to Vite        |
+| Vite       | adds it to `server.allowedHosts`, or answers `Blocked request` |
+| the daemon | adds it to its `Host` and `Origin` allowlist, or answers `403` |
+
+That is honest rather than elegant: a name is only reachable if the address
+resolves, the dev server accepts the `Host` header, _and_ the daemon accepts that
+and the `Origin`. Miss one and the failure looks like a different bug each time —
+a dead page, `Blocked request`, or an empty UI behind a `401`.
+
+Three things worth knowing before you spend an evening on it:
+
+- **It is one name, not a wildcard.** A configured name is added next to
+  `127.0.0.1` and `localhost`, never instead of them. Everything else is still
+  refused, which is the whole point of the check.
+- **A session belongs to one name.** The cookie is set for the host the browser
+  was sent to, so signing in at `localhost:5173` does not sign you in at
+  `EmilsHarnessUI:5173`: that is a second, empty session, and the UI has no login
+  screen to fix it with. Run the loop again — or `npx dsh ui` — and it signs in at
+  the name it now knows.
+- **Vite compares the name character for character.** Browsers send the `Host`
+  header lowercased, so the config lowercases the name before handing it over. A
+  capital in that list is a name that can never match.
+
+`--home X` reads `uiHosts` from _that_ home's `config.json`, so a scratch home has
+no name unless you put one in it. When the name does not resolve, the loop does
+not stop — nothing in it needs the name, since Vite binds `127.0.0.1` and is asked
+there. It says so and sends the browser to the address that always works, instead
+of to a dead one that would look like a daemon that is not running:
+
+```
+UI       http://localhost:5173
+         emilsharnessui is not in the hosts file, so it is not used yet
+         add "127.0.0.1 emilsharnessui" to %SystemRoot%\System32\drivers\etc\hosts, as an administrator
+```
 
 ## Gotchas
 

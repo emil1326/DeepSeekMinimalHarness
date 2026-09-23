@@ -37,6 +37,53 @@ describe('the daemon', () => {
     expect(response.status).toBe(403);
   });
 
+  it('answers a name from config.json, on both Host and Origin', async () => {
+    daemon = await startTestDaemon(ONE_EDIT, { uiHosts: ['emilsharnessui'] });
+    // Uppercase on purpose: browsers lowercase both headers, but the daemon
+    // lowercases them itself rather than trusting that, so this is the check
+    // that a name written with capitals in `config.json` still matches.
+    const response = await daemon.request('GET', '/runs', {
+      headers: {
+        host: `EmilsHarnessUI:${daemon.port}`,
+        origin: `http://EmilsHarnessUI:${daemon.port}`,
+      },
+    });
+    expect(response.status).toBe(200);
+  });
+
+  it('answers the loopback address and localhost alongside a configured name', async () => {
+    daemon = await startTestDaemon(ONE_EDIT, { uiHosts: ['emilsharnessui'] });
+    // The CLI and the dev loop both keep talking to 127.0.0.1, so a configured
+    // name has to add to the list rather than replace it.
+    const byAddress = await daemon.request('GET', '/runs', {
+      headers: { origin: `http://127.0.0.1:${daemon.port}` },
+    });
+    expect(byAddress.status).toBe(200);
+
+    const byLocalhost = await daemon.request('GET', '/runs', {
+      headers: { host: `localhost:${daemon.port}`, origin: `http://localhost:${daemon.port}` },
+    });
+    expect(byLocalhost.status).toBe(200);
+  });
+
+  it('still refuses everything else once a name is configured', async () => {
+    daemon = await startTestDaemon(ONE_EDIT, { uiHosts: ['emilsharnessui'] });
+    // A configured name must not turn into "any host goes": both checks are
+    // still one list, and neither of these is on it.
+    const wrongHost = await daemon.request('GET', '/runs', {
+      headers: {
+        host: `evil.example.com:${daemon.port}`,
+        origin: `http://emilsharnessui:${daemon.port}`,
+      },
+    });
+    expect(wrongHost.status).toBe(403);
+
+    const wrongOrigin = await daemon.request('GET', '/runs', {
+      headers: { host: `emilsharnessui:${daemon.port}`, origin: 'https://example.com' },
+    });
+    expect(wrongOrigin.status).toBe(403);
+  });
+
   it('refuses an upgrade from a foreign Origin, and one with no token', async () => {
     daemon = await startTestDaemon(ONE_EDIT);
     const foreign = await new Promise<number>((resolve, reject) => {

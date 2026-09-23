@@ -37,6 +37,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { lookup } from 'node:dns/promises';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -52,7 +53,25 @@ const BUILD_PACKAGES = ['core', 'worker', 'daemon', 'cli'];
 const DAEMON_INPUTS = ['core', 'worker', 'daemon'];
 
 const UI_PORT = Number(process.env.DSH_DEV_UI_PORT ?? 5173);
-const UI_ORIGIN = `http://localhost:${UI_PORT}`;
+/**
+ * The name Vite is started with, and the origin the browser is sent to.
+ *
+ * `localhost` until `config.json` names a host, which it does through
+ * `uiHosts`. The two are the same thing unless that name does not resolve, in
+ * which case the browser gets `localhost` and the name is left to the hosts
+ * file to fix — see `main` below.
+ */
+let uiHost = 'localhost';
+let browserOrigin = `http://localhost:${UI_PORT}`;
+/**
+ * Where Vite is asked whether it is up.
+ *
+ * The loopback address, not the name, on purpose: Vite binds 127.0.0.1 and does
+ * not care what a name resolves to. Asking by name would make this check depend
+ * on a hosts file entry Vite never needs, and a missing entry would then be
+ * reported as "Vite did not come up", which is the wrong diagnosis entirely.
+ */
+const VITE_PROBE = `http://127.0.0.1:${UI_PORT}`;
 /**
  * Long on purpose. tsc emits in layers (core, then worker, then daemon), so one
  * save produces several bursts of writes; this is what folds them into the one
@@ -149,6 +168,44 @@ async function healthy(port, token) {
     headers: { accept: 'application/json', authorization: `Bearer ${token}` },
   });
   return answer !== null && answer !== 'timeout' && answer.ok;
+}
+
+// --- what the UI is called ------------------------------------------------
+
+/**
+ * The first name from `config.json`, or null when there is none.
+ *
+ * Read out of the built core, the same way `daemonFile` is, so the loop and the
+ * daemon can never disagree about what the UI is called. `pathToFileURL`
+ * imports `dist/`, which `buildOnce` has already produced by this point.
+ */
+async function configuredUiHost() {
+  const module = await import(pathToFileURL(path.join(ROOT, 'packages', 'core', 'dist', 'config.js')).href);
+  return module.uiHostnames(module.loadHarnessConfig())[0] ?? null;
+}
+
+/**
+ * Whether a name points back at this machine.
+ *
+ * Only the browser needs this to be true. A name that does not resolve fails
+ * there in a way that looks exactly like the daemon being down, so it is checked
+ * once and said out loud rather than left to be discovered.
+ */
+async function resolvesLocally(name) {
+  if (name === 'localhost') return true;
+  try {
+    const found = await lookup(name, { all: true });
+    return found.some((entry) => entry.address === '127.0.0.1');
+  } catch {
+    return false;
+  }
+}
+
+/** The fix, which is a line in a file only an administrator can write. */
+function hostsInstruction(name) {
+  const file =
+    process.platform === 'win32' ? String.raw`%SystemRoot%\System32\drivers\etc\hosts` : '/etc/hosts';
+  return `add "127.0.0.1 ${name}" to ${file}, as an administrator`;
 }
 
 // --- build ----------------------------------------------------------------
@@ -255,6 +312,9 @@ function startVite(daemonPort) {
       ...process.env,
       DSH_DEV_DAEMON_PORT: String(daemonPort),
       DSH_DEV_UI_PORT: String(UI_PORT),
+      // Vite refuses a `Host` it was not told about, and the name is not one of
+      // the two it allows by itself.
+      DSH_DEV_UI_HOST: uiHost,
     },
   });
   pipePrefixed(viteChild, 'ui');
@@ -266,7 +326,7 @@ function startVite(daemonPort) {
 
 async function viteReady() {
   for (let waited = 0; waited < 20_000; waited += 150) {
-    const answer = await fetchIn(500, `${UI_ORIGIN}/`);
+    const answer = await fetchIn(500, `${VITE_PROBE}/`);
     if (answer !== null && answer !== 'timeout') return true;
     await sleep(150);
   }
@@ -283,7 +343,11 @@ async function loginUrl() {
   });
   if (answer === null || answer === 'timeout' || !answer.ok) return null;
   const body = await answer.json();
-  return `${UI_ORIGIN}/ui/session?ticket=${body.ticket}`;
+  // At `browserOrigin` and not at `127.0.0.1`, because `/ui/session` answers with
+  // the session cookie and a cookie belongs to the name it was set from. Signing
+  // in at one name and browsing at another is two sessions, and the second one
+  // is empty.
+  return `${browserOrigin}/ui/session?ticket=${body.ticket}`;
 }
 
 function openBrowser(url) {
@@ -437,13 +501,36 @@ async function main() {
   // not mistaken for a change.
   lastDigest = distDigest();
   watchDaemonInputs();
-  if (wantUi) startVite(daemonPort);
+
+  /** A name from `config.json` that the machine does not resolve, if there is one. */
+  let unresolved = null;
+  if (wantUi) {
+    // Before Vite starts, because the name goes to Vite in its environment.
+    const named = await configuredUiHost();
+    if (named !== null) {
+      uiHost = named;
+      if (await resolvesLocally(named)) {
+        browserOrigin = `http://${named}:${UI_PORT}`;
+      } else {
+        // Nothing in this loop needs the name to resolve, so the loop goes on
+        // and the browser is sent to the name that always works. Saying it here
+        // is the whole point: from the browser it would have looked like a
+        // daemon that is not running.
+        unresolved = named;
+      }
+    }
+    startVite(daemonPort);
+  }
 
   if (wantUi) {
     const ready = await viteReady();
     const url = await loginUrl();
     say('dev', '');
-    say('dev', `UI       ${UI_ORIGIN}`);
+    say('dev', `UI       ${browserOrigin}`);
+    if (unresolved !== null) {
+      say('dev', `         ${unresolved} is not in the hosts file, so it is not used yet`);
+      say('dev', `         ${hostsInstruction(unresolved)}`);
+    }
     if (url !== null) say('dev', `sign in  ${url}`);
     say('dev', `CLI      npx dsh list   (this daemon, this code)`);
     say('dev', `home     ${process.env.DSH_HOME ?? 'the real one'}`);

@@ -12,6 +12,7 @@ import {
   harnessHome,
   loadHarnessConfig,
   runsDbFile,
+  uiHostnames,
   writePrivateJson,
 } from '@emilswork/harness-core';
 import { Auth, newToken } from './auth.js';
@@ -29,7 +30,9 @@ async function main(): Promise<void> {
   }
 
   const token = newToken();
-  const auth = new Auth(0, token);
+  // `uiHostnames` is empty unless `config.json` names something, and the loopback
+  // address and `localhost` are always allowed either way.
+  const auth = new Auth(0, token, uiHostnames(config));
   const supervisor = new Supervisor({
     store,
     baseUrl: process.env.DSH_BASE_URL ?? config.deepseekBaseUrl ?? DEFAULT_BASE_URL,

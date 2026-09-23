@@ -12,7 +12,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
-import { isTerminal, type RunEvent, type RunStatus } from '@emilswork/harness-core';
+import {
+  isTerminal,
+  loadHarnessConfig,
+  uiHostnames,
+  type RunEvent,
+  type RunStatus,
+} from '@emilswork/harness-core';
 import type {
   AttachMessage,
   DiffResponse,
@@ -243,7 +249,13 @@ program
     guard(async () => {
       const client = await DaemonClient.connect();
       const { ticket } = await client.json<{ ticket: string }>('POST', '/ui/ticket');
-      const url = `http://127.0.0.1:${client.port}/ui/session?ticket=${ticket}`;
+      // The name from `config.json` when there is one. It has to be the name the
+      // browser ends up on, because the session cookie is set for the host it
+      // was sent to: signing in at 127.0.0.1 and then browsing at another name
+      // is a second, empty session. `DaemonClient` still talks to the loopback
+      // address itself, which is the host the daemon always answers to.
+      const [name] = uiHostnames(loadHarnessConfig());
+      const url = `http://${name ?? '127.0.0.1'}:${client.port}/ui/session?ticket=${ticket}`;
       process.stdout.write(`${url}\n`);
       openBrowser(url);
     }),

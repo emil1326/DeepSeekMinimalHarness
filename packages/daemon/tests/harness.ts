@@ -41,7 +41,10 @@ export interface TestDaemon {
   close(): Promise<void>;
 }
 
-export async function startTestDaemon(script: ScriptedTurn[]): Promise<TestDaemon> {
+export async function startTestDaemon(
+  script: ScriptedTurn[],
+  options: { uiHosts?: string[] } = {},
+): Promise<TestDaemon> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-daemon-'));
   const keyFile = path.join(home, 'api_key');
   fs.writeFileSync(keyFile, 'a-test-key-that-is-never-real\n');
@@ -51,7 +54,7 @@ export async function startTestDaemon(script: ScriptedTurn[]): Promise<TestDaemo
   const fixture = createFixture();
   const store = new Store(path.join(home, 'runs.db'));
   const token = newToken();
-  const auth = new Auth(0, token);
+  const auth = new Auth(0, token, options.uiHosts ?? []);
   const supervisor = new Supervisor({
     store,
     baseUrl: fake.url,

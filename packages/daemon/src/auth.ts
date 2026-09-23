@@ -10,17 +10,26 @@ export function newToken(): string {
  * A localhost server is reachable from any web page, so without these checks a
  * random site could drive agents. Every request needs the token, the `Host` has
  * to be this daemon, and any `Origin` has to be the UI's own.
+ *
+ * "This daemon" and "the UI's own" are the loopback address and `localhost`, plus
+ * whatever names `config.json` added. That second part does not widen anything:
+ * the port is still the one bound, and the socket is still on 127.0.0.1, so a name
+ * only works here if it was already pointed at the loopback address.
  */
 export class Auth {
   private readonly tickets = new Map<string, number>();
   private port: number;
+  /** Lowercased once, because the header is lowercased before it is compared. */
+  private readonly uiHosts: string[];
 
   constructor(
     port: number,
     private readonly token: string,
+    uiHosts: readonly string[] = [],
     private readonly ticketTtlMs = 60_000,
   ) {
     this.port = port;
+    this.uiHosts = uiHosts.map((host) => host.toLowerCase());
   }
 
   /** The port is only known once the socket is bound, and the checks need it. */
@@ -33,11 +42,19 @@ export class Auth {
   }
 
   allowedHosts(): string[] {
-    return [`127.0.0.1:${this.port}`, `localhost:${this.port}`];
+    return [
+      `127.0.0.1:${this.port}`,
+      `localhost:${this.port}`,
+      ...this.uiHosts.map((host) => `${host}:${this.port}`),
+    ];
   }
 
   allowedOrigins(): string[] {
-    return [`http://127.0.0.1:${this.port}`, `http://localhost:${this.port}`];
+    return [
+      `http://127.0.0.1:${this.port}`,
+      `http://localhost:${this.port}`,
+      ...this.uiHosts.map((host) => `http://${host}:${this.port}`),
+    ];
   }
 
   checkHost(header: string | undefined): boolean {

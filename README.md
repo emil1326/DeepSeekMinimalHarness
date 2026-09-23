@@ -48,6 +48,11 @@ A save in the UI is instant, a save in the daemon's code is about a second, and
 both beat the 14 seconds of running `npm run build:server` by hand. How it works
 and what it gets wrong is in `docs/dev.md`.
 
+If `http://localhost:5173` is not how you want to type it, `uiHosts` in the
+harness home's `config.json` puts it on a name of your own — `EmilsHarnessUI`,
+say. It needs a line in your hosts file as well, which is the one part that takes
+an administrator; `docs/dev.md` has the rest.
+
 ## Using it
 
 A task is a JSON file:
