@@ -3,11 +3,10 @@
   "compilerOptions": {
     "noEmit": true,
     "types": ["node"],
-    "baseUrl": ".",
     "paths": {
-      "@emilswork/harness-core": ["packages/core/src/index.ts"],
-      "@emilswork/harness-worker": ["packages/worker/src/index.ts"],
-      "@emilswork/harness-daemon": ["packages/daemon/src/index.ts"]
+      "@emilswork/harness-core": ["./packages/core/src/index.ts"],
+      "@emilswork/harness-worker": ["./packages/worker/src/index.ts"],
+      "@emilswork/harness-daemon": ["./packages/daemon/src/index.ts"]
     }
   },
   "include": [
