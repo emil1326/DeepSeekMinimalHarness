@@ -110,14 +110,24 @@ name you gave it, below. The ticket is good once and for a minute.
 a name instead — `http://EmilsHarnessUI:5173` — two things have to happen, and the
 first is not something any program here can do for you.
 
-**The name has to point at this machine.** That is a line in the hosts file:
+**The name has to point at this machine.** That is a line in the hosts file, and
+the file is writable by administrators only, so it needs a terminal started as
+one:
 
-```
-127.0.0.1 EmilsHarnessUI          # %SystemRoot%\System32\drivers\etc\hosts
+```powershell
+Add-Content "$env:SystemRoot\System32\drivers\etc\hosts" "127.0.0.1`tEmilsHarnessUI"
 ```
 
-The file is writable by administrators only, so it needs a terminal started as
-one.
+On Linux or macOS the same line goes in `/etc/hosts`:
+
+```sh
+echo "127.0.0.1 EmilsHarnessUI" | sudo tee -a /etc/hosts
+```
+
+Only the IPv4 line, on purpose. The daemon and Vite both bind `127.0.0.1`, so an
+`::1` entry would send the browser to an address nothing is listening on. Every
+other name in a typical hosts file has both lines, which makes this one the easy
+trap.
 
 **Then name it in `config.json`**, in the harness home
 (`%LOCALAPPDATA%\EmilsDeepSeekHarness\config.json`):

@@ -49,9 +49,29 @@ both beat the 14 seconds of running `npm run build:server` by hand. How it works
 and what it gets wrong is in `docs/dev.md`.
 
 If `http://localhost:5173` is not how you want to type it, `uiHosts` in the
-harness home's `config.json` puts it on a name of your own — `EmilsHarnessUI`,
-say. It needs a line in your hosts file as well, which is the one part that takes
-an administrator; `docs/dev.md` has the rest.
+harness home's `config.json` puts it on a name of your own, `EmilsHarnessUI`
+say. Two steps, and the first one needs an administrator.
+
+Point the name at this machine, in an elevated shell:
+
+```powershell
+Add-Content "$env:SystemRoot\System32\drivers\etc\hosts" "127.0.0.1`tEmilsHarnessUI"
+```
+
+(On Linux or macOS that is the same line in `/etc/hosts`:
+`echo "127.0.0.1 EmilsHarnessUI" | sudo tee -a /etc/hosts`.)
+
+Then name it in the config, `%LOCALAPPDATA%\EmilsDeepSeekHarness\config.json` on
+Windows. The daemon writes that file the first time it runs, so start it once if
+it is not there yet:
+
+```json
+{ "prices": {}, "uiHosts": ["EmilsHarnessUI"] }
+```
+
+Nothing needs any of this, mind. `localhost:5173` is the default and works out of
+the box; the name only changes what `npm run dev` and `dsh ui` open. `docs/dev.md`
+has the details, and the three ways it can go wrong.
 
 ## Using it
 
