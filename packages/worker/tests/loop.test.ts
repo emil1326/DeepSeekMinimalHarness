@@ -1,0 +1,290 @@
+import { afterAll, describe, expect, it } from 'vitest';
+import {
+  DeepSeekClient,
+  Sandbox,
+  type ChatMessage,
+  type RunEventBody,
+  type Speaker,
+} from '@emilswork/harness-core';
+import { runAgentLoop, type LoopControl } from '@emilswork/harness-worker';
+import { startFakeDeepSeek, type ScriptedTurn } from '../../core/tests/fake-server.js';
+import { createFixture } from './fixture.js';
+
+const fixture = createFixture();
+afterAll(() => fixture.cleanup());
+
+class TestControl implements LoopControl {
+  readonly controller = new AbortController();
+  readonly signal = this.controller.signal;
+  asked = 0;
+  turns = 0;
+  private readonly queued: { text: string; by: Speaker }[] = [];
+  private readonly answers: string[] = [];
+  /** Delivered on this turn's boundary, once. */
+  private scheduled: { turn: number; text: string; by: Speaker } | null = null;
+
+  takeMessages = (): { text: string; by: Speaker }[] => {
+    this.turns += 1;
+    if (this.scheduled !== null && this.scheduled.turn === this.turns) {
+      const message = { text: this.scheduled.text, by: this.scheduled.by };
+      this.scheduled = null;
+      return [...this.queued.splice(0, this.queued.length), message];
+    }
+    return this.queued.splice(0, this.queued.length);
+  };
+
+  sayLater(turn: number, text: string, by: Speaker = 'claude'): void {
+    this.scheduled = { turn, text, by };
+  }
+
+  willAnswer(text: string): void {
+    this.answers.push(text);
+  }
+
+  waitForAnswer = async (
+    _id: string,
+    timeoutMs: number,
+    signal: AbortSignal,
+  ): Promise<{ text: string; by: Speaker } | null> => {
+    this.asked += 1;
+    const answer = this.answers.shift();
+    if (answer !== undefined) return { text: answer, by: 'claude' };
+    return new Promise((resolve) => {
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        resolve(null);
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(null);
+      }, timeoutMs);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  };
+}
+
+interface HarnessResult {
+  status: string;
+  summary: string | null;
+  events: RunEventBody[];
+  requests: Record<string, unknown>[];
+  server: Awaited<ReturnType<typeof startFakeDeepSeek>>;
+}
+
+async function drive(
+  script: ScriptedTurn[],
+  task: Record<string, unknown>,
+  control: TestControl,
+): Promise<HarnessResult> {
+  const server = await startFakeDeepSeek(script);
+  const config = fixture.writeTask(`task-${Math.random().toString(36).slice(2)}`, task);
+  const sandbox = new Sandbox({
+    root: fixture.repo,
+    allow: config.allow,
+    profile: config.resolvedProfile,
+    checkNames: config.checks,
+  });
+  const client = new DeepSeekClient({ apiKey: 'test-key', baseUrl: server.url });
+  const events: RunEventBody[] = [];
+  const result = await runAgentLoop({ sandbox, client, config, emit: (body) => events.push(body) }, control);
+  return {
+    status: result.status,
+    summary: result.summary,
+    events: events,
+    requests: server.requests,
+    server,
+  };
+}
+
+function messagesOf(result: HarnessResult, index: number): ChatMessage[] {
+  return (result.requests[index]?.messages ?? []) as ChatMessage[];
+}
+
+describe('the agent loop', () => {
+  it('reads, edits, runs a check and finishes', async () => {
+    const control = new TestControl();
+    const result = await drive(
+      [
+        {
+          text: 'let me look at the file first and then change the constant',
+          tokenDelayMs: 10,
+          toolCalls: [{ name: 'read_file', args: { path: 'src/a.ts' } }],
+        },
+        // A tool call streams its arguments, so this turn has a real decode
+        // window. It is short, so the speed is high, but it is a measurement.
+        {
+          tokenDelayMs: 5,
+          toolCalls: [{ name: 'replace_in_file', args: { path: 'src/a.ts', old: '= 1', new: '= 2' } }],
+        },
+        { toolCalls: [{ name: 'run_check', args: { name: 'echo' } }] },
+        { toolCalls: [{ name: 'finish', args: { summary: 'changed the constant' } }] },
+      ],
+      {},
+      control,
+    );
+
+    expect(result.status).toBe('finished');
+    expect(result.summary).toBe('changed the constant');
+    expect(fixture.read('src/a.ts')).toBe('export const a = 2;\n');
+
+    const names = result.events.filter((event) => event.type === 'tool.call').map((event) => event.name);
+    expect(names).toEqual(['read_file', 'replace_in_file', 'run_check', 'finish']);
+
+    const checkResult = result.events.find(
+      (event) => event.type === 'tool.result' && event.name === 'run_check',
+    );
+    expect(checkResult?.type === 'tool.result' && checkResult.result).toContain('ran');
+
+    const metrics = result.events.filter((event) => event.type === 'metrics');
+    expect(metrics).toHaveLength(4);
+    const last = metrics[3];
+    if (last?.type === 'metrics') {
+      expect(last.totals.calls).toBe(4);
+      expect(last.totals.completionTokens).toBe(200);
+      expect(last.totals.timeToFirstTokenMs).not.toBeNull();
+    }
+    // The first turn streamed text, so there is a decode window to measure.
+    const first = metrics[0];
+    if (first?.type === 'metrics') {
+      expect(first.call.generationTokensPerSecond).not.toBeNull();
+      expect(first.call.timeToFirstTokenMs).not.toBeNull();
+    }
+    // The second streams its tool arguments, so it has a real, short window:
+    // a number, and faster than the end-to-end figure that includes the wait.
+    const second = metrics[1];
+    if (second?.type === 'metrics') {
+      expect(second.call.generationTokensPerSecond).not.toBeNull();
+      expect(second.call.generationTokensPerSecond ?? 0).toBeGreaterThan(
+        second.call.endToEndTokensPerSecond ?? 0,
+      );
+    }
+    expect(result.events.filter((event) => event.type === 'text.delta').length).toBeGreaterThan(0);
+    await result.server.close();
+  });
+
+  it('hands a refusal back to the model instead of crashing', async () => {
+    const control = new TestControl();
+    const result = await drive(
+      [
+        { toolCalls: [{ name: 'replace_in_file', args: { path: 'src/a.ts', old: 't', new: 'T' } }] },
+        { toolCalls: [{ name: 'replace_in_file', args: { path: '.git/config', old: 'a', new: 'b' } }] },
+        { toolCalls: [{ name: 'run_check', args: { name: 'rm -rf /' } }] },
+        { toolCalls: [{ name: 'finish', args: { summary: 'gave up' } }] },
+      ],
+      {},
+      control,
+    );
+
+    const results = result.events.filter((event) => event.type === 'tool.result');
+    expect(results[0]?.type === 'tool.result' && results[0].result).toContain('matched 2 times');
+    expect(results[1]?.type === 'tool.result' && results[1].result.startsWith('refused')).toBe(true);
+    expect(results[2]?.type === 'tool.result' && results[2].result.startsWith('refused')).toBe(true);
+    expect(result.status).toBe('finished');
+    await result.server.close();
+  });
+
+  it('asks a question, waits, and carries the answer back to the model', async () => {
+    const control = new TestControl();
+    control.willAnswer('the ts one');
+    const result = await drive(
+      [
+        { toolCalls: [{ name: 'ask', args: { question: 'which file?' } }] },
+        { toolCalls: [{ name: 'finish', args: { summary: 'done' } }] },
+      ],
+      {},
+      control,
+    );
+
+    expect(control.asked).toBe(1);
+    const question = result.events.find((event) => event.type === 'question');
+    expect(question?.type === 'question' && question.question).toBe('which file?');
+    const answer = result.events.find((event) => event.type === 'answer');
+    expect(answer?.type === 'answer' && answer.answer).toBe('the ts one');
+    expect(result.events.some((event) => event.type === 'status' && event.status === 'waiting')).toBe(true);
+
+    const second = messagesOf(result, 1);
+    const toolMessage = second.find((message) => message.role === 'tool');
+    expect(toolMessage?.content).toContain('the ts one');
+    await result.server.close();
+  });
+
+  it('stops at the ask limit when nothing answers', async () => {
+    const control = new TestControl();
+    const result = await drive(
+      [{ toolCalls: [{ name: 'ask', args: { question: 'anyone there?' } }] }],
+      {
+        limits: { askSeconds: 1 },
+      },
+      control,
+    );
+
+    expect(result.status).toBe('stopped_at_limit');
+    const limit = result.events.find((event) => event.type === 'limit');
+    expect(limit?.type === 'limit' && limit.which).toBe('askSeconds');
+    await result.server.close();
+  });
+
+  it('delivers a message from the launcher at a turn boundary', async () => {
+    const control = new TestControl();
+    control.sayLater(2, 'also rename the constant');
+    const result = await drive(
+      [
+        { toolCalls: [{ name: 'read_file', args: { path: 'src/a.ts' } }] },
+        { toolCalls: [{ name: 'finish', args: { summary: 'ok' } }] },
+      ],
+      {},
+      control,
+    );
+
+    const second = messagesOf(result, 1);
+    expect(second.some((message) => message.content?.includes('[claude] also rename the constant'))).toBe(
+      true,
+    );
+    await result.server.close();
+  });
+
+  it('stops when it runs out of turns', async () => {
+    const control = new TestControl();
+    const result = await drive(
+      [{ toolCalls: [{ name: 'list_dir', args: { path: '.' } }] }],
+      { limits: { turns: 2 } },
+      control,
+    );
+    expect(result.status).toBe('stopped_at_limit');
+    const limit = result.events.find((event) => event.type === 'limit');
+    expect(limit?.type === 'limit' && limit.which).toBe('turns');
+    await result.server.close();
+  });
+
+  it('stops when the output token budget is gone', async () => {
+    const control = new TestControl();
+    const result = await drive(
+      [{ toolCalls: [{ name: 'list_dir', args: { path: '.' } }], completionTokens: 500 }],
+      { limits: { outputTokens: 100 } },
+      control,
+    );
+    expect(result.status).toBe('stopped_at_limit');
+    const limit = result.events.find((event) => event.type === 'limit');
+    expect(limit?.type === 'limit' && limit.which).toBe('outputTokens');
+    await result.server.close();
+  });
+
+  it('cancels mid-stream and reports cancelled', async () => {
+    const control = new TestControl();
+    const server = await startFakeDeepSeek([{ text: 'never mind', delayMs: 5000, tokenDelayMs: 200 }]);
+    const config = fixture.writeTask('task-cancel', {});
+    const sandbox = new Sandbox({
+      root: fixture.repo,
+      allow: config.allow,
+      profile: config.resolvedProfile,
+      checkNames: config.checks,
+    });
+    const client = new DeepSeekClient({ apiKey: 'test-key', baseUrl: server.url });
+    const events: RunEventBody[] = [];
+    const pending = runAgentLoop({ sandbox, client, config, emit: (body) => events.push(body) }, control);
+    setTimeout(() => control.controller.abort(), 150);
+    const result = await pending;
+    expect(result.status).toBe('cancelled');
+    await server.close();
+  });
+});

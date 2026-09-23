@@ -1,0 +1,27 @@
+{
+  "name": "@emilswork/harness-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The agent loop, run as a child process so a crash or a cancel cannot take the daemon with it.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "dsh-worker": "./dist/main.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@emilswork/harness-core": "0.1.0"
+  }
+}
