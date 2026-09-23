@@ -84,6 +84,7 @@ type RunEvent = { seq: number; runId: string; at: string } & (
   | { type: 'status'; status: RunStatus; detail?: string }
   | { type: 'turn.start'; turn: number }
   | { type: 'text.delta'; turn: number; text: string }
+  | { type: 'thinking.delta'; turn: number; text: string }
   | { type: 'tool.call'; turn: number; id: string; name: string; args: unknown }
   | { type: 'tool.result'; turn: number; id: string; name: string; ok: boolean; result: string }
   | { type: 'question'; id: string; question: string }
@@ -91,7 +92,19 @@ type RunEvent = { seq: number; runId: string; at: string } & (
   | { type: 'message'; by: Speaker; text: string }
   | { type: 'metrics'; turn: number; call: CallMetrics; totals: RunTotals }
   | { type: 'summary'; text: string }
-  | { type: 'limit'; which: 'turns' | 'wallSeconds' | 'outputTokens' | 'askSeconds'; detail: string }
+  | {
+      type: 'context';
+      turn: number;
+      dropped: number;
+      subjects: string[];
+      tokensBefore: number;
+      tokensAfter: number;
+    }
+  | {
+      type: 'limit';
+      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'askSeconds';
+      detail: string;
+    }
   | { type: 'stray'; files: string[] }
   | { type: 'error'; message: string }
 );
@@ -104,6 +117,41 @@ so a reader can tell a finished run from a dead connection.
 
 `text.delta` is streamed and arrives in small batches, so a client appends it to
 the current turn's text rather than treating each one as a paragraph.
+
+`thinking.delta` is the model's reasoning channel, separate from the answer and
+billed as output. It is usually most of the bill. A reader that drops it is not
+showing the answer, it is showing the part of the answer the model decided to
+say out loud.
+
+`context` means the message list was shortened to fit the model's window. It is
+worth surfacing rather than logging: the model's view of the conversation just
+changed, so an answer that contradicts an earlier file read is explained by this
+and not by a mistake. `dropped` is how many tool results were replaced with a
+notice, and `subjects` names them. The request that goes out never has a message
+removed, only a tool result's content shortened, so a `tool_calls` id always
+keeps exactly one `tool` reply.
+
+`limit` ends the run with `stopped_at_limit`. `contextTokens` is the exception
+worth knowing about: it fires when even a fully shortened conversation will not
+fit, which means the run cannot continue. Reaching `contextTokens` on its own
+does not stop anything, it compacts.
+
+## Limits
+
+| Limit           | Default   | Counts                                                       |
+| --------------- | --------- | ------------------------------------------------------------ |
+| `turns`         | 12        | model calls                                                  |
+| `wallSeconds`   | 900       | wall clock for the whole run                                 |
+| `outputTokens`  | 40 000    | what the model wrote, thinking included                      |
+| `totalTokens`   | 2 000 000 | prompt plus completion, over every turn                      |
+| `contextTokens` | 700 000   | the size of one request, which compacts rather than stopping |
+| `askSeconds`    | 3 600     | how long `ask` waits for a reply                             |
+
+`outputTokens` alone is not a cost bound. Every turn re-sends the whole
+conversation, so a run that reads large files pays for them again on each turn
+while writing almost nothing. `totalTokens` is the bound that reflects that, and
+`contextTokens` is what keeps a single request inside the model's 1,048,576-token
+ceiling.
 
 ## Exit codes
 
