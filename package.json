@@ -13,6 +13,8 @@
   "scripts": {
     "dev": "node tools/dev.mjs",
     "dev:server": "node tools/dev.mjs --no-ui",
+    "redteam": "node tools/redteam.mjs",
+    "redteam:sweep": "node tools/sweep.mjs",
     "build": "npm run build:core && npm run build:worker && npm run build:daemon && npm run build:cli && npm run build:ui",
     "build:server": "npm run build:core && npm run build:worker && npm run build:daemon && npm run build:cli",
     "build:core": "npm run build -w @emilswork/harness-core",

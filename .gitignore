@@ -4,6 +4,9 @@
 *.result.json
 __pycache__/
 
+# Red-team records: generated, and full of per-run random canaries.
+runs/
+
 # Never commit a key.
 api_key
 .env
