@@ -1,0 +1,21 @@
+{
+  "description": "Emil's Super App Planner: a TypeScript front end with three tsconfigs, and a Rust workspace.",
+  "env": {
+    "CARGO_TARGET_DIR": "{parent}/esap-ds-target"
+  },
+  "checks": {
+    "typecheck": { "run": ["npm", "run", "typecheck"] },
+    "eslint": { "when": [".ts", ".tsx"], "run": ["npx", "eslint", "{allowed}"] },
+    "prettier": {
+      "when": [".ts", ".tsx", ".md", ".json", ".css"],
+      "run": ["npx", "prettier", "--check", "{allowed}"]
+    },
+    "cargo_check": { "run": ["cargo", "check", "--workspace", "--all-targets"] },
+    "cargo_fmt": { "run": ["cargo", "fmt", "--all", "--check"] },
+    "clippy": { "run": ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"] }
+  },
+  "format": [
+    { "when": [".ts", ".tsx", ".md", ".json", ".css"], "run": ["npx", "prettier", "--write", "{allowed}"] },
+    { "when": [".rs"], "run": ["cargo", "fmt", "--all"] }
+  ]
+}

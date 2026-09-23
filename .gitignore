@@ -1,0 +1,10 @@
+# Run logs, replies and task files stay local.
+*.log.jsonl
+*.reply.txt
+*.result.json
+__pycache__/
+
+# Never commit a key.
+api_key
+.env
+.env.*
