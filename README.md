@@ -120,6 +120,19 @@ straight past the deny lists. A test puts that bug back and insists that exactly
 the dot-dependent guards go red. A guard nobody has tried to get past is a guard
 that might not be there, and that lstrip bug was only found by actually trying it.
 
+## Checking the real API still matches
+
+```
+node tools/smoke.mjs
+```
+
+One real streaming call, with a tool on offer, that checks the three things
+everything else assumes: that usage comes back at all, that
+`prompt_cache_hit_tokens` is really spelled that way, and that tool calls stream
+with their arguments reassembling properly. Every other test in here runs against
+a fake server, which asserts what I believe DeepSeek does rather than what it
+does. This is the one that would notice if that changed.
+
 ## Poking at the UI without spending a token
 
 ```

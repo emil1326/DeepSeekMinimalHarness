@@ -4,23 +4,79 @@
 
 ## Milestones
 
-| #   | What                                                                                 | State   |
-| --- | ------------------------------------------------------------------------------------ | ------- |
-| 1   | Scaffold: workspaces, TS strict, eslint, prettier, vitest, one `npm run check`       | done    |
-| 2   | The sandbox, ported guard for guard, with realpath, junctions and the lstrip control | done    |
-| 3   | DeepSeek client: streaming, tools, abort, backoff, metrics, fake server              | done    |
-| 4   | Agent loop in a worker: closed tools, `ask`, queued messages, limits, `finish`       | done    |
-| 5   | Daemon: API, auth, Host and Origin checks, supervisor, SQLite, crash recovery        | done    |
-| 6   | CLI: attach and stream, `--json`, `send`, `reply`, `cancel`, exit codes              | done    |
-| 7   | UI: list, chat, config, diff, metrics, reply, message, cancel, live                  | done    |
-| 8   | A real run through `dsh` with the UI open, and the speed numbers recorded            | not run |
-| 9   | Retire the prototype: README, `legacy/`, note for Claude                             | done    |
+| #   | What                                                                                 | State |
+| --- | ------------------------------------------------------------------------------------ | ----- |
+| 1   | Scaffold: workspaces, TS strict, eslint, prettier, vitest, one `npm run check`       | done  |
+| 2   | The sandbox, ported guard for guard, with realpath, junctions and the lstrip control | done  |
+| 3   | DeepSeek client: streaming, tools, abort, backoff, metrics, fake server              | done  |
+| 4   | Agent loop in a worker: closed tools, `ask`, queued messages, limits, `finish`       | done  |
+| 5   | Daemon: API, auth, Host and Origin checks, supervisor, SQLite, crash recovery        | done  |
+| 6   | CLI: attach and stream, `--json`, `send`, `reply`, `cancel`, exit codes              | done  |
+| 7   | UI: list, chat, config, diff, metrics, reply, message, cancel, live                  | done  |
+| 8   | A real run through `dsh` with the UI open, and the speed numbers recorded            | done  |
+| 9   | Retire the prototype: README, `legacy/`, note for Claude                             | done  |
 
-Milestone 8 is the gap. Everything is tested against a fake DeepSeek, and the one
-real call is behind `DSH_SMOKE=1`, so nothing here has spent a token yet. The
-first real run wants doing with the UI open so the number the plan asks for,
-generation speed against the prototype's end-to-end figure, gets written down
-somewhere.
+## The real run
+
+Done, against the live API, and the numbers are below. This is the part that a
+fake server cannot tell you anything about, so it was worth the wait.
+
+**First, the assumptions.** `node tools/smoke.mjs` makes one real streaming call
+with a tool on offer and checks the three things everything else depends on.
+All three hold: usage arrives, `prompt_cache_hit_tokens` is really spelled that
+way and adds up with the miss count to the prompt, and tool calls stream as
+`delta.tool_calls` with the arguments reassembling across fragments into valid
+JSON. The fake server was not lying.
+
+**Then the task.** The prototype's own first job, redone: give the three
+`toPass()` polls in `ui/mark.spec.ts` a deadline of their own. The prototype's
+result is commit `3671dac` in that repo, so a fresh worktree was made at its
+parent, `134dba5`, to have the work left to do.
+
+It came out the same, arrived at independently: one shared constant holding
+8000, a comment explaining that the polls need their own budget, and the three
+call sites changed. It named the constant `POLL_MS` where the prototype said
+`WAIT`, and wrote the comment in its own words, which is the point of the
+exercise rather than a defect.
+
+```
+mark-timeouts   finished   4 turns   2,137 out tokens   23 s
+typecheck and prettier both pass; one file changed, and it was the allowed one
+```
+
+**The speed numbers, which are the interesting part.**
+
+|                               | single smoke call | the 4-turn task |
+| ----------------------------- | ----------------- | --------------- |
+| time to first token           | 0.94 s            | 2.28 s mean     |
+| **generating** (decode only)  | **436 tok/s**     | **930 tok/s**   |
+| end to end                    | 44.6 tok/s        | 130 tok/s       |
+| cache hit share of the prompt | 0%                | **74%**         |
+
+The plan predicted the generation figure would come out well above the
+prototype's end-to-end one, since the prototype could not stream and measured
+whole calls. It is seven times higher, and the gap is not the harness.
+
+**What that says about latency, which is the thing that actually matters here.**
+End-to-end is 130 tok/s while decode is 930. Nothing in the tool path is
+spending that difference: it is prompt processing and the wait for the first
+token, and the first token is 0.7 s at best and 5.9 s on the turn with the whole
+file in it. So a turn costs about a second before a single token exists, whatever
+the tools cost.
+
+Which means the lever is **the number of turns, not the speed of a tool call**.
+Four turns here, and three of the four paid a fresh first-token wait. That is
+what the diagnostics in `diagnose.ts` are for: a `replace_in_file` that says
+which line was wrong instead of "matched 0 times" is a turn not spent, and a
+turn not spent is a second of first-token wait not paid. The syscall work is
+real but it is measured in milliseconds against a second.
+
+One more thing worth knowing: **74% of the prompt came from DeepSeek's cache**
+across the run, and 97% on the last two calls. The context is re-sent every turn
+and the cache is what makes that affordable.
+
+Cost is not shown because no price table has been filled into `config.json`,
+deliberately, since prices move and hardcoding one is worse than a blank.
 
 ## Where this went past the plan
 
@@ -33,6 +89,15 @@ somewhere.
   and the preview can run without touching the real key or the real harness home.
 - **`tools/preview.mjs`** is not in the plan. It was worth having: it gave a
   scripted six-turn run to look at while doing the UI.
+- **`tools/smoke.mjs`** is not in the plan either. It is the one thing that
+  checks the harness's assumptions about the real API rather than the fake
+  server's, in a single call, and it is the reason milestone 8 was not a
+  debugging session.
+- **`tasks/mark-timeouts.json`** is the first real task, kept as a working
+  example of a task file.
+- **Refusals explain themselves** (`diagnose.ts`), which the plan did not ask
+  for. The real-run numbers are what justify it: a turn costs about a second of
+  first-token wait, and a refusal that says why is a turn not spent.
 - **The UI is denser than the plan's "dense, calm" suggests** after a pass on it,
   because the first version buried the conversation under its own numbers.
 
@@ -55,8 +120,22 @@ somewhere.
 
 ## Known limits
 
-- Cost only appears once a price table is filled into `config.json` in the
+- **The sandbox reads are synchronous**, so the loop's batching of read-only
+  calls cannot actually overlap them: `Promise.all` over synchronous work on one
+  thread is sequential. It is kept because it is correct and costs nothing, and
+  because the ordering rule it encodes is load-bearing and tested. Making the
+  reads asynchronous is what would overlap them, and the measured prize is
+  milliseconds against a one-second first-token wait, so it is written down
+  rather than done.
+- **Cost only appears once a price table is filled into `config.json`** in the
   harness home. It is not hardcoded, on purpose, because prices move.
-- The event log is append-only and never pruned. Fine at this scale, and a thing
-  to know about before it runs for months.
-- `dsh` assumes Node 22 or later.
+- **The event log is append-only and never pruned.** Fine at this scale, and a
+  thing to know about before it runs for months.
+- **`dsh` assumes Node 22 or later.**
+- **Tests are the reviewer's job**, per the plan: the harness runs static checks
+  only and never runs the code the model wrote. The real run above passed
+  `typecheck` and `prettier`, and the `mark.spec.ts` suite it touches was not
+  run, because running it needs the app built and that is a human decision.
+- **The browser-driven end-to-end path was exercised against a fake model** (the
+  preview script) and against the real one only through `dsh run`, which is the
+  same code path.

@@ -1,0 +1,10 @@
+{
+  "name": "mark-timeouts",
+  "worktree": "F:/vsCode/esap-ds-redo",
+  "profile": "F:/vsCode/DeepSeekMinimalHarness/profiles/esap.json",
+  "model": "deepseek-flash",
+  "allow": ["ui/mark.spec.ts"],
+  "checks": ["typecheck", "prettier"],
+  "task": "ui/mark.spec.ts has three Playwright polls that retry an assertion with toPass() and no timeout of their own. Each one therefore inherits the whole test's 30 second budget, which is wrong twice over: when a poll never becomes true the test dies by running out of time instead of failing on the assertion that did not hold, and that timeout also skips the finally block that puts the board back where it found it.\n\nGive the three polls a deadline of their own. Add one shared constant near the top of the file, holding 8000, with a short comment explaining that it is the polls' own budget and why that matters. Then change each of the three toPass() calls to use it.\n\nChange nothing else. The assertions, the tests and the rest of the file stay exactly as they are.",
+  "limits": { "turns": 12, "wallSeconds": 600, "outputTokens": 30000 }
+}
