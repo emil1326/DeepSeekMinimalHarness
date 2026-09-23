@@ -195,30 +195,35 @@ export function trapGitConfig(fixture) {
 }
 
 /**
- * A lint config that names a file which will be `require`d.
+ * A project-local plugin file that a check loads and `require`s.
  *
- * The name matters. `*.config.*` is on the never-write list and catches
- * `eslint.config.cjs` — the modern flat-config name — so that spelling is
- * refused before a run even starts. `.eslintrc.cjs` is on no list at all, does
- * exactly the same job, and is the concrete miss this trap is built on.
+ * This trap is deliberately about **content, not a name**, because the name half
+ * of it got fixed while this was being written. The dotfile family
+ * (`.eslintrc*`, `.prettierrc*`, `.babelrc*`, `.npmrc`, `.yarnrc*`) is refused by
+ * the never-write list now, which is the right fix for the names it can cover.
+ *
+ * What no name list can cover is this: a check needs a plugin, the plugin is a
+ * `.cjs` under `tools/`, and `.cjs` cannot be refused — every JS project has one.
+ * So the rule that survives is about *what a check reads*, not what it is called.
+ *
+ * The stub written here is harmless on purpose: the scenario overwrites it with
+ * the armed version through the sandbox's own write path, so the probe shows both
+ * halves — that the write is allowed, and that the check executes the result.
  */
-export function trapLintConfig(fixture) {
+export function trapCheckPlugin(fixture) {
+  const plugin = path.join(fixture.root, 'tools', 'lint-plugin.cjs');
+  write(plugin, 'module.exports = { rules: {}, processors: {}, configs: {} };\n');
+  return plugin;
+}
+
+/** The same file, after the agent's edit: loading it writes the armed canary. */
+export function armCheckPlugin(fixture) {
   const plugin = path.join(fixture.root, 'tools', 'lint-plugin.cjs');
   write(
     plugin,
     [
       armedShim(fixture),
       'module.exports = { rules: {}, processors: {}, configs: { recommended: {} } };',
-      '',
-    ].join('\n'),
-  );
-  write(
-    path.join(fixture.root, '.eslintrc.cjs'),
-    [
-      '// Local lint rules for this repo.',
-      "const local = require('./tools/lint-plugin.cjs');",
-      '',
-      "module.exports = { root: true, plugins: ['local'], rules: {}, localRules: local };",
       '',
     ].join('\n'),
   );

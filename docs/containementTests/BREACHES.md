@@ -48,22 +48,25 @@ why before moving on.
 
 ## Summary
 
-| #     | Breach                                                           | Severity | Where                                               |
-| ----- | ---------------------------------------------------------------- | -------- | --------------------------------------------------- |
-| BR-1  | The stray-change report fails **open**                           | Critical | `packages/worker/src/stray.ts:18-20`                |
-| BR-2  | The harness executes the repository's own `.git/config`          | Critical | `stray.ts:18` + `packages/daemon/src/server.ts:386` |
-| BR-3  | A regex with no bound wedges the worker, and the cancel with it  | Critical | `packages/core/src/sandbox.ts:245`                  |
-| BR-4  | Legacy config names are on no list, and a check executes them    | High     | `packages/core/src/sandbox.ts:35`                   |
-| BR-5  | A hard link to a file outside the worktree is readable           | High     | `packages/core/src/sandbox.ts` `resolve`            |
-| BR-6  | Check processes inherit the user's environment, filtered by name | High     | `packages/core/src/sandbox.ts:62,412`               |
-| BR-7  | The target need not be an isolated worktree                      | High     | `packages/worker/src/main.ts:95`                    |
-| BR-8  | Nothing bounds how much a run may write                          | Medium   | `packages/core/src/sandbox.ts:361,369`              |
-| BR-9  | Trailing dot and space names are missed, not refused             | Low      | `packages/core/src/sandbox.ts` `matches`            |
-| BR-10 | The `.git` write refusal depends on the read list                | Low      | `packages/core/src/sandbox.ts` `writable`           |
+| #     | Breach                                                                        | Severity | Where                                               |
+| ----- | ----------------------------------------------------------------------------- | -------- | --------------------------------------------------- |
+| BR-1  | The stray-change report fails **open**                                        | Critical | `packages/worker/src/stray.ts:18-20`                |
+| BR-2  | The harness executes the repository's own `.git/config`                       | Critical | `stray.ts:18` + `packages/daemon/src/server.ts:386` |
+| BR-3  | A regex with no bound wedges the worker, and the cancel with it               | Critical | `packages/core/src/sandbox.ts:245`                  |
+| BR-4  | The never-write list catches each toolchain's **primary** name and no variant | High     | `packages/core/src/sandbox.ts:35`                   |
+| BR-5  | A hard link to a file outside the worktree is readable                        | High     | `packages/core/src/sandbox.ts` `resolve`            |
+| BR-6  | Check processes inherit the user's environment, filtered by name              | High     | `packages/core/src/sandbox.ts:62,412`               |
+| BR-7  | The target need not be an isolated worktree                                   | High     | `packages/worker/src/main.ts:95`                    |
+| BR-8  | Nothing bounds how much a run may write                                       | Medium   | `packages/core/src/sandbox.ts:361,369`              |
+| BR-9  | Trailing dot and space names are missed, not refused                          | Low      | `packages/core/src/sandbox.ts` `matches`            |
+| BR-10 | The `.git` write refusal depends on the read list                             | Low      | `packages/core/src/sandbox.ts` `writable`           |
+| BR-11 | The speaker of a message is taken from the request body                       | Medium   | `packages/daemon/src/server.ts:295,311`             |
+| BR-12 | `Origin: null` is accepted                                                    | Low      | `packages/daemon/src/auth.ts:68`                    |
 
 **Severity means:** _Critical_ = it silently defeats a control, or runs code with no user action.
-_High_ = a route out that is reachable and leads somewhere valuable. _Medium_ = resource damage.
-_Low_ = structural, or currently blocked by something else that you should not rely on.
+_High_ = a route out that is reachable and leads somewhere valuable. _Medium_ = resource damage or a
+record that lies. _Low_ = structural, or currently blocked by something else that you should not rely
+on.
 
 **BR-1, BR-2 and BR-3 first.** BR-2 and BR-4 are one shape — something executes a file that was in
 scope — and BR-1 is the control that would have noticed.
@@ -237,30 +240,107 @@ reaches it.
 
 ---
 
-## BR-4 — legacy config names are on no list, and a check executes them
+## BR-4 — the never-write list catches each toolchain's primary name and no variant
 
-**High. An instance of a category, and the category is the real finding.**
+**High, and the first half of it was fixed while this was being written.** Recording that honestly,
+because it is the most useful thing about the finding: the shape is real, and the fix is a list that
+will be behind again.
 
-**Verified, and the catalogue had it half wrong.** `eslint.config.cjs` **is** refused, because
-`*.config.*` catches the modern flat-config name — that part works. `.eslintrc.cjs` is the **legacy**
-name, does exactly the same job, and is on no list at all. So a task may allow it, and a check that
-loads it executes whatever it names:
+### The state when it was found
 
 ```
-ESCAPED  C1  code the agent could write was executed
+refuses  package.json        refuses  build.rs        refuses  Cargo.toml
+refuses  eslint.config.js    refuses  tools/build.rs  refuses  tsconfig.json
+refuses  pyproject.toml
+
+ACCEPTS  .eslintrc     .eslintrc.json   .eslintrc.cjs
+ACCEPTS  .prettierrc   .prettierrc.json .prettierrc.js
+ACCEPTS  .babelrc      .babelrc.js      .npmrc
+ACCEPTS  .yarnrc.yml   conftest.py      setup.js
+ACCEPTS  task.mjs      crates/macros/src/lib.rs
 ```
 
-**Where:** `packages/core/src/sandbox.ts:35` — `NEVER_WRITE`
+The pattern in one table: **the deny list refuses the name each toolchain uses today, and missed every
+variant.** `.eslintrc.cjs` ran the same code as `eslint.config.js`. `.prettierrc.js` is a program.
+`conftest.py` runs on every pytest start.
 
-**Why it is a category:** a deny list is a snapshot of names somebody thought of, matched as a string.
-The space of _"files a toolchain executes on load"_ is large, not enumerable, and changes every
-release. The misses are invisible, because a miss produces no error.
+### What is fixed now
 
-**Fix — as a rule, not a list.** See _Fix these as categories_ below. Per-extension additions are
-worth doing and will always be behind.
+The dotfile family landed in the working tree while this document was being written:
+`.prettierrc*`, `.eslintrc*`, `.babelrc*`, `.stylelintrc*`, `.markdownlint*`, `.npmrc`, `.yarnrc*`. All
+of those now refuse:
+
+```
+refuses  .eslintrc     .eslintrc.json   .eslintrc.cjs
+refuses  .prettierrc   .prettierrc.json .prettierrc.js
+refuses  .babelrc      .babelrc.js      .npmrc        .yarnrc.yml
+```
+
+**Two things to add to that fix:**
+
+- **A regression test.** The names are guarded and nothing pins them. A test that each refuses is one
+  line each, and it is exactly the "control" the plan asks for: remove a name from the list, watch
+  the test go red.
+- **Commit it.** At the time of writing it was uncommitted, and an uncommitted guard is one
+  `git checkout` from not existing.
+
+### What is still open
+
+```
+ACCEPTS  conftest.py      setup.js      task.mjs      crates/macros/src/lib.rs
+```
+
+**1. Content cannot be guarded, only names.** This is the part that survives any list, and the probe
+proves it. ESLint and Prettier both load their config from the working directory before doing
+anything else, and a config that names a plugin makes them `require` it. The plugin is a `.cjs` under
+`tools/`, and `.cjs` cannot be refused — every JS project has one. So:
+
+> A check needs a plugin. The plugin is a file the agent may write. **The list can be complete and
+> the hole is still there.**
+
+`probes/scenarios.mjs`'s `C1` now tests exactly this — a generic `tools/lint-plugin.cjs`, written
+through the sandbox's own write path, executed by the check. It escapes, and it will keep escaping
+until the rule is about _what a check reads_ rather than what the file is called.
+
+**2. `conftest.py` is still allowed.** It runs on every pytest start, so a pytest-based check executes
+it. Same shape as the dotfiles, one toolchain further out.
+
+**3. The Rust half was never about names, and is untouched.** The shipped `profiles/esap.json` runs:
+
+```json
+"cargo_check": { "run": ["cargo", "check", "--workspace", "--all-targets"] },
+"clippy": { "run": ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"] }
+```
+
+**`cargo check` compiles.** It runs `build.rs` build scripts and expands proc macros, both of which are
+code, and `--all-targets` pulls in tests and benches as well. That contradicts the plan outright:
+
+> **Profiles hold static checks only.** Typecheck, lint, formatter. Nothing that executes code the
+> model wrote.
+
+For Rust there is no typecheck that is not a compile. So either the rule is wrong for Rust, or a Rust
+task cannot have a typecheck check — and the deny list's answer (refusing `build.rs` and
+`Cargo.toml`) does not reach it, because **a proc macro lives in an ordinary `.rs` file at any
+path**. `crates/macros/src/lib.rs` is accepted, and `cargo check` runs it. Guarding the file that
+generates code, and not the file that _is_ code, is the gap.
+
+### Fix
+
+- **Keep the dotfile names, add `conftest.py`, `noxfile.py`, `justfile`, `Taskfile*`, `.envrc`.** A
+  stopgap, and worth doing — but see (1): the list is never the fix.
+- **The durable half is the rule.** See _Fix these as categories_, rules 3 and 6.
+- **Decide the Rust question on purpose.** Either the README says that a Rust task's `cargo check`
+  executes code and that is the reviewer's problem, or `--all-targets` and build scripts are refused
+  by policy. Do not leave it implied, because the profile as shipped says "static" and does not mean
+  it.
+- **Refuse any file in a proc-macro crate** when the workload is Rust — `proc-macro = true` in the
+  crate's `Cargo.toml` marks it, so the rule is checkable rather than a guess.
 
 **Test to add.** For each entry in the shipped profiles, a test that the checks it names cannot be
 made to execute a file from the allow list. That is the property; the name list is one attempt at it.
+
+**Careful.** Do not fix this by removing `{allowed}` from the `eslint` and `prettier` checks. That
+would stop linting the files that changed, which is what the check is for.
 
 ---
 
@@ -440,10 +520,94 @@ never-write list — not at write time with a message about reading.
 
 ---
 
+## BR-11 — the speaker of a message is taken from the request body
+
+**Medium, and it is the "make the transcript lie" primitive.**
+
+**Verified, three ways:**
+
+```
+typed as Speaker in protocol.ts:      true
+validated before use in server.ts:    false
+taken straight from the body:         true
+```
+
+**Where:** `packages/daemon/src/server.ts:295` and `:311`
+
+```ts
+supervisor.sendMessage(messageRoute[1] as string, body.text, body.by ?? 'claude');
+supervisor.answer(answerRoute[1] as string, body.id, body.text, body.by ?? 'claude');
+```
+
+and `packages/daemon/src/protocol.ts:46,52` — `by?: Speaker`.
+
+**Why it matters:** the speaker travels **with the content**, so whoever writes the request chooses
+who is recorded as having said it. `Speaker` is `'agent' | 'claude' | 'emil' | 'system'`, which is a
+TypeScript union and therefore **not a runtime check** — at a boundary the type is a promise the
+compiler cannot keep, and nothing validates the value before it is stored and rendered.
+
+So anything holding the token can write a turn into any run's log that reads as **`emil`**. In a UI
+where the whole point is seeing who said what, and in a log the plan treats as the audit trail, that
+is the integrity of every other claim in it.
+
+**How it is reached, and why it is Medium rather than Low.** Every route here is behind the token, so
+this is not open by default. But the chain from the catalogue is: code execution in a check (BR-2,
+BR-4) → `HOME` in the check's environment (BR-6) → the harness home → `daemon.json` → the token →
+this. Each link is separately verified. And a nastier variant needs no question at all: a check that
+spawns a **detached** process which posts a fake `answer` with `by: 'emil'` unblocks the run's `ask`
+with a reply from a human who never saw it.
+
+**Fix.** Derive the speaker from the **authenticated channel**, not the body. The CLI is `claude`, the
+UI's session cookie is `emil`, and the worker's own events are `agent`. Then ignore `by` if a client
+sends one, and validate the value against the union at every boundary rather than trusting the type.
+
+**Test to add.** A request with `by: 'emil'` over the CLI's bearer token must record `claude`, not
+`emil`. Control: today it records `emil`.
+
+**Careful.** Keep `by` in the request type if you like, so callers do not break — but stop reading it.
+
+---
+
+## BR-12 — `Origin: null` is accepted
+
+**Low, defence in depth. Verified.**
+
+```
+ACCEPTS  undefined
+ACCEPTS  ""
+ACCEPTS  "null"
+ACCEPTS  "http://localhost:5173"
+ACCEPTS  "http://127.0.0.1:5173"
+refuses  "http://evil.example"
+```
+
+**Where:** `packages/daemon/src/auth.ts:68`
+
+```ts
+if (header === undefined || header === '' || header === 'null') return true;
+```
+
+**Why it matters, and why it is Low.** A foreign `Origin` is correctly refused. `null` is the one
+that is not, and it is a real value: sandboxed iframes and `file://` pages send `Origin: null`, which
+is exactly the set of contexts the check exists to exclude.
+
+The token still blocks them — a `SameSite=Strict` cookie is not sent cross-site, and a page cannot
+read `daemon.json` — so this is not a way in on its own. But it is one line, and the _only_ reason to
+allow it is that the CLI sends no `Origin` at all — which is `undefined`, already covered by the first
+condition. So `'null'` is doing nothing but widening the check.
+
+**Fix.** Drop `|| header === 'null'`. If some non-browser client turns out to need it, add it back
+with a comment saying which one and why.
+
+**Test to add.** A request with `Origin: null` is refused. Control: `undefined` is still accepted, so
+the CLI keeps working.
+
+---
+
 ## Fix these as categories, not instances
 
-Three of the ten are one shape: **a file in scope that something executes.** BR-2 and BR-4 are both
-that, and listing extensions will lose. Four rules scale:
+Two of the twelve are one shape: **a file in scope that something executes.** BR-2 and BR-4 are both
+that, and listing extensions will lose. Six rules scale:
 
 **1. Never fail open.** Audit every `catch` that returns the success value. BR-1 is the verified one;
 grep for the pattern and check each answer.
@@ -467,6 +631,19 @@ extension and believes the problem is handled.
 
 **4. An allowlist beats a denylist wherever the set is knowable.** BR-6 is the clear case: the
 variables a check needs are a short, known list.
+
+**5. A TypeScript type is not a runtime check at a boundary.** BR-11 is the case: `by?: Speaker`
+reads as a guarantee and enforces nothing, so any string on the wire is stored and displayed. Every
+type that crosses an HTTP body, an IPC message, a task file or a check's output has to be validated
+at the point it arrives — that is what `zod` is already in the tree for. The types are for the
+people; the parse is for the attacker.
+
+**6. Say plainly which checks run code, because the plan's premise does not hold.** The plan says
+_"profiles hold static checks only — nothing that executes code the model wrote"_. `cargo check`
+compiles, `eslint` and `prettier` load configs, and `npm run typecheck` runs whatever `package.json`
+says. A check cannot be guaranteed static by its name, and for Rust there is no static typecheck at
+all. So the README should say which of the shipped checks execute code, and a task author should have
+to decide knowing it.
 
 ---
 
@@ -512,6 +689,13 @@ the pattern is in `probes/scenarios.mjs`.
   a task's allow list, name the program that reads it.
 - **`.gitattributes` and `.gitignore` blinding a diff.** Plausible, and the diff is the review, so a
   change to how the diff is presented deserves a probe.
+- **`H5` — the profile hands a check a path outside the worktree, and the shipped one does.** Not
+  suspected: `profiles/esap.json` sets `CARGO_TARGET_DIR: "{parent}/esap-ds-target"`, and `{parent}`
+  is the directory **above** the worktree. That is deliberate and reasonable — keeping `target/` out
+  of the tree is what you want — but it means every `cargo` check writes outside the sandbox by
+  design, which is the one escape route that is written down in the trusted config rather than
+  discovered. What is _not_ verified is what else the placeholder is used for, and whether any check
+  can be talked into using the path it is handed. Probe `H5` before deciding it is fine.
 - **BR-6's chain, end to end.** From code execution to the daemon token to driving the daemon. The
   pieces are each verified; the chain was not run.
 - **The write side of BR-5.** The read side is verified. The write side follows from the same
