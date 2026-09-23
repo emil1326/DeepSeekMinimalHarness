@@ -20,6 +20,7 @@ import {
   exceeded,
   formatCount,
   limitUse,
+  warnThreshold,
   type LimitUse,
 } from '@emilswork/harness-core';
 
@@ -115,6 +116,26 @@ describe('stopping at a limit', () => {
 });
 
 describe('warning before a limit arrives', () => {
+  it('warns on a small budget, where a ratio threshold would never fire', () => {
+    // Found live. With four turns, the ratio at the moments the loop checks goes
+    // 0, 0.25, 0.5, 0.75, and then the run is over: 0.8 is never reached, so a
+    // four-turn run was stopped by its limit having been told nothing at all.
+    // The threshold is on what is left, with a floor of one.
+    const uses = limitUse(readings({ turns: 3 }), { ...LIMITS, turns: 4 });
+    expect(approaching(uses, new Set()).map((use) => use.which)).toEqual(['turns']);
+    expect(warnThreshold(4)).toBe(1);
+  });
+
+  it('warns on the only turn a one-turn budget has', () => {
+    const uses = limitUse(readings({ turns: 0 }), { ...LIMITS, turns: 1 });
+    expect(approaching(uses, new Set()).map((use) => use.which)).toEqual(['turns']);
+  });
+
+  it('counts what is left, so the notice can say it', () => {
+    const uses = limitUse(readings({ turns: 7 }), LIMITS);
+    expect(uses.find((use) => use.which === 'turns')?.remaining).toBe(3);
+  });
+
   it('warns once a limit is four fifths used', () => {
     const uses = limitUse(readings({ turns: 8 }), LIMITS);
     const near = approaching(uses, new Set());
@@ -158,7 +179,13 @@ describe('warning before a limit arrives', () => {
 
 describe('describing a limit', () => {
   it('gives both numbers, rounded for a person', () => {
-    const use: LimitUse = { which: 'totalTokens', used: 1_240_000, budget: 2_000_000, ratio: 0.62 };
+    const use: LimitUse = {
+      which: 'totalTokens',
+      used: 1_240_000,
+      budget: 2_000_000,
+      remaining: 760_000,
+      ratio: 0.62,
+    };
     expect(describeLimit(use)).toBe('1.2M of 2M');
   });
 

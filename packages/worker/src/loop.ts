@@ -38,18 +38,14 @@ import {
  */
 function warnAbout(use: LimitUse): string {
   const what: Record<CumulativeLimit, string> = {
-    turns: 'turns',
-    wallSeconds: 'seconds of wall clock',
-    outputTokens: 'output tokens',
-    totalTokens: 'billed tokens',
+    turns: 'model call',
+    wallSeconds: 'second',
+    outputTokens: 'output token',
+    totalTokens: 'billed token',
   };
-  const left =
-    use.which === 'turns'
-      ? `${Math.max(0, use.budget - use.used)} model call${use.budget - use.used === 1 ? '' : 's'}`
-      : `${formatCount(Math.max(0, use.budget - use.used))} ${what[use.which]}`;
+  const left = `${formatCount(use.remaining)} ${what[use.which]}${use.remaining === 1 ? '' : 's'}`;
   return (
-    `[harness] You are near a limit: ${formatCount(use.used)} of ${formatCount(use.budget)} ` +
-    `${what[use.which]} used, about ${left} left.\n` +
+    `[harness] You are near a limit: ${left} left of ${formatCount(use.budget)} (${formatCount(use.used)} already used).\n` +
     `Finish what you can within it. If you genuinely need more room, call ask with how much ` +
     `more you need and what is left to do, and the person who launched you can grant it. ` +
     `If you cannot finish, call finish saying exactly what is done and what is not.`
@@ -157,6 +153,32 @@ class TextBuffer {
   }
 }
 
+/**
+ * What a continued run is told before it carries on.
+ *
+ * Without this, the agent does what its transcript tells it to. The last thing
+ * it heard before it stopped was "you have run out of room, wrap up", so it
+ * wrapped up: measured live, a continuation's first and only act was to call
+ * `finish` with a summary of the one file it had managed. Replaying a
+ * conversation whose ending is an instruction to stop, and then expecting the
+ * work to resume, is expecting the model to ignore its own context.
+ *
+ * Appended rather than inserted, so every message before it is byte-identical to
+ * what the previous run sent and the prompt cache still matches. A cache hit is
+ * a prefix match; a message at the end does not disturb the prefix.
+ */
+function continuationMessage(limits: RunLimits, resumes: number): string {
+  return (
+    `[harness] You are continuing an earlier run that stopped at a limit. You now have ` +
+    `${limits.turns} turns and ${formatCount(limits.totalTokens)} billed tokens.\n` +
+    `That run made ${resumes} model calls. Its edits are already in the worktree: do not redo them, and ` +
+    `do not re-read a file to check whether you changed it, because you did.\n` +
+    `Carry on from where you stopped. The remaining work is whatever you had not done when you ran out. ` +
+    `When it is all done, and the checks pass, call finish with a summary of the whole task, not just this ` +
+    `continuation.`
+  );
+}
+
 /** The agent loop: one model call per turn, a closed set of tools, limits, finish. */
 export async function runAgentLoop(options: LoopOptions, control: LoopControl): Promise<LoopResult> {
   const { sandbox, client, config, emit } = options;
@@ -170,29 +192,48 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
   /** Limits already announced, so each is warned about once and not every turn. */
   const warned = new Set<CumulativeLimit>();
 
-  const messages: ChatMessage[] =
-    options.resume !== undefined && options.resume.length > 0
-      ? // The previous conversation, verbatim, so the prefix still matches and
+  const continuing = options.resume !== undefined && options.resume.length > 0;
+  const messages: ChatMessage[] = continuing
+    ? [
+        // The previous conversation, verbatim, so the prefix still matches and
         // still bills at the cache rate.
-        [...options.resume]
-      : [
-          { role: 'system', content: SYSTEM_PROMPT },
-          {
-            role: 'user',
-            content: taskMessage({
-              task: config.task,
-              allow: [...sandbox.allow].sort(),
-              checks: sandbox.checkNames,
-            }),
-          },
-        ];
-
-  // Offered straight away, so a run that is interrupted on its first turn is
-  // still continuable.
-  options.onTranscript?.(messages);
+        ...(options.resume as ChatMessage[]),
+        // And then one message of its own, at the end where it cannot disturb
+        // that prefix, saying what has changed since it stopped.
+        {
+          role: 'user',
+          content: continuationMessage(limits, (options.resume as ChatMessage[]).length),
+        },
+      ]
+    : [
+        { role: 'system', content: SYSTEM_PROMPT },
+        {
+          role: 'user',
+          content: taskMessage({
+            task: config.task,
+            allow: [...sandbox.allow].sort(),
+            checks: sandbox.checkNames,
+          }),
+        },
+      ];
 
   const specs = toolSpecs(sandbox.checkNames);
   let turn = 0;
+
+  /**
+   * Hand the conversation out, so this run can be continued later.
+   *
+   * Called only where the message list is *balanced*: every `tool_calls` id has
+   * its one `tool` reply. A list that ends with an assistant `tool_calls` and no
+   * replies is a request the API rejects, so writing one mid-tool-call would
+   * make a run uncontinuable at exactly the moment somebody wants to continue
+   * it. Any return that skips the end-of-turn save has to call this itself.
+   */
+  const save = (): void => options.onTranscript?.(messages);
+
+  // Offered straight away, so a run that is interrupted on its first turn is
+  // still continuable.
+  save();
 
   for (turn = 1; turn <= limits.turns; turn += 1) {
     if (control.signal.aborted) return { status: 'cancelled', summary };
@@ -299,15 +340,13 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
     totals = totalsOf(totals, outcome.metrics, options.price);
     emit({ type: 'metrics', turn, call: outcome.metrics, totals });
     messages.push(outcome.message);
-    // After the assistant turn and before any tool results, so what is on disk
-    // is always a valid conversation the API would accept: an assistant with
-    // tool_calls and no replies yet is a request that has not been finished, not
-    // a malformed one.
-    options.onTranscript?.(messages);
 
     const calls = outcome.message.tool_calls ?? [];
     if (calls.length === 0) {
       // The model answered without calling a tool. That is as final as finish.
+      // Balanced, so worth writing: an assistant message with no tool calls ends
+      // an exchange.
+      save();
       summary = outcome.message.content ?? '(stopped without calling finish)';
       emit({ type: 'summary', text: summary });
       return { status: 'finished', summary };
@@ -322,6 +361,10 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
       if (name === 'finish') {
         summary = typeof args.summary === 'string' ? args.summary : '';
         pushToolResult(messages, call, 'ok');
+        // Saved before returning, because this is a return inside the turn loop:
+        // the end-of-turn save below never runs, and without this the last
+        // transcript on disk is one exchange out of date.
+        save();
         emit({ type: 'tool.result', turn, id: call.id, name, ok: true, result: 'ok' });
         emit({ type: 'summary', text: summary });
         return { status: 'finished', summary };
@@ -385,9 +428,12 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
       }
       index += batch.length - 1;
     }
-    // Once per turn's tool results, not per result: the conversation is only
-    // valid to send at a tool-call boundary anyway.
-    options.onTranscript?.(messages);
+    // Once per turn's tool results, not per result. And only here, or at one of
+    // the other balanced points: a transcript that ends with an assistant
+    // `tool_calls` and no replies is a conversation the API refuses, so writing
+    // one between the call and its result would make the run uncontinuable at
+    // exactly the moment somebody wants to continue it.
+    save();
   }
 
   // The loop ran out by counting up to `turns`, which is the same thing as the

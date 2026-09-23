@@ -18,16 +18,16 @@
  * the report says separately whether the checks agreed.
  */
 
-import { checkPassed } from './checks.js';
+import { checkOutcome, type CheckOutcome } from './checks.js';
 import type { RunEvent, RunStatus, RunTotals } from './events.js';
-import { limitUse, type LimitUse } from './limits.js';
+import { elapsedSeconds, limitUse, type LimitUse } from './limits.js';
 import type { RunLimits } from './task.js';
 
 /** The last result of each check the run ran. */
-export interface CheckOutcome {
+export interface CheckResult {
   name: string;
-  /** Whether the check's own output says it passed. */
-  passed: boolean;
+  /** Passed, failed, or could not be run at all. */
+  outcome: CheckOutcome;
   /** Its output, trimmed to something a report can carry. */
   output: string;
 }
@@ -57,7 +57,7 @@ export interface RunReport {
    * and the last thing a check said was that it was not.
    */
   claimSupported: boolean | null;
-  checks: CheckOutcome[];
+  checks: CheckResult[];
   /** Files the run was allowed to change, for reference. */
   allowed: string[];
   /** Files git says actually changed. */
@@ -98,7 +98,9 @@ export function buildReport(input: ReportInput): RunReport {
   const used = limitUse(
     {
       turns: input.turns,
-      elapsedSeconds: elapsedSecondsOf(input.events),
+      // From the events, so the wall clock stops when the run did rather than
+      // growing for as long as nobody looks at it.
+      elapsedSeconds: elapsedBetween(input.events),
       totals: input.totals,
     },
     input.limits,
@@ -111,10 +113,11 @@ export function buildReport(input: ReportInput): RunReport {
             stopped.which === 'contextTokens' || stopped.which === 'askSeconds' ? 'turns' : stopped.which,
           used: stopped.used,
           budget: stopped.budget,
+          remaining: Math.max(0, stopped.budget - stopped.used),
           ratio: stopped.budget > 0 ? stopped.used / stopped.budget : 1,
         };
 
-  const failed = checks.filter((check) => !check.passed);
+  const failed = checks.filter((check) => check.outcome === 'fail');
   const claim = input.summary === null || input.summary === '' ? null : input.summary;
 
   return {
@@ -152,8 +155,8 @@ export function buildReport(input: ReportInput): RunReport {
  */
 function headline(
   input: ReportInput,
-  checks: CheckOutcome[],
-  failed: CheckOutcome[],
+  checks: CheckResult[],
+  failed: CheckResult[],
   stopped: RunEvent | undefined,
 ): string {
   const turns = `${input.turns} turn${input.turns === 1 ? '' : 's'}`;
@@ -176,6 +179,11 @@ function headline(
   if (input.status === 'finished' && checks.length === 0) {
     return `Finished after ${turns}, and ran no checks, so nothing verified it.`;
   }
+  if (input.status === 'finished' && checks.every((check) => check.outcome === 'unavailable')) {
+    // Only checks that could not be run. Saying "every check it ran passed" over
+    // an empty set of real results would be true and completely misleading.
+    return `Finished after ${turns}, but not one of its checks could be run, so nothing verified it.`;
+  }
   if (input.status === 'finished') {
     return `Finished after ${turns}, and every check it ran passed.`;
   }
@@ -186,7 +194,7 @@ function headline(
 }
 
 /** The last result of each check, in the order the checks were first run. */
-function lastCheckOutcomes(events: RunEvent[]): CheckOutcome[] {
+function lastCheckOutcomes(events: RunEvent[]): CheckResult[] {
   const names = new Map<string, { name: string; callId: string }>();
   for (const event of events) {
     if (event.type !== 'tool.call' || event.name !== 'run_check') continue;
@@ -195,7 +203,7 @@ function lastCheckOutcomes(events: RunEvent[]): CheckOutcome[] {
     names.set(event.id, { name, callId: event.id });
   }
   const order: string[] = [];
-  const latest = new Map<string, CheckOutcome>();
+  const latest = new Map<string, CheckResult>();
   for (const event of events) {
     if (event.type !== 'tool.result') continue;
     const called = names.get(event.id);
@@ -203,11 +211,11 @@ function lastCheckOutcomes(events: RunEvent[]): CheckOutcome[] {
     if (!order.includes(called.name)) order.push(called.name);
     latest.set(called.name, {
       name: called.name,
-      passed: checkPassed(event.result),
+      outcome: checkOutcome(event.result),
       output: trim(event.result),
     });
   }
-  return order.map((name) => latest.get(name)).filter((entry): entry is CheckOutcome => entry !== undefined);
+  return order.map((name) => latest.get(name)).filter((entry): entry is CheckResult => entry !== undefined);
 }
 
 function askedQuestions(events: RunEvent[]): { question: string; answer: string | null }[] {
@@ -222,11 +230,12 @@ function askedQuestions(events: RunEvent[]): { question: string; answer: string 
   return [...asked.values()];
 }
 
-function elapsedSecondsOf(events: RunEvent[]): number {
+/** How long the event log spans, which is the run's own wall clock. */
+function elapsedBetween(events: RunEvent[]): number {
   const first = events[0]?.at;
   const last = events[events.length - 1]?.at;
   if (first === undefined || last === undefined) return 0;
-  return Math.max(0, (Date.parse(last) - Date.parse(first)) / 1000);
+  return elapsedSeconds({ startedAt: first, endedAt: last });
 }
 
 function trim(text: string): string {

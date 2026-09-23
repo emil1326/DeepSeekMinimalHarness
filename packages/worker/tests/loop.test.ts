@@ -80,6 +80,7 @@ async function drive(
   script: ScriptedTurn[],
   task: Record<string, unknown>,
   control: TestControl,
+  options: { resume?: ChatMessage[]; onTranscript?: (messages: ChatMessage[]) => void } = {},
 ): Promise<HarnessResult> {
   const server = await startFakeDeepSeek(script);
   const config = fixture.writeTask(`task-${Math.random().toString(36).slice(2)}`, task);
@@ -91,7 +92,10 @@ async function drive(
   });
   const client = new DeepSeekClient({ apiKey: 'test-key', baseUrl: server.url });
   const events: RunEventBody[] = [];
-  const result = await runAgentLoop({ sandbox, client, config, emit: (body) => events.push(body) }, control);
+  const result = await runAgentLoop(
+    { sandbox, client, config, emit: (body) => events.push(body), ...options },
+    control,
+  );
   return {
     status: result.status,
     summary: result.summary,
@@ -104,6 +108,138 @@ async function drive(
 function messagesOf(result: HarnessResult, index: number): ChatMessage[] {
   return (result.requests[index]?.messages ?? []) as ChatMessage[];
 }
+
+describe('carrying on from an earlier run', () => {
+  /**
+   * A conversation as the previous run would have ended with it.
+   *
+   * The exact array is the point: the prompt cache is a *prefix* match, so a
+   * continuation has to send these bytes in this order, and the one thing this
+   * must not do is rebuild the conversation from the event log or a summary.
+   */
+  function transcript(): ChatMessage[] {
+    return [
+      { role: 'system', content: 'the original system prompt' },
+      { role: 'user', content: 'the original task' },
+      { role: 'assistant', content: 'let me look' },
+      { role: 'user', content: '[harness] You are near a limit: 1 model call left of 4' },
+    ];
+  }
+
+  it('sends the previous conversation verbatim, so the cache prefix still matches', async () => {
+    const before = transcript();
+    const control = new TestControl();
+    const result = await drive(
+      [{ toolCalls: [{ name: 'finish', args: { summary: 'carried on' } }] }],
+      {},
+      control,
+      { resume: before },
+    );
+
+    const sent = messagesOf(result, 0);
+    // Every message the previous run had, unchanged and in the same order.
+    expect(sent.slice(0, before.length)).toEqual(before);
+    await result.server.close();
+  });
+
+  it('appends what has changed rather than replacing anything', async () => {
+    // Appended, because anything inserted would break the prefix and cost the
+    // continuation the whole cache: measured live, a continuation's first turn
+    // was 91% cache hits with the message at the end.
+    const before = transcript();
+    const control = new TestControl();
+    const result = await drive(
+      [{ toolCalls: [{ name: 'finish', args: { summary: 'carried on' } }] }],
+      {},
+      control,
+      { resume: before },
+    );
+
+    const sent = messagesOf(result, 0);
+    expect(sent).toHaveLength(before.length + 1);
+    expect(sent.slice(0, before.length)).toEqual(before);
+    const added = sent[sent.length - 1];
+    expect(added?.role).toBe('user');
+    await result.server.close();
+  });
+
+  it('says it has room and must not redo what is already done', async () => {
+    // Found live: without this the continuation's first and only act was to call
+    // `finish`. The last thing in its transcript was "you have run out of room,
+    // wrap up", so it wrapped up. Replaying an instruction to stop and expecting
+    // work to resume is expecting the model to ignore its own context.
+    const control = new TestControl();
+    const result = await drive(
+      [{ toolCalls: [{ name: 'finish', args: { summary: 'carried on' } }] }],
+      {},
+      control,
+      { resume: transcript() },
+    );
+
+    const added = messagesOf(result, 0).at(-1)?.content ?? '';
+    expect(String(added)).toContain('continuing an earlier run');
+    expect(String(added)).toContain('do not redo them');
+    expect(String(added)).toContain('Carry on from where you stopped');
+    await result.server.close();
+  });
+
+  it('starts a fresh conversation when there is nothing to carry on from', async () => {
+    // The control. An empty resume must not become an empty conversation: the
+    // system prompt and the task are what make the run a run.
+    const control = new TestControl();
+    const result = await drive(
+      [{ toolCalls: [{ name: 'finish', args: { summary: 'from scratch' } }] }],
+      {},
+      control,
+      { resume: [] },
+    );
+
+    const sent = messagesOf(result, 0);
+    expect(sent[0]?.role).toBe('system');
+    expect(String(sent[1]?.content)).toContain('src/a.ts');
+    // And no continuation notice, because this is not a continuation.
+    expect(sent.some((message) => String(message.content).includes('continuing an earlier run'))).toBe(false);
+    await result.server.close();
+  });
+
+  it('hands the conversation out as it goes, and only ever balanced', async () => {
+    // The invariant: every `tool_calls` id has exactly one `tool` reply. That is
+    // what the API requires, and a transcript that violates it cannot be sent
+    // again — so a run that stopped with an unbalanced one would be
+    // uncontinuable at exactly the moment somebody wants to continue it.
+    //
+    // The failure this caught: a transcript written between the assistant's
+    // `finish` call and its reply, which ended the file with a `tool_calls` and
+    // nothing answering it.
+    const seen: ChatMessage[][] = [];
+    const control = new TestControl();
+    const result = await drive(
+      [
+        { toolCalls: [{ name: 'read_file', args: { path: 'src/a.ts' } }] },
+        { toolCalls: [{ name: 'finish', args: { summary: 'done' } }] },
+      ],
+      {},
+      control,
+      { onTranscript: (messages) => seen.push(messages.map((message) => ({ ...message }))) },
+    );
+
+    expect(seen.length).toBeGreaterThanOrEqual(3);
+    for (const [at, messages] of seen.entries()) {
+      const calls = messages.flatMap((message) => (message.tool_calls ?? []).map((call) => call.id));
+      const replies = messages
+        .filter((message) => message.role === 'tool')
+        .map((message) => message.tool_call_id);
+      expect(replies, `snapshot ${at}`).toEqual(calls);
+    }
+
+    // And the last one is up to date: it includes the exchange that ended the
+    // run, rather than being one turn out of date.
+    const last = seen.at(-1) ?? [];
+    expect(last.at(-1)?.role).toBe('tool');
+    expect(last.some((message) => (message.tool_calls ?? []).length > 0)).toBe(true);
+    await result.server.close();
+  });
+});
 
 describe('the agent loop', () => {
   it('reads, edits, runs a check and finishes', async () => {

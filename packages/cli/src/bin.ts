@@ -13,6 +13,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { Command } from 'commander';
 import {
+  elapsedSeconds,
   formatCount,
   isTerminal,
   limitUse,
@@ -190,13 +191,23 @@ program
       const uses = limitUse(
         {
           turns: detail.turns,
-          elapsedSeconds: detail.startedAt === null ? 0 : (Date.now() - Date.parse(detail.startedAt)) / 1000,
+          // To the run's own end, not to now. A finished run's wall clock does
+          // not keep growing while nobody is looking at it.
+          elapsedSeconds: elapsedSeconds({ startedAt: detail.startedAt, endedAt: detail.endedAt }),
           totals: detail.totals,
         },
         detail.config.limits,
       );
       process.stdout.write(`${pad('LIMIT', 16)}${pad('USED', 12)}${pad('OF', 12)}${pad('LEFT', 12)}\n`);
+      // A terminal run with no end time cannot say how long it ran, and
+      // guessing "until now" reports a five-figure wall clock for a run of a few
+      // minutes. Saying so is better than a number that is plainly wrong.
+      const wallClockKnown = !(isTerminal(detail.status) && detail.endedAt === null);
       for (const use of uses) {
+        if (use.which === 'wallSeconds' && !wallClockKnown) {
+          process.stdout.write(`${pad(use.which, 16)}${pad('unknown', 12)}${pad('?', 12)}${pad('?', 12)}\n`);
+          continue;
+        }
         const left = Math.max(0, use.budget - use.used);
         process.stdout.write(
           `${pad(use.which, 16)}${pad(formatCount(use.used), 12)}${pad(formatCount(use.budget), 12)}${pad(formatCount(left), 12)}\n`,
@@ -295,7 +306,7 @@ program
       const paint = (code: 'red' | 'yellow' | 'green' | 'dim' | 'bold', text: string): string =>
         withColour(colour, code, text);
       const line = (label: string, value: string): void => {
-        process.stdout.write(`${pad(label, 14)}${value}\n`);
+        process.stdout.write(`${pad(label, 16)}${value}\n`);
       };
 
       const tone =
@@ -335,7 +346,12 @@ program
         process.stdout.write('  none were run, so nothing verified this change\n');
       }
       for (const check of report.checks) {
-        const word = check.passed ? paint('green', 'pass') : paint('red', 'FAIL');
+        const word =
+          check.outcome === 'pass'
+            ? paint('green', 'pass')
+            : check.outcome === 'fail'
+              ? paint('red', 'FAIL')
+              : paint('yellow', 'n/a ');
         line(`  ${check.name}`, `${word}  ${check.output.split('\n').slice(0, 2).join(' | ').slice(0, 160)}`);
       }
 
@@ -436,17 +452,6 @@ program
       guard(async () => {
         const client = await DaemonClient.connect();
         const parent = await client.run(run);
-        // Checked before anything is started. A continuation is driven from the
-        // same task file, so without one there is nothing to re-resolve the
-        // worktree and profile from. (A run whose original commit is gone still
-        // works: the file is read fresh, and its own hash is checked.)
-        if (parent.config.sourcePath === null) {
-          process.stderr.write(
-            `dsh: ${run} does not record the task file it was started from, so it cannot be continued\n`,
-          );
-          process.exitCode = 1;
-          return;
-        }
         const limits: Record<string, number> = {};
         const names = ['turns', 'wallSeconds', 'outputTokens', 'totalTokens'] as const;
         for (const name of names) {
@@ -461,7 +466,9 @@ program
           limits.totalTokens = parent.limits.totalTokens * 2;
         }
         const created = await client.json<{ id: string }>('POST', '/runs', {
-          taskPath: parent.config.sourcePath,
+          // The same task file it was resolved from, re-read rather than
+          // copied, so a corrected task file is what the continuation gets.
+          taskPath: parent.config.configPath,
           continueFrom: run,
           limits,
           detached: options.detach === true,
@@ -727,7 +734,7 @@ function nearestLimit(run: RunSummary): string {
   const uses = limitUse(
     {
       turns: run.turns,
-      elapsedSeconds: run.startedAt === null ? 0 : (Date.now() - Date.parse(run.startedAt)) / 1000,
+      elapsedSeconds: elapsedSeconds({ startedAt: run.startedAt, endedAt: run.endedAt }),
       totals: run.totals,
     },
     run.limits,
@@ -744,8 +751,15 @@ function cost(run: RunSummary): string {
 function duration(run: RunSummary): string {
   const start = run.startedAt === null ? null : Date.parse(run.startedAt);
   if (start === null) return '-';
-  const end = run.endedAt === null ? Date.now() : Date.parse(run.endedAt);
-  return `${Math.max(0, Math.round((end - start) / 1000))}s`;
+  if (run.endedAt === null) {
+    // Still going, so to now. Finished but with no end recorded is different:
+    // the process died and nobody wrote the time down, and measuring to now
+    // makes the duration grow for as long as the row exists, which is how
+    // `dsh list` came to show 13,281s for a run of a few minutes.
+    if (isTerminal(run.status)) return '-';
+    return `${Math.max(0, Math.round((Date.now() - start) / 1000))}s`;
+  }
+  return `${Math.max(0, Math.round((Date.parse(run.endedAt) - start) / 1000))}s`;
 }
 
 function seconds(value: number | null): string {

@@ -6,10 +6,12 @@ import { isTerminal } from '../types';
 import { Chat } from './Chat';
 import { ConfigView } from './Config';
 import { DiffView } from './Diff';
+import { Limits } from './Limits';
 import { MetricsStrip } from './Metrics';
+import { Report } from './Report';
 import { StatusPill } from './Status';
 
-type Tab = 'chat' | 'config' | 'diff';
+type Tab = 'chat' | 'report' | 'config' | 'diff';
 
 export function AgentPage({ runId, onBack }: { runId: string; onBack: () => void }) {
   const [tab, setTab] = useState<Tab>('chat');
@@ -74,6 +76,13 @@ export function AgentPage({ runId, onBack }: { runId: string; onBack: () => void
           {detail.detached && <span>detached</span>}
         </div>
         <MetricsStrip call={lastCall} totals={detail.totals} />
+        <Limits
+          runId={runId}
+          turns={detail.turns}
+          totals={detail.totals}
+          limits={detail.limits}
+          status={detail.status}
+        />
       </div>
 
       {detail.detail !== null && (
@@ -95,6 +104,17 @@ export function AgentPage({ runId, onBack }: { runId: string; onBack: () => void
         <button className="tab" role="tab" aria-selected={tab === 'chat'} onClick={() => setTab('chat')}>
           chat
         </button>
+        {/* Not hidden when the run is going: a limit stop is the thing most
+            worth reading, and it is exactly when there is a report to read. */}
+        <button
+          className="tab"
+          role="tab"
+          aria-selected={tab === 'report'}
+          onClick={() => setTab('report')}
+          data-loud={!live && detail.status !== 'finished'}
+        >
+          report
+        </button>
         <button className="tab" role="tab" aria-selected={tab === 'config'} onClick={() => setTab('config')}>
           config
         </button>
@@ -102,6 +122,8 @@ export function AgentPage({ runId, onBack }: { runId: string; onBack: () => void
           diff
         </button>
       </div>
+
+      {tab === 'report' && <Report runId={runId} live={live} taskPath={detail.config.configPath} />}
 
       {tab === 'chat' && <Chat runId={runId} events={events.data ?? []} live={live} />}
 

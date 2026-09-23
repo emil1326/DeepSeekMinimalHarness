@@ -273,6 +273,7 @@ describe('the daemon', () => {
           askSeconds: 1,
         },
         sourcePath: null,
+        configPath: path.join(home, 'task.json'),
         raw: {},
         resolvedProfile: {},
       },
@@ -283,6 +284,62 @@ describe('the daemon', () => {
     const reopened = new Store(file);
     expect(reopened.markRunningAsInterrupted()).toBe(1);
     expect(reopened.getRun('run-old')?.status).toBe('interrupted');
+    reopened.close();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('ends an interrupted run at its last event, not at the moment it was noticed', async () => {
+    // Found by running against real runs: two of them were marked interrupted by
+    // a daemon started the next morning, and their end times were set to that
+    // moment. `dsh list` reported 13,281 seconds for a run of a few minutes, and
+    // the wall-clock limit looked like the thing that had stopped them. A run's
+    // duration is a fact about the run.
+    const home = fs.mkdtempSync(path.join(process.env.TEMP ?? '/tmp', 'dsh-interrupt-'));
+    const file = path.join(home, 'runs.db');
+    const started = '2026-01-01T10:00:00.000Z';
+    const lastEvent = '2026-01-01T10:04:00.000Z';
+
+    const store = new Store(file);
+    store.createRun({
+      id: 'run-crashed',
+      name: 'crashed',
+      detached: true,
+      createdAt: started,
+      config: {
+        name: 'crashed',
+        worktree: home,
+        profile: path.join(home, 'p.json'),
+        profileHash: 'x',
+        model: 'deepseek-flash',
+        allow: ['src/a.ts'],
+        checks: [],
+        task: 'x',
+        limits: {
+          turns: 50,
+          wallSeconds: 3600,
+          outputTokens: 1000,
+          totalTokens: 1000,
+          contextTokens: 500_000,
+          askSeconds: 1,
+        },
+        sourcePath: null,
+        configPath: path.join(home, 'task.json'),
+        raw: {},
+        resolvedProfile: {},
+      },
+    });
+    store.setStatus('run-crashed', 'running');
+    store.appendEvent('run-crashed', { type: 'turn.start', turn: 1 }, started);
+    store.appendEvent('run-crashed', { type: 'turn.start', turn: 2 }, lastEvent);
+    store.close();
+
+    // Reopened much later, as a daemon started the next morning would.
+    const reopened = new Store(file);
+    expect(reopened.markRunningAsInterrupted()).toBe(1);
+    const run = reopened.getRun('run-crashed');
+    expect(run?.status).toBe('interrupted');
+    // Four minutes, not however long the machine was asleep.
+    expect(run?.endedAt).toBe(lastEvent);
     reopened.close();
     fs.rmSync(home, { recursive: true, force: true });
   });

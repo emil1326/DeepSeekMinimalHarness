@@ -81,7 +81,23 @@ export interface ResolvedRunConfig {
   checks: string[];
   task: string;
   limits: RunLimits;
+  /**
+   * The task text file, when the task file pointed at one.
+   *
+   * Null for a task whose text is inline in the JSON, which is the common case.
+   * Not the thing to re-read to continue a run: see `configPath`.
+   */
   sourcePath: string | null;
+  /**
+   * The task JSON this run was resolved from.
+   *
+   * What `dsh continue` needs. A continuation re-resolves the worktree, profile
+   * and checks from the same file rather than copying them out of the old run,
+   * so a task file that has since been corrected is not continued from a stale
+   * copy. `sourcePath` cannot be used for this: it is null whenever the task
+   * text is inline, which is most of them, and it means something else.
+   */
+  configPath: string;
   raw: unknown;
   resolvedProfile: Profile;
   /**
@@ -202,6 +218,7 @@ export function loadRunConfig(taskPath: string): ResolvedRunConfig {
     task: taskText,
     limits: { ...DEFAULT_LIMITS, ...(task.limits ?? {}) },
     sourcePath,
+    configPath: absolute,
     raw,
     resolvedProfile: profile as Profile,
   };

@@ -1,4 +1,12 @@
-import type { DiffResponse, RunDetail, RunEvent, RunSummary, Speaker, StatsResponse } from './types';
+import type {
+  DiffResponse,
+  RunDetail,
+  RunEvent,
+  RunReport,
+  RunSummary,
+  Speaker,
+  StatsResponse,
+} from './types';
 
 async function get<T>(path: string): Promise<T> {
   const response = await fetch(path, { headers: { accept: 'application/json' } });
@@ -33,6 +41,21 @@ export const api = {
   answer: (id: string, text: string) =>
     post<{ ok: boolean }>(`/runs/${id}/answers`, { text, by: 'emil' satisfies Speaker }),
   cancel: (id: string) => post<{ ok: boolean }>(`/runs/${id}/cancel`),
+  /**
+   * Raise a live run's budgets. Absolute figures, not deltas, so a click that
+   * somehow arrived twice cannot compound.
+   */
+  setLimits: (id: string, limits: Record<string, number>) =>
+    post<{ ok: boolean; limits: Record<string, number> }>(`/runs/${id}/limits`, limits),
+  report: (id: string) => get<{ report: RunReport }>(`/runs/${id}/report`).then((body) => body.report),
+  /**
+   * Carry on a stopped run as a new one.
+   *
+   * A new run rather than a resurrection: the record of what happened keeps
+   * saying "stopped at a limit", which is the whole point of having a report.
+   */
+  continueRun: (id: string, taskPath: string, limits: Record<string, number>) =>
+    post<{ id: string }>('/runs', { taskPath, continueFrom: id, limits, detached: true }),
 };
 
 /**

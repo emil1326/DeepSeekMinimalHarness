@@ -1370,3 +1370,221 @@ pre.diff {
     gap: var(--s1);
   }
 }
+
+/* --- limits and the run report ----------------------------------------- */
+
+/* Three numbers, one bar each, read top to bottom. The bar is the question
+   "how much room is left", which a bare total cannot answer. */
+.limits {
+  padding: var(--s2) var(--s5) var(--s4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.limit-row {
+  display: grid;
+  grid-template-columns: 10ch 1fr auto;
+  align-items: center;
+  gap: var(--s4);
+  font-size: var(--t-data);
+}
+
+.limit-row .limit-name {
+  color: var(--text-faint);
+}
+
+.limit-row .limit-numbers {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.limit-bar {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line-soft);
+  overflow: hidden;
+}
+
+.limit-fill {
+  display: block;
+  height: 100%;
+  background: var(--text-faint);
+  transition: width var(--step) var(--ease);
+}
+
+.limit-fill[data-tone='warn'] {
+  background: var(--warning);
+}
+
+.limit-grant {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-top: var(--s2);
+  color: var(--text-faint);
+  font-size: var(--t-data);
+}
+
+.limit-grant label {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.limit-grant input {
+  width: 6ch;
+  font: inherit;
+  font-family: var(--mono);
+  color: var(--text);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 2px var(--s2);
+}
+
+.tab[data-loud='true'] {
+  color: var(--warning);
+}
+
+.report {
+  padding: var(--s4) var(--s5) var(--s7);
+  max-width: 78ch;
+}
+
+.report-headline {
+  margin: 0 0 var(--s5);
+  font-size: var(--t-prose);
+  line-height: 1.5;
+  padding: var(--s4) var(--s5);
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warning);
+  background: var(--bg-sunk);
+}
+
+.report-headline[data-tone='good'] {
+  border-left-color: var(--success);
+}
+
+.report-headline[data-tone='bad'] {
+  border-left-color: var(--danger);
+}
+
+.report h3 {
+  font-size: var(--t-label);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  margin: var(--s6) 0 var(--s3);
+}
+
+.report-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14ch, 1fr));
+  gap: var(--s3) var(--s5);
+  margin: 0;
+}
+
+.report-facts dt {
+  color: var(--text-faint);
+  font-size: var(--t-label);
+}
+
+.report-facts dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--t-data);
+}
+
+.report-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.report-checks li {
+  display: grid;
+  grid-template-columns: 6ch 16ch 1fr;
+  gap: var(--s3);
+  align-items: baseline;
+  font-size: var(--t-data);
+}
+
+.report-checks .word {
+  font-family: var(--mono);
+  color: var(--success);
+}
+
+.report-checks li[data-outcome='fail'] .word {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.report-checks li[data-outcome='unavailable'] .word {
+  color: var(--text-faint);
+}
+
+.report-loud {
+  color: var(--danger);
+  font-size: var(--t-data);
+}
+
+.report-claim {
+  margin: 0;
+  padding: var(--s4) var(--s5);
+  background: var(--bg-sunk);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  white-space: pre-wrap;
+  font-size: var(--t-data);
+  color: var(--text-muted);
+  max-height: 40vh;
+  overflow: auto;
+}
+
+.report-questions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  font-size: var(--t-data);
+}
+
+.report-questions li {
+  display: flex;
+  gap: var(--s4);
+  justify-content: space-between;
+}
+
+.report-questions .unanswered {
+  color: var(--warning);
+}
+
+.report-next {
+  margin-top: var(--s6);
+  padding-top: var(--s4);
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  align-items: flex-start;
+}
+
+.report-next p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--t-data);
+}
+
+.quiet {
+  color: var(--text-faint);
+}

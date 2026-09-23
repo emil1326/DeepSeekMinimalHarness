@@ -29,6 +29,8 @@ export interface LimitUse {
   used: number;
   /** What it may reach. */
   budget: number;
+  /** `budget - used`, floored at zero, because that is the actionable number. */
+  remaining: number;
   /** `used / budget`, so callers do not each divide it differently. */
   ratio: number;
 }
@@ -36,12 +38,23 @@ export interface LimitUse {
 /**
  * When to tell the agent.
  *
- * Four fifths: late enough that the warning is about a real shortage and not
- * about ordinary use, early enough to leave room to act on it. At the default
- * twelve turns that is the last two or three calls, which is enough to finish a
- * file and say what is left, and not enough to start anything new.
+ * Four fifths gone, expressed as what is *left* rather than as a ratio, and
+ * that is not the same thing on a small budget. With `turns: 4` the ratio never
+ * reaches 0.8 at a moment the loop checks — it goes 0, 0.25, 0.5, 0.75, then
+ * the run is over — so a ratio threshold silently never fires on exactly the
+ * short runs that most need the warning. Measured live: a four-turn run stopped
+ * at its limit having been told nothing at all.
+ *
+ * So the rule is "a fifth or less left, and never fewer than one". The floor of
+ * one is what makes a budget of two or three work: `ceil(3 * 0.2)` is one, and
+ * a budget of one warns on the only turn it has.
  */
 export const WARN_AT = 0.8;
+
+/** How many units of a limit may be left before the agent is told. */
+export function warnThreshold(budget: number, at: number = WARN_AT): number {
+  return Math.max(1, Math.ceil(budget * (1 - at)));
+}
 
 export interface LimitReadings {
   /** Model calls made so far. */
@@ -67,6 +80,7 @@ export function limitUse(readings: LimitReadings, limits: RunLimits): LimitUse[]
   ];
   return rows.map((row) => ({
     ...row,
+    remaining: Math.max(0, row.budget - row.used),
     // A budget of zero is not a division, and a caller asking for one wants to
     // hear that it is full rather than get a NaN.
     ratio: row.budget > 0 ? row.used / row.budget : 1,
@@ -74,7 +88,7 @@ export function limitUse(readings: LimitReadings, limits: RunLimits): LimitUse[]
 }
 
 /**
- * The limits that are close enough to warn about, worst first.
+ * The limits that are close enough to warn about, tightest first.
  *
  * `alreadyWarned` is how the caller avoids nagging: a limit is announced once
  * on the way in, not on every turn after it. Without that, a run that slows down
@@ -86,14 +100,18 @@ export function approaching(
   alreadyWarned: ReadonlySet<CumulativeLimit>,
   at: number = WARN_AT,
 ): LimitUse[] {
-  return uses
-    .filter((use) => use.ratio >= at && !alreadyWarned.has(use.which))
-    .sort((a, b) => b.ratio - a.ratio);
+  return (
+    uses
+      .filter((use) => use.remaining <= warnThreshold(use.budget, at) && !alreadyWarned.has(use.which))
+      // Tightest first, and by the fraction left rather than the count: one turn
+      // out of four is more urgent than sixty seconds out of an hour.
+      .sort((a, b) => a.remaining / (a.budget || 1) - b.remaining / (b.budget || 1))
+  );
 }
 
 /** Which limit the run has actually reached, if any. Worst first. */
 export function exceeded(uses: LimitUse[]): LimitUse | null {
-  const over = uses.filter((use) => use.used >= use.budget);
+  const over = uses.filter((use) => use.remaining <= 0);
   if (over.length === 0) return null;
   return over.sort((a, b) => b.ratio - a.ratio)[0] ?? null;
 }
@@ -101,6 +119,32 @@ export function exceeded(uses: LimitUse[]): LimitUse | null {
 /** `1400 of 2000`, with both numbers rounded for a human. */
 export function describeLimit(use: LimitUse, unit = ''): string {
   return `${format(use.used)} of ${format(use.budget)}${unit}`;
+}
+
+/**
+ * How long a run took, for the wall-clock limit.
+ *
+ * Measured to the run's *end* when it has one, and to now only while it is still
+ * going. Getting this wrong is not cosmetic: `dsh limits` on a run that finished
+ * four hours ago reported 15,000 of its 3,600 seconds used, so the LIMIT column
+ * in `dsh list` showed `15k/3600` for a run that took three minutes, and the
+ * wall-clock limit looked like the thing that had stopped it when the real one
+ * was turns. Found by running it against the real runs rather than reading it.
+ */
+export function elapsedSeconds(input: {
+  startedAt: string | null;
+  endedAt?: string | null;
+  now?: number;
+}): number {
+  if (input.startedAt === null) return 0;
+  const from = Date.parse(input.startedAt);
+  if (!Number.isFinite(from)) return 0;
+  const to =
+    input.endedAt === null || input.endedAt === undefined
+      ? (input.now ?? Date.now())
+      : Date.parse(input.endedAt);
+  if (!Number.isFinite(to)) return 0;
+  return Math.max(0, (to - from) / 1000);
 }
 
 export function format(value: number): string {

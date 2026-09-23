@@ -64,7 +64,9 @@ export function toolDefinitions(checkNames: string[]): ToolDefinition[] {
     {
       name: 'run_check',
       description:
-        `Run a named check: ${checks.join(', ')}. ` +
+        (checkNames.length === 0
+          ? 'Run a named check from the profile, or `format`. '
+          : `Run a named check: ${checks.join(', ')}. `) +
         'format applies the formatters to the files you may change, so never hand-edit for a formatter.',
       properties: { name: 'string' },
       required: ['name'],

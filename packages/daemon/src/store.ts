@@ -94,11 +94,25 @@ export class Store {
     this.db.close();
   }
 
-  /** A run left `running` by a crash is not running any more, and says so. */
+  /**
+   * A run left `running` by a crash is not running any more, and says so.
+   *
+   * The end time is the last event the run managed to write, not the moment the
+   * daemon noticed it was gone. Those are hours apart when a daemon is restarted
+   * the next morning, and using the second one made `dsh list` report 13,281
+   * seconds for a run of a few minutes: the wall clock was measured from when
+   * the run started to when somebody happened to look. A run's duration is a
+   * fact about the run.
+   */
   markRunningAsInterrupted(): number {
     const result = this.db
       .prepare(
-        `UPDATE runs SET status = 'interrupted', ended_at = ?,
+        `UPDATE runs SET status = 'interrupted',
+           ended_at = coalesce(
+             (SELECT max(at) FROM events WHERE events.run_id = runs.id),
+             ended_at,
+             ?
+           ),
            detail = coalesce(detail, 'the daemon stopped while this run was going')
          WHERE status IN ('queued', 'running', 'waiting')`,
       )

@@ -127,7 +127,10 @@ export interface ResolvedRunConfig {
   checks: string[];
   task: string;
   limits: RunLimits;
+  /** The task text file, when the task file pointed at one. Null for an inline task. */
   sourcePath: string | null;
+  /** The task JSON this run was resolved from. What a continuation re-reads. */
+  configPath: string;
   raw: unknown;
   resolvedProfile: unknown;
 }
@@ -177,4 +180,46 @@ export interface ModelStats {
 export interface StatsResponse {
   runs: number;
   models: ModelStats[];
+}
+
+/**
+ * One check's last result, as the report carries it.
+ *
+ * Three states, not two: "could not be run" is not "failed". A live run asked
+ * for checks its profile did not have, and reporting those as FAIL made a reader
+ * distrust the section that is supposed to be the trustworthy one.
+ */
+export interface CheckOutcome {
+  name: string;
+  outcome: 'pass' | 'fail' | 'unavailable';
+  output: string;
+}
+
+/**
+ * What happened in a run, for somebody who did not watch it.
+ *
+ * Mirrors core's `RunReport`. The headline is the part that matters: a run that
+ * stopped at a limit says so in those words, and an agent's claim that a check
+ * contradicts is labelled as unbacked rather than shown as a conclusion.
+ */
+export interface RunReport {
+  id: string;
+  name: string;
+  status: RunStatus;
+  headline: string;
+  task: string;
+  model: string;
+  turns: number;
+  totals: RunTotals;
+  limits: RunLimits;
+  stoppedAt: { which: string; used: number; budget: number; ratio: number } | null;
+  claim: string | null;
+  claimSupported: boolean | null;
+  checks: CheckOutcome[];
+  allowed: string[];
+  changed: string[];
+  stray: string[];
+  strayFailure: string | null;
+  questions: { question: string; answer: string | null }[];
+  warnings: number;
 }

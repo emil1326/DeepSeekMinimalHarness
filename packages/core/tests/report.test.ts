@@ -149,7 +149,7 @@ describe('a run that finished', () => {
     );
     expect(report.headline).toContain('did NOT pass');
     expect(report.claimSupported).toBe(false);
-    expect(report.checks.find((entry) => entry.name === 'typecheck')?.passed).toBe(false);
+    expect(report.checks.find((entry) => entry.name === 'typecheck')?.outcome).toBe('fail');
   });
 
   it('says so when nothing verified it at all', () => {
@@ -165,7 +165,7 @@ describe('a run that finished', () => {
       input({ status: 'finished', events: [...check('typecheck', 1, 1), ...check('typecheck', 0, 3)] }),
     );
     expect(report.checks).toHaveLength(1);
-    expect(report.checks[0]?.passed).toBe(true);
+    expect(report.checks[0]?.outcome).toBe('pass');
   });
 
   it('keeps the order the checks were first run in', () => {

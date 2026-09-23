@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { checkPassed, exitCodes } from '@emilswork/harness-core';
+import { checkOutcome, checkPassed, exitCodes } from '@emilswork/harness-core';
 
 describe('reading a check result', () => {
   it('is a pass when the check exited zero', () => {
@@ -22,12 +22,18 @@ describe('reading a check result', () => {
     expect(checkPassed('exit 2\nboom')).toBe(false);
   });
 
-  it('is not a pass when it was refused or could not start', () => {
-    expect(checkPassed('refused: no check called tsc; there are format, verify')).toBe(false);
-    expect(checkPassed('failed: spawn ENOENT')).toBe(false);
+  it('says "could not be run" rather than "failed" when the harness refused it', () => {
+    // Found live. A run asked for `lint` and `typecheck` in a profile that has
+    // only `format`, and the report listed two FAILs against a run that had done
+    // nothing wrong. It ran neither, so neither says anything about the code.
+    expect(checkOutcome('refused: no check called lint; there are format')).toBe('unavailable');
+    // A check that could not start is a failure, not an unavailability: it was
+    // supposed to run.
+    expect(checkOutcome('failed: spawn ENOENT')).toBe('fail');
   });
 
   it('is not a pass when it ran out of time', () => {
+    expect(checkOutcome('the check ran past 15 minutes and was stopped')).toBe('fail');
     expect(checkPassed('the check ran past 15 minutes and was stopped')).toBe(false);
   });
 

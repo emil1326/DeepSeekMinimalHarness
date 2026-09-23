@@ -27,20 +27,39 @@ export function exitCodes(result: string): number[] {
 }
 
 /**
+ * How a check ended, in three states rather than two.
+ *
+ * "It failed" and "it could not be run" are different facts, and a report that
+ * prints `FAIL` for both misleads in the direction that matters. Found by
+ * running it: a live run asked for `lint` and `typecheck` in a profile that has
+ * only `format`, both were refused, and the report listed two FAILs against a
+ * run that had done nothing wrong — which makes a reader distrust the section
+ * that is supposed to be the trustworthy one.
+ */
+export type CheckOutcome = 'pass' | 'fail' | 'unavailable';
+
+/**
  * Whether a check passed.
  *
- * A refusal is not a pass, a non-zero exit is not a pass, and one failure
- * anywhere among several formatters is not a pass. "Nothing to do" is a pass:
- * `nothing to format` means the formatters had nothing to change, which is the
- * good outcome, and reading it as a failure would train a reader to ignore the
- * column.
+ * A non-zero exit is a failure. A refusal is not: the harness would not run it,
+ * so it says nothing about the code. "Nothing to do" is a pass — `nothing to
+ * format` means the formatters had nothing to change, which is the good outcome,
+ * and reading it as a failure would train a reader to ignore the column.
  */
-export function checkPassed(result: string): boolean {
+export function checkOutcome(result: string): CheckOutcome {
   const trimmed = result.trim();
-  if (trimmed.startsWith('refused') || trimmed.startsWith('failed')) return false;
-  // Ran out of time is not a pass.
-  if (trimmed.startsWith('the check ran past')) return false;
+  // Refused by the sandbox, or named a check that is not in the profile. Both
+  // mean the check did not run, so neither says anything about the change.
+  if (trimmed.startsWith('refused')) return 'unavailable';
+  if (trimmed.startsWith('failed')) return 'fail';
+  // Ran out of time. It did run and it did not finish, which is a failure.
+  if (trimmed.startsWith('the check ran past')) return 'fail';
   const codes = exitCodes(trimmed);
-  if (codes.length === 0) return true;
-  return codes.every((code) => code === 0);
+  if (codes.length === 0) return 'pass';
+  return codes.every((code) => code === 0) ? 'pass' : 'fail';
+}
+
+/** The two-state answer, for callers that only need pass or not-pass. */
+export function checkPassed(result: string): boolean {
+  return checkOutcome(result) === 'pass';
 }
