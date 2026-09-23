@@ -7,12 +7,22 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { MIN_MEASURED_WINDOW_MS, cacheHitRate, costOf, rate, totalsOf } from '@emilswork/harness-core';
+import {
+  LEGACY_METRICS_VERSION,
+  METRICS_VERSION,
+  MIN_MEASURED_WINDOW_MS,
+  cacheHitRate,
+  costOf,
+  metricsVersionOf,
+  rate,
+  totalsOf,
+} from '@emilswork/harness-core';
 import type { CallMetrics } from '@emilswork/harness-core';
 import { emptyTotals } from '@emilswork/harness-core';
 
 function metrics(overrides: Partial<CallMetrics> = {}): CallMetrics {
   return {
+    metricsVersion: METRICS_VERSION,
     model: 'deepseek-flash',
     startedAt: '2026-01-01T00:00:00.000Z',
     durationMs: 2000,
@@ -91,6 +101,36 @@ describe('running totals', () => {
     expect(uncached).toBeCloseTo(0.01, 9);
     // The cache saved 90% of this call.
     expect((uncached ?? 0) / (cached ?? 1)).toBeCloseTo(10, 6);
+  });
+
+  it('stamps every call with the method that measured it', () => {
+    // The speed figures were wrong once and the rows are still in the database,
+    // so a call has to say which method produced it or a later reader cannot
+    // tell a wrong number from a right one.
+    expect(metrics().metricsVersion).toBe(METRICS_VERSION);
+  });
+});
+
+describe('the metrics version of a stored call', () => {
+  it('is the version it was stamped with', () => {
+    expect(metricsVersionOf({ metricsVersion: METRICS_VERSION })).toBe(METRICS_VERSION);
+    expect(metricsVersionOf({ metricsVersion: 7 })).toBe(7);
+  });
+
+  it('is the old method when there is no stamp, including for a null', () => {
+    // Not "unknown". Every row written before the field existed was v1's method,
+    // so reading an absent value as v1 keeps a wrong number out of a current
+    // row instead of treating it as a third, meaningless kind.
+    expect(metricsVersionOf({})).toBe(LEGACY_METRICS_VERSION);
+    expect(metricsVersionOf({ metricsVersion: null })).toBe(LEGACY_METRICS_VERSION);
+    expect(metricsVersionOf({ metricsVersion: undefined })).toBe(LEGACY_METRICS_VERSION);
+  });
+
+  it('does not trust a value that is not a finite number', () => {
+    // A stored NaN would otherwise compare unequal to every version and land in
+    // a row of its own, which is how one bad row becomes a table nobody trusts.
+    expect(metricsVersionOf({ metricsVersion: Number.NaN })).toBe(LEGACY_METRICS_VERSION);
+    expect(metricsVersionOf({ metricsVersion: Number.POSITIVE_INFINITY })).toBe(LEGACY_METRICS_VERSION);
   });
 });
 

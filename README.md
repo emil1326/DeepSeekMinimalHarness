@@ -26,6 +26,37 @@ don't. Check processes get the secrets stripped out of their environment. At the
 end, `git status` is compared with the allowed files and anything stray is
 reported loudly.
 
+### "Static" checks are not always static
+
+Worth knowing, because it is the one place this design is softer than it looks.
+A check runs a program with your privileges, and some of those programs run code
+that is sitting in the repository:
+
+- `cargo check` and `cargo clippy` build every crate in the workspace, and a
+  **proc-macro crate's code is executed during that build**. So a task may not
+  allow a file inside a proc-macro crate, and it will refuse to start if it does.
+  Nothing else in a Rust workspace is affected.
+- **Prettier, ESLint, Babel and Stylelint** resolve the plugins and configs they
+  are told about, and a JavaScript config file is itself a program. So those
+  config files are refused too: `.prettierrc*`, `.eslintrc*`, `.babelrc*`,
+  `.stylelintrc*`, `*.config.*` and the rest.
+- **npm and yarn** read `.npmrc` and `.yarnrc*` before fetching anything, so
+  those are refused as well.
+
+What that does not cover is a check whose program lives in the worktree and is
+not named by any of those: a `Makefile` target, a `setup.py`, a test runner that
+loads your source, a build script in a language nobody wrote a rule for. A name
+list can only ever be as complete as the last person's imagination. If you point
+a profile at something that executes the repository, the sandbox will not save
+you from it.
+
+Reads are checked on the real path, so a symlink or a Windows junction can't point
+outside. The profile and the harness both have to live outside the worktree,
+otherwise the model could edit its own rules, and it refuses to start if they
+don't. Check processes get the secrets stripped out of their environment. At the
+end, `git status` is compared with the allowed files and anything stray is
+reported loudly.
+
 ## Getting it running
 
 ```

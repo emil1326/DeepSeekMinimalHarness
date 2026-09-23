@@ -18,6 +18,7 @@ import {
   IS_WINDOWS,
   Sandbox,
   SandboxRefusal,
+  declaresProcMacro,
   isInside,
   realPath,
   relNorm,
@@ -478,6 +479,118 @@ describe('search, as it behaves live', () => {
     const result = box().search('const (');
     expect(result).toContain('not a valid regular expression');
     expect(result).toContain('JavaScript regex');
+  });
+});
+
+describe('refusing to let a check run code the agent wrote', () => {
+  const box = (allow: string[]): Sandbox => new Sandbox({ root: repo, allow, profile: PROFILE });
+
+  beforeEach(() => {
+    fs.mkdirSync(path.join(repo, 'crates', 'macros', 'src'), { recursive: true });
+    fs.mkdirSync(path.join(repo, 'crates', 'plain', 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(repo, 'crates', 'macros', 'Cargo.toml'),
+      ['[package]', 'name = "macros"', '', '[lib]', 'proc-macro = true', ''].join('\n'),
+    );
+    fs.writeFileSync(path.join(repo, 'crates', 'macros', 'src', 'lib.rs'), '// a macro\n');
+    fs.writeFileSync(
+      path.join(repo, 'crates', 'plain', 'Cargo.toml'),
+      ['[package]', 'name = "plain"', '', '[dependencies]', ''].join('\n'),
+    );
+    fs.writeFileSync(path.join(repo, 'crates', 'plain', 'src', 'lib.rs'), '// ordinary\n');
+  });
+
+  it('refuses a file inside a proc-macro crate, wherever the crate is', () => {
+    // `cargo check` and `clippy` compile and *run* the build-time code of every
+    // crate in the workspace, and a proc-macro crate is exactly that. Allowing a
+    // file in one would be allowing an agent to write code that runs the next
+    // time a check runs, with nothing watching in between.
+    expect(refused(() => box(['crates/macros/src/lib.rs']))).toBe(true);
+    // And it says why, because the model reads refusals.
+    let message = '';
+    try {
+      box(['crates/macros/src/lib.rs']);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('proc-macro');
+    expect(message).toContain('build time');
+  });
+
+  it('leaves every other crate in the workspace alone', () => {
+    // The control. A blanket "refuse anything in a Rust repo" would be useless,
+    // and this is the shape a real workspace has: one macro crate, many others.
+    expect(() => box(['crates/plain/src/lib.rs'])).not.toThrow();
+    expect(box(['crates/plain/src/lib.rs']).writable('crates/plain/src/lib.rs')).toBeTruthy();
+  });
+
+  it('has a second door: a proc-macro file forced into the allow set is refused at write time', () => {
+    const forced = box(['crates/plain/src/lib.rs']);
+    (forced as unknown as { allow: Set<string> }).allow.add('crates/macros/src/lib.rs');
+    expect(refused(() => forced.replaceInFile('crates/macros/src/lib.rs', 'a macro', 'x'))).toBe(true);
+    expect(refused(() => forced.createFile('crates/macros/src/lib.rs', 'x'))).toBe(true);
+    // Reading is not the risk, so it is not blocked: a model that cannot read
+    // the crate cannot tell why its file was refused.
+    expect(() => forced.readFile('crates/macros/src/lib.rs')).not.toThrow();
+  });
+
+  it('refuses tool configuration that a check loads and executes', () => {
+    // Prettier, ESLint, Babel and Stylelint all accept a JavaScript config whose
+    // plugins are resolved and then run. `*.config.*` covered the
+    // `eslint.config.js` spelling; these are the dotfile spellings, which is what
+    // the review found missing.
+    for (const name of [
+      '.prettierrc',
+      '.prettierrc.cjs',
+      '.prettierrc.json',
+      '.eslintrc',
+      '.eslintrc.cjs',
+      '.babelrc',
+      '.babelrc.js',
+      '.stylelintrc.json',
+      '.npmrc',
+      '.yarnrc.yml',
+    ]) {
+      expect(
+        refused(() => box([name])),
+        name,
+      ).toBe(true);
+    }
+  });
+
+  it('still allows ordinary files, including ones that merely start with a dot', () => {
+    // The control for the list above: the patterns are names, not "anything
+    // dotted", and a tighter list is only better if it is still usable.
+    for (const name of ['.editorconfig', '.gitignore', 'src/a.ts', 'prettier-notes.md']) {
+      expect(
+        refused(() => box([name])),
+        name,
+      ).toBe(false);
+    }
+  });
+});
+
+describe('reading a Cargo.toml for a proc-macro target', () => {
+  it('is true only for proc-macro under [lib]', () => {
+    expect(declaresProcMacro('[lib]\nproc-macro = true\n')).toBe(true);
+    expect(declaresProcMacro('[lib]\nproc-macro=true\n')).toBe(true);
+    // Not under [lib], so not a proc-macro crate.
+    expect(declaresProcMacro('[package]\nproc-macro = true\n')).toBe(false);
+    // A false value is not a declaration.
+    expect(declaresProcMacro('[lib]\nproc-macro = false\n')).toBe(false);
+    // Commented out is not a declaration, which is the one that would matter:
+    // a commented line read as real would refuse a file for no reason.
+    expect(declaresProcMacro('# proc-macro = true\n[lib]\n')).toBe(false);
+    expect(declaresProcMacro('[lib]\n# proc-macro = true\n')).toBe(false);
+    // A trailing comment on a real line is still a declaration.
+    expect(declaresProcMacro('[lib]\nproc-macro = true # macros\n')).toBe(true);
+    // Ordinary manifests, and the empty string, which is what a missing file
+    // would look like if it ever got that far.
+    expect(declaresProcMacro('[package]\nname = "x"\n\n[dependencies]\nserde = "1"\n')).toBe(false);
+    expect(declaresProcMacro('')).toBe(false);
+    // A later table must not un-declare an earlier one, or vice versa.
+    expect(declaresProcMacro('[lib]\nproc-macro = true\n\n[dependencies]\n')).toBe(true);
+    expect(declaresProcMacro('[dependencies]\nproc-macro = true\n')).toBe(false);
   });
 });
 

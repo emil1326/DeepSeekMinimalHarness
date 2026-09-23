@@ -60,6 +60,14 @@ export interface DiffResponse {
 
 export interface ModelStats {
   model: string;
+  /**
+   * Which measurement method these figures came from.
+   *
+   * Speed is only comparable within one version, so calls are grouped by it and
+   * a model that has been run under two methods gets two rows rather than one
+   * average of things that cannot be averaged.
+   */
+  metricsVersion: number;
   calls: number;
   promptTokens: number;
   cacheHitTokens: number;

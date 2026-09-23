@@ -24,6 +24,8 @@ export interface CallMetrics {
   timeToFirstTokenMs: number | null;
   streamingMs: number | null;
   largestGapMs: number;
+  /** Which measurement method produced the speed figures. See core's `METRICS_VERSION`. */
+  metricsVersion: number;
   promptTokens: number;
   cacheHitTokens: number;
   cacheMissTokens: number;
@@ -138,6 +140,8 @@ export interface DiffResponse {
 
 export interface ModelStats {
   model: string;
+  /** Which measurement method these figures came from. Only comparable within one. */
+  metricsVersion: number;
   calls: number;
   promptTokens: number;
   cacheHitTokens: number;

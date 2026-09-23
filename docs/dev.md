@@ -8,17 +8,30 @@ One command. It builds once, starts the daemon, starts Vite, and then watches
 everything. Save a file and the thing that runs your change has it.
 
 ```
+npm run dev                 its own harness home, so nothing of yours is disturbed
 npm run dev -- --no-ui      daemon and workers only, no Vite
 npm run dev -- --no-open    do not open a browser
-npm run dev -- --home X     a scratch harness home instead of the real one
+npm run dev -- --real-home  take over the real daemon instead
+npm run dev -- --home X     some other harness home entirely
 ```
 
-By default it takes over the **real daemon**. It stops whatever is on
-`daemon.json` and becomes that daemon, so `npx dsh list` in another terminal
-finds it through the same file and runs the code you just saved. The cost of
-that is honest and worth knowing before you run it: **starting the loop
-interrupts any run that was going**, because a run's worker is a child of the
-daemon. Use `--home` when you want a `runs.db` and a `daemon.json` of your own.
+It runs against its **own** harness home by default: a `-dev` directory next to
+whatever `harnessHome()` answers, so on Windows
+`%LOCALAPPDATA%\EmilsDeepSeekHarness-dev`. Its own `runs.db`, its own
+`daemon.json`, its own daemon on its own random port. Nothing you have running is
+touched, which matters because a run's worker is a child of the daemon:
+**starting the loop against the real home interrupts any run that was going.**
+
+That used to be the default. It was the right call while the harness was being
+built and the wrong one once it was being used, so it is now opt-in.
+
+`--real-home` is the opt-in. Use it when what you want is `npx dsh list` in
+another terminal finding this daemon through the same `daemon.json` and running
+the code you just saved. `--home X` overrides both.
+
+One consequence of the default worth knowing: a fresh home has no `config.json`,
+so it has no UI name and no prices. The loop says so on startup and prints the
+one-line copy that fixes it.
 
 ## What it does
 
@@ -166,10 +179,11 @@ Three things worth knowing before you spend an evening on it:
   header lowercased, so the config lowercases the name before handing it over. A
   capital in that list is a name that can never match.
 
-`--home X` reads `uiHosts` from _that_ home's `config.json`, so a scratch home has
-no name unless you put one in it. When the name does not resolve, the loop does
-not stop — nothing in it needs the name, since Vite binds `127.0.0.1` and is asked
-there. It says so and sends the browser to the address that always works, instead
+The UI name comes from `uiHosts` in _the home the loop is running against_, so a
+dev home has no name unless you put one in its `config.json`. When the name does
+not resolve, the loop does not stop — nothing in it needs the name, since Vite
+binds `127.0.0.1` and is asked there. It says so and sends the browser to the
+address that always works, instead
 of to a dead one that would look like a daemon that is not running:
 
 ```

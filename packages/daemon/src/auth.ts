@@ -63,9 +63,17 @@ export class Auth {
   }
 
   checkOrigin(header: string | undefined): boolean {
-    // No Origin at all is the CLI, curl, or a same-origin fetch that did not
-    // send one. A present-but-foreign Origin is refused.
-    if (header === undefined || header === '' || header === 'null') return true;
+    // No Origin at all is the CLI, curl, or a same-origin fetch that did not send
+    // one, and those are allowed because the token is what authorises them.
+    //
+    // A present-but-foreign Origin is refused, and `null` counts as foreign. It
+    // is what a sandboxed iframe and a `file://` page send, so it is the one
+    // value that means "somebody else's page" while looking like "no page at
+    // all". The token still blocks those callers, since a `SameSite=Strict`
+    // cookie is not sent cross-site and the API needs a bearer or a cookie, so
+    // refusing this is depth rather than the wall. It costs nothing: the CLI and
+    // curl send no Origin rather than a null one.
+    if (header === undefined || header === '') return true;
     return this.allowedOrigins().includes(header.toLowerCase());
   }
 

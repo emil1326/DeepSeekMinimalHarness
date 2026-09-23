@@ -31,6 +31,21 @@ describe('the daemon', () => {
     expect(response.status).toBe(403);
   });
 
+  it("refuses Origin: null, which is what somebody else's page sends", async () => {
+    // A sandboxed iframe and a `file://` page both send the literal string
+    // "null", which is the one value that means "a page, but not a page I can
+    // name" while looking like "no page at all". The token is still the wall
+    // here, since a SameSite=Strict cookie is not sent cross-site, so this is
+    // depth rather than the defence. It costs nothing to refuse: the CLI and
+    // curl send no Origin at all rather than a null one.
+    daemon = await startTestDaemon(ONE_EDIT);
+    const response = await daemon.request('GET', '/runs', { headers: { origin: 'null' } });
+    expect(response.status).toBe(403);
+    // The control: no Origin at all is still the CLI, and still allowed.
+    const cli = await daemon.request('GET', '/runs', {});
+    expect(cli.status).toBe(200);
+  });
+
   it('refuses a Host that is not this daemon', async () => {
     daemon = await startTestDaemon(ONE_EDIT);
     const response = await daemon.request('GET', '/runs', { headers: { host: 'evil.example.com' } });

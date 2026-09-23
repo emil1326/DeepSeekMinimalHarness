@@ -11,6 +11,7 @@ export {
   SECRET_NAMES,
   Sandbox,
   SandboxRefusal,
+  declaresProcMacro,
   type SandboxOptions,
 } from './sandbox.js';
 export { checkSpecSchema, profileSchema, type CheckSpec, type Profile } from './profile.js';
@@ -39,9 +40,12 @@ export {
   type Speaker,
 } from './events.js';
 export {
+  LEGACY_METRICS_VERSION,
+  METRICS_VERSION,
   MIN_MEASURED_WINDOW_MS,
   cacheHitRate,
   costOf,
+  metricsVersionOf,
   rate,
   round,
   totalsOf,

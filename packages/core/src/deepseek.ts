@@ -1,6 +1,6 @@
 import { DEFAULT_BASE_URL } from './config.js';
 import type { CallMetrics } from './metrics.js';
-import { rate, round } from './metrics.js';
+import { METRICS_VERSION, rate, round } from './metrics.js';
 
 export interface ToolCall {
   id: string;
@@ -256,6 +256,9 @@ export class DeepSeekClient {
     const durationMs = round(performance.now() - start, 1);
     const streamingMs = state.firstTokenMs === null ? null : round(state.lastTokenMs - state.firstTokenMs, 1);
     const metrics: CallMetrics = {
+      // Stamped on every call, because a recorded figure outlives the code that
+      // produced it and an aggregate has to be able to tell two methods apart.
+      metricsVersion: METRICS_VERSION,
       model: request.model,
       startedAt,
       durationMs,

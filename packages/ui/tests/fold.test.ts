@@ -20,6 +20,7 @@ function event(body: RunEventBody, at = '2026-01-01T00:00:00.000Z'): RunEvent {
 
 function call(overrides: Partial<CallMetrics> = {}): CallMetrics {
   return {
+    metricsVersion: 2,
     model: 'deepseek-flash',
     startedAt: '2026-01-01T00:00:00.000Z',
     durationMs: 1200,

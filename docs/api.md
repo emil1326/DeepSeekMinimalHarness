@@ -35,6 +35,16 @@ random site could drive agents. Without the third, so could any other program.
 `by` is `claude`, `emil` or `agent`, and only decides the label in the UI. An
 answer with no `id` goes to the question the run is currently waiting on.
 
+`/stats` groups by model **and by measurement method**, and that is deliberate.
+The speed figures were computed wrongly once, and those rows are still in
+`runs.db` because nothing rewrites recorded history. Averaging them with correct
+ones would produce a figure describing neither, and it would get worse as more
+rows accumulated. So a model run under two methods gets two `ModelStats`, each
+carrying `metricsVersion`, and a reader can compare within a row and not across
+them. Tokens and cost are comparable between methods and are still summed per
+row. `METRICS_VERSION` in core is the current one; a stored call with no version
+on it is v1's method, which is a fact about it rather than a guess.
+
 A bad task file comes back as `400` with every problem at once, each naming the
 field:
 

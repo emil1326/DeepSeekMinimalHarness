@@ -3,6 +3,7 @@ import {
   AbortedError,
   DeepSeekClient,
   DeepSeekError,
+  METRICS_VERSION,
   MIN_DECODE_WINDOW_MS,
   costOf,
   decodeRate,
@@ -229,6 +230,7 @@ describe('the DeepSeek client', () => {
 
   it('derives cost from the price table rather than hardcoding one', () => {
     const metrics = {
+      metricsVersion: METRICS_VERSION,
       model: 'deepseek-flash',
       startedAt: new Date().toISOString(),
       durationMs: 1000,

@@ -228,20 +228,36 @@ program
         process.stdout.write('no model calls recorded yet\n');
         return;
       }
+      // The method only goes in the model column when a model has more than one,
+      // so the ordinary case reads exactly as it did before there was a version.
+      const methods = new Map<string, number>();
+      for (const model of stats.models) methods.set(model.model, (methods.get(model.model) ?? 0) + 1);
       process.stdout.write(
         `${pad('MODEL', 20)}${pad('CALLS', 7)}${pad('IN TOK', 10)}${pad('CACHED', 10)}${pad('OUT TOK', 10)}${pad('THOUGHT', 10)}${pad('FIRST TOK', 11)}${pad('TOK/S', 8)}${pad('DECODE', 8)}${pad('COST', 10)}\n`,
       );
       for (const model of stats.models) {
+        const label =
+          (methods.get(model.model) ?? 0) > 1 ? `${model.model} m${model.metricsVersion}` : model.model;
         process.stdout.write(
-          `${pad(model.model, 20)}${pad(String(model.calls), 7)}${pad(String(model.promptTokens), 10)}${pad(String(model.cacheHitTokens), 10)}${pad(String(model.completionTokens), 10)}${pad(String(model.reasoningTokens), 10)}${pad(seconds(model.timeToFirstTokenMs), 11)}${pad(number(model.endToEndTokensPerSecond), 8)}${pad(number(model.generationTokensPerSecond), 8)}${pad(model.costUsd === null ? '-' : `$${model.costUsd.toFixed(4)}`, 10)}\n`,
+          `${pad(label, 20)}${pad(String(model.calls), 7)}${pad(String(model.promptTokens), 10)}${pad(String(model.cacheHitTokens), 10)}${pad(String(model.completionTokens), 10)}${pad(String(model.reasoningTokens), 10)}${pad(seconds(model.timeToFirstTokenMs), 11)}${pad(number(model.endToEndTokensPerSecond), 8)}${pad(number(model.generationTokensPerSecond), 8)}${pad(model.costUsd === null ? '-' : `$${model.costUsd.toFixed(4)}`, 10)}\n`,
         );
       }
       process.stdout.write(
         `\nTOK/S is output tokens over the whole call, which is the number a vendor advertises.\n` +
           `DECODE counts only the streaming window, is often blank because the call spent longer\n` +
           `waiting for its first token than decoding, and is not the number to quote.\n` +
-          `THOUGHT is the part of OUT TOK the model spent thinking, which is billed as output.\n` +
-          `\nfrom ${stats.runs} run(s). Prices come from config.json in the harness home.\n`,
+          `THOUGHT is the part of OUT TOK the model spent thinking, which is billed as output.\n`,
+      );
+      if ([...methods.values()].some((count) => count > 1)) {
+        process.stdout.write(
+          `\nm1 and m2 are two measurement methods, not two models. The speed figures were wrong\n` +
+            `once and the rows it produced are still in the database, so calls measured each way\n` +
+            `are counted separately: only compare within one method. Tokens and cost are\n` +
+            `comparable across the two.\n`,
+        );
+      }
+      process.stdout.write(
+        `\nfrom ${stats.runs} run(s). Prices come from config.json in the harness home.\n`,
       );
     }),
   );

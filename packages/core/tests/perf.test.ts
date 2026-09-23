@@ -96,8 +96,21 @@ async function counting<T>(action: () => T): Promise<{ result: T; stats: Record<
 }
 
 describe('what a search costs', () => {
+  /**
+   * Built outside the counted block on purpose.
+   *
+   * Constructing a sandbox is not a search, and it does real work: it walks up
+   * towards the worktree root looking for a `Cargo.toml` that declares a
+   * proc-macro crate, so that a file inside one can be refused before the run
+   * rather than after a check has executed it. That is a handful of `readFileSync`
+   * attempts per directory, cached, and counting it here would be measuring the
+   * wrong thing: every assertion below is about what a *search* costs.
+   */
+  const built = (): Sandbox => box();
+
   it('reads each file once', async () => {
-    const { result, stats } = await counting(() => box().search('needle_1\\b', 'src'));
+    const sandbox = built();
+    const { result, stats } = await counting(() => sandbox.search('needle_1\\b', 'src'));
 
     expect(result).toContain('needle_1 = 1');
     // The 120 generated files and `big.ts`, and nothing from the pruned
@@ -114,24 +127,27 @@ describe('what a search costs', () => {
     // syscall per file on top of the read, for a question `readdir` already
     // answered. The proof is not a number: it is that the number does not move
     // when the tree gets a hundred times bigger.
-    const one = await counting(() => box().search('zzz_matches_nothing', 'src/file0.ts'));
-    const many = await counting(() => box().search('zzz_matches_nothing', 'src'));
+    const sandbox = built();
+    const one = await counting(() => sandbox.search('zzz_matches_nothing', 'src/file0.ts'));
+    const many = await counting(() => sandbox.search('zzz_matches_nothing', 'src'));
 
     expect(many.stats.read).toBeGreaterThan(one.stats.read * 10);
     expect(many.stats.stat).toBeGreaterThan(one.stats.stat * 10);
-    // Constructor, the search root, and any links. Not one per file.
+    // The search root, and any links. Not one per file.
     expect(many.stats.realpath).toBe(one.stats.realpath);
     expect(many.stats.realpath).toBeLessThanOrEqual(3);
   });
 
   it('does not walk a denied directory, however many files are in it', async () => {
-    const { stats } = await counting(() => box().search('needle_1\\b', '.'));
+    const sandbox = built();
+    const { stats } = await counting(() => sandbox.search('needle_1\\b', '.'));
     // 200 files live under node_modules and not one of them is opened.
     expect(stats.read).toBeLessThanOrEqual(FILES + 1);
   });
 
   it('stops at the hit limit instead of reading the whole tree', async () => {
-    const { result, stats } = await counting(() => box().search('export const', 'src'));
+    const sandbox = built();
+    const { result, stats } = await counting(() => sandbox.search('export const', 'src'));
     expect(result).toContain('[stopped at 80 hits]');
     // 80 hits arrive in the first few files, so the rest are never opened.
     expect(stats.read).toBeLessThan(FILES);
@@ -145,8 +161,9 @@ describe('what a search costs', () => {
       return;
     }
     try {
-      const withLink = await counting(() => box().search('needle_1\\b', 'src'));
-      const without = await counting(() => box().search('needle_1\\b', 'src'));
+      const sandbox = built();
+      const withLink = await counting(() => sandbox.search('needle_1\\b', 'src'));
+      const without = await counting(() => sandbox.search('needle_1\\b', 'src'));
       void without;
       // One extra resolve, for the one link. Not one per file, and the link
       // still resolves inside the tree so its target is readable.
@@ -155,6 +172,21 @@ describe('what a search costs', () => {
     } finally {
       fs.rmSync(link, { force: true });
     }
+  });
+
+  it('looks for a proc-macro manifest once per directory, not once per search', async () => {
+    // The constructor's probe is cached, so a second sandbox over the same tree
+    // does not read every manifest again, and searching never reads one at all:
+    // `read` during a search is files searched and nothing else.
+    const first = await counting(() => built());
+    const second = await counting(() => built());
+    expect(second.stats.read).toBeLessThanOrEqual(first.stats.read);
+    // Two levels up from `src/file0.ts`: `src/Cargo.toml` and `Cargo.toml`.
+    expect(first.stats.read).toBeLessThanOrEqual(2);
+
+    const sandbox = built();
+    const searched = await counting(() => sandbox.search('needle_1\\b', 'src'));
+    expect(searched.stats.read).toBe(FILES + 1);
   });
 });
 

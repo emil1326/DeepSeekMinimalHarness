@@ -1,7 +1,44 @@
 import type { RunTotals } from './events.js';
 
+/**
+ * Which measurement method a set of figures came from.
+ *
+ * The speed numbers have been wrong once, and in a way worth remembering: v1
+ * divided *all* of a call's output tokens by only the window in which the
+ * visible answer streamed, so a call whose 900 tokens were mostly thinking was
+ * reported at 930 tokens a second against a model that does nearer 200.
+ *
+ * Once a figure has been recorded wrong, it is recorded wrong for ever: the
+ * rows are in `runs.db` and nothing rewrites them. So every call carries the
+ * method that produced it, and a reader that aggregates calls refuses to mix
+ * methods rather than quietly averaging a wrong number with a right one.
+ *
+ * v1 — decode window could be shorter than the tokens divided by it; the
+ *      thinking channel was not counted at all.
+ * v2 — the window spans every output delta of any kind, a gap guard refuses a
+ *      window that is not a measurement, and thinking is counted separately.
+ */
+export const METRICS_VERSION = 2;
+
+/** What a stored call with no version on it was, by definition. */
+export const LEGACY_METRICS_VERSION = 1;
+
+/**
+ * The version of a call that may predate the field existing.
+ *
+ * Everything written before `metricsVersion` was v1's method, so an absent value
+ * is not unknown, it is old, and reading it as v1 is what keeps an aggregate
+ * from treating a wrong number as a current one.
+ */
+export function metricsVersionOf(call: { metricsVersion?: number | null }): number {
+  const value = call.metricsVersion;
+  return typeof value === 'number' && Number.isFinite(value) ? value : LEGACY_METRICS_VERSION;
+}
+
 /** What one model call cost, in wall clock and tokens. */
 export interface CallMetrics {
+  /** The method behind the speed figures here. See `METRICS_VERSION`. */
+  metricsVersion: number;
   model: string;
   startedAt: string;
   /** Milliseconds from the request going out to the last token, measured on the client. */

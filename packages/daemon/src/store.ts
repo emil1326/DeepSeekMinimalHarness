@@ -4,6 +4,7 @@ import Database from 'better-sqlite3';
 import {
   emptyTotals,
   isTerminal,
+  metricsVersionOf,
   type PriceTable,
   type ResolvedRunConfig,
   type RunEvent,
@@ -12,6 +13,15 @@ import {
   type RunTotals,
 } from '@emilswork/harness-core';
 import type { ModelStats, RunDetail, RunSummary } from './protocol.js';
+
+/**
+ * A metrics event's `call` as it comes back out of the database.
+ *
+ * Loose by design: these objects were written by an older build of the harness
+ * and nothing rewrites them, so a field may be absent, `null`, a number, or —
+ * for `model` — a string.
+ */
+export type StoredCall = Record<string, number | string | null>;
 
 type Db = InstanceType<typeof Database>;
 
@@ -200,12 +210,20 @@ export class Store {
     return rows.map((row) => toDetail(row, owners(row.id)));
   }
 
-  allMetrics(): { model: string; call: Record<string, number | null>; runId: string }[] {
+  /**
+   * Every metrics event, oldest first, as it was stored.
+   *
+   * `call` is typed loosely on purpose. It is read back out of JSON that an
+   * older build wrote, so a field can be missing, `null`, or — for `model` — a
+   * string, and the old type said `number | null` throughout, which `model`
+   * never satisfied. `summarise` treats anything it cannot recognise as absent.
+   */
+  allMetrics(): { model: string; call: StoredCall; runId: string }[] {
     const rows = this.db
       .prepare("SELECT run_id, payload_json FROM events WHERE type = 'metrics' ORDER BY seq")
       .all() as { run_id: string; payload_json: string }[];
     return rows.map((row) => {
-      const body = JSON.parse(row.payload_json) as { call: Record<string, number | null> };
+      const body = JSON.parse(row.payload_json) as { call: StoredCall };
       return { model: String(body.call.model ?? 'unknown'), call: body.call, runId: row.run_id };
     });
   }
@@ -254,6 +272,7 @@ function toDetail(row: RunRow, owners: number): RunDetail {
 
 interface Accumulator {
   model: string;
+  metricsVersion: number;
   calls: number;
   promptTokens: number;
   cacheHitTokens: number;
@@ -273,11 +292,23 @@ export function summarise(
   prices: PriceTable | undefined,
 ): ModelStats[] {
   const byModel = new Map<string, Accumulator>();
-  const number = (value: number | null | undefined): number => (typeof value === 'number' ? value : 0);
+  // Anything that is not a number counts as nothing. A stored row is JSON from
+  // an older build, so a field can be missing or the wrong shape, and one bad
+  // row must not turn a whole column into a NaN or a string.
+  const number = (value: number | string | null | undefined): number =>
+    typeof value === 'number' && Number.isFinite(value) ? value : 0;
 
   for (const { model, call } of metrics) {
-    const current = byModel.get(model) ?? {
+    // Grouped by model *and* method. A run recorded before the decode figure was
+    // fixed carries a number computed a different way, and averaging it with a
+    // correct one produces a figure that describes neither. Splitting the row is
+    // the honest option: the two are visible side by side, and nothing is hidden
+    // or silently dropped.
+    const version = metricsVersionOf(call);
+    const key = `${model}\u0000${version}`;
+    const current = byModel.get(key) ?? {
       model,
+      metricsVersion: version,
       calls: 0,
       promptTokens: 0,
       cacheHitTokens: 0,
@@ -320,22 +351,27 @@ export function summarise(
         1_000_000;
       current.costUsd = (current.costUsd ?? 0) + cost;
     }
-    byModel.set(model, current);
+    byModel.set(key, current);
   }
 
   const average = (sum: number, count: number): number | null =>
     count === 0 ? null : Math.round((sum / count) * 10) / 10;
 
-  return [...byModel.values()].map((entry) => ({
-    model: entry.model,
-    calls: entry.calls,
-    promptTokens: entry.promptTokens,
-    cacheHitTokens: entry.cacheHitTokens,
-    completionTokens: entry.completionTokens,
-    reasoningTokens: entry.reasoningTokens,
-    timeToFirstTokenMs: average(entry.ttftSum, entry.ttftCount),
-    generationTokensPerSecond: average(entry.generationSum, entry.generationCount),
-    endToEndTokensPerSecond: average(entry.endToEndSum, entry.endToEndCount),
-    costUsd: entry.costUsd === null ? null : Math.round(entry.costUsd * 1e6) / 1e6,
-  }));
+  // Newest method first within a model, then by name, so the table's order is
+  // the same whichever way the rows came out of the database.
+  return [...byModel.values()]
+    .sort((a, b) => a.model.localeCompare(b.model) || b.metricsVersion - a.metricsVersion)
+    .map((entry) => ({
+      model: entry.model,
+      metricsVersion: entry.metricsVersion,
+      calls: entry.calls,
+      promptTokens: entry.promptTokens,
+      cacheHitTokens: entry.cacheHitTokens,
+      completionTokens: entry.completionTokens,
+      reasoningTokens: entry.reasoningTokens,
+      timeToFirstTokenMs: average(entry.ttftSum, entry.ttftCount),
+      generationTokensPerSecond: average(entry.generationSum, entry.generationCount),
+      endToEndTokensPerSecond: average(entry.endToEndSum, entry.endToEndCount),
+      costUsd: entry.costUsd === null ? null : Math.round(entry.costUsd * 1e6) / 1e6,
+    }));
 }

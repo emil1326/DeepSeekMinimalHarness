@@ -26,6 +26,10 @@ export function AgentsList({ onOpen }: { onOpen: (runId: string) => void }) {
   // Cost is only worth a column once a price table has been filled in; a column
   // of dashes is a column of nothing.
   const anyCost = runs.data.some((run) => run.totals.costUsd !== null);
+  // A model run under two measurement methods has two rows. Name the method only
+  // when that is the case, so the usual one reads as plain as it always did.
+  const methodCount = new Map<string, number>();
+  for (const model of models) methodCount.set(model.model, (methodCount.get(model.model) ?? 0) + 1);
 
   return (
     <div className="scroller">
@@ -43,8 +47,11 @@ export function AgentsList({ onOpen }: { onOpen: (runId: string) => void }) {
             /* A line of facts, not a hero metric. The number matters but it is
                not the point of the page, so it sits at the same size as its
                own label. */
-            <div className="stat" key={model.model}>
-              <span className="who">{model.model}</span>
+            <div className="stat" key={`${model.model}:${model.metricsVersion}`}>
+              <span className="who">
+                {model.model}
+                {(methodCount.get(model.model) ?? 0) > 1 ? ` m${model.metricsVersion}` : ''}
+              </span>
               <span className="value">{speed(model.generationTokensPerSecond)}</span>
               <span className="label">generating</span>
               <span className="sep">·</span>

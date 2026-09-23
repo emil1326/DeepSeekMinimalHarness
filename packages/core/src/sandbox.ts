@@ -44,6 +44,21 @@ export const NEVER_WRITE = [
   'yarn.lock',
   '*.config.*',
   'tsconfig*.json',
+  // Tool configuration that a check loads, and that names code to run. Prettier,
+  // ESLint, Babel and Stylelint all accept a JavaScript config whose plugins and
+  // extends are resolved and then executed, so a task that may edit one of these
+  // is a task that may run code. `*.config.*` catches the `eslint.config.js`
+  // spelling; these are the dotfile spellings it does not, and they are the ones
+  // that were missing.
+  '.prettierrc*',
+  '.eslintrc*',
+  '.babelrc*',
+  '.stylelintrc*',
+  '.markdownlint*',
+  // Read by npm and yarn before anything is fetched, so it can send a whole
+  // install somewhere else.
+  '.npmrc',
+  '.yarnrc*',
   '.github/*',
   '.claude/*',
   '.cargo/*',
@@ -60,6 +75,29 @@ export const NEVER_WRITE = [
 
 /** Dropped from a check process's environment, whatever else it inherits. */
 export const SECRET_ENV = /(DEEPSEEK|ANTHROPIC|CLAUDE|TOKEN|SECRET|PASSWORD|API_KEY|_KEY$)/i;
+
+/**
+ * Whether a `Cargo.toml` declares a proc-macro library target.
+ *
+ * Deliberately a scanner rather than a TOML parser: this asks one yes/no
+ * question about one key in one table, and a dependency-free answer is worth
+ * more here than a general one. `proc-macro = true` only means anything under
+ * `[lib]`, so a mention anywhere else is ignored on purpose.
+ */
+export function declaresProcMacro(manifest: string): boolean {
+  let section = '';
+  for (const raw of manifest.split('\n')) {
+    const line = raw.replace(/#.*$/, '').trim();
+    if (line === '') continue;
+    const header = /^\[([^\]]+)\]$/.exec(line);
+    if (header !== null) {
+      section = (header[1] ?? '').trim().toLowerCase();
+      continue;
+    }
+    if (section === 'lib' && /^proc-macro\s*=\s*true$/.test(line)) return true;
+  }
+  return false;
+}
 
 export const READ_LINES = 1500;
 export const RESULT_CHARS = 8000;
@@ -99,6 +137,8 @@ export class Sandbox {
   private readonly normalise: (path: string) => string;
   private readonly onRecord: ((entry: Record<string, unknown>) => void) | undefined;
   private readonly active = new Set<number>();
+  /** Per-directory answer to "is this a proc-macro crate", read at most once. */
+  private readonly procMacroDirs = new Map<string, boolean>();
 
   constructor(options: SandboxOptions) {
     this.root = realPath(options.root);
@@ -119,7 +159,61 @@ export class Sandbox {
       if (SECRET_NAMES.some((pattern) => this.matches(name, pattern))) {
         throw new SandboxRefusal(`refusing to allow ${allowed}: it looks like a secret`);
       }
+      // And a file inside a proc-macro crate, for the same reason a secret name
+      // is refused here rather than at write time: better before the run than
+      // four turns in. See `procMacroCrateOf`.
+      const crate = this.procMacroCrateOf(allowed);
+      if (crate !== null) {
+        throw new SandboxRefusal(
+          `refusing to allow ${allowed}: it is inside the proc-macro crate ${crate}, whose code runs at build time`,
+        );
+      }
     }
+  }
+
+  /**
+   * The proc-macro crate a path sits in, if it sits in one.
+   *
+   * A crate marked `proc-macro = true` is not ordinary code: the compiler runs
+   * it *during* a build, so `cargo check` and `clippy` execute it, and so does
+   * any dependent crate's build. Allowing a file inside one would mean an agent
+   * writing code that runs the next time a check runs, with nothing watching and
+   * no diff to review in between.
+   *
+   * Reads the nearest `Cargo.toml` walking up towards the worktree root, so a
+   * workspace with one proc-macro crate refuses that crate's files and leaves
+   * every other crate alone. The answer is cached per directory: a file is
+   * checked on the way into the allow list and again on every write.
+   */
+  private procMacroCrateOf(rel: string): string | null {
+    let dir = path.posix.dirname(rel);
+    for (;;) {
+      const manifest = dir === '.' || dir === '' ? 'Cargo.toml' : `${dir}/Cargo.toml`;
+      if (this.isProcMacroCrate(manifest)) return dir === '' ? '.' : dir;
+      if (dir === '.' || dir === '') return null;
+      const up = path.posix.dirname(dir);
+      // The walk cannot leave the worktree: `rel` is already allow-list form,
+      // which is relative and never has a leading `..`.
+      if (up === dir) return null;
+      dir = up;
+    }
+  }
+
+  private isProcMacroCrate(manifest: string): boolean {
+    const cached = this.procMacroDirs.get(manifest);
+    if (cached !== undefined) return cached;
+    let answer = false;
+    try {
+      answer = declaresProcMacro(fs.readFileSync(path.join(this.root, ...manifest.split('/')), 'utf8'));
+    } catch {
+      // No manifest there, or it cannot be read. Either way, not a proc-macro
+      // crate. A manifest that is a symlink out of the worktree can only make
+      // this answer `true`, which refuses rather than allows, so it is not worth
+      // resolving.
+      answer = false;
+    }
+    this.procMacroDirs.set(manifest, answer);
+    return answer;
   }
 
   /**
@@ -166,6 +260,15 @@ export class Sandbox {
     if (!this.allow.has(rel)) {
       throw new SandboxRefusal(
         `${rel} is not one of the files this task may change: ${[...this.allow].sort().join(', ')}`,
+      );
+    }
+    // The second door on the proc-macro rule. Reaching this means a refactor or
+    // a hand-built allow set rather than the constructor, and neither should get
+    // a write into code that the next `cargo check` will execute.
+    const crate = this.procMacroCrateOf(rel);
+    if (crate !== null) {
+      throw new SandboxRefusal(
+        `${rel} is inside the proc-macro crate ${crate}, whose code runs at build time`,
       );
     }
     return this.resolve(rel);
