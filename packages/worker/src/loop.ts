@@ -128,6 +128,10 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
     }
 
     const buffer = new TextBuffer((text) => emit({ type: 'text.delta', turn, text }));
+    // Thinking is its own stream. It is billed as output and it arrives before
+    // the answer, so folding it into the answer would both misrepresent the
+    // conversation and hide most of what a run actually costs.
+    const thoughts = new TextBuffer((text) => emit({ type: 'thinking.delta', turn, text }));
     let outcome;
     try {
       outcome = await client.stream({
@@ -136,14 +140,17 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
         tools: specs,
         signal: control.signal,
         onText: (delta) => buffer.push(delta),
+        onReasoning: (delta) => thoughts.push(delta),
       });
     } catch (error) {
       buffer.drain();
+      thoughts.drain();
       if (control.signal.aborted || error instanceof AbortedError) return { status: 'cancelled', summary };
       emit({ type: 'error', message: (error as Error).message });
       return { status: 'failed', summary };
     }
     buffer.drain();
+    thoughts.drain();
 
     totals = totalsOf(totals, outcome.metrics, options.price);
     emit({ type: 'metrics', turn, call: outcome.metrics, totals });

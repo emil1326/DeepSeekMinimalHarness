@@ -64,8 +64,12 @@ export interface ModelStats {
   promptTokens: number;
   cacheHitTokens: number;
   completionTokens: number;
+  /** Of `completionTokens`, the part spent thinking. Billed as output. */
+  reasoningTokens: number;
   timeToFirstTokenMs: number | null;
+  /** Decode only, and often null. Not the number to quote. */
   generationTokensPerSecond: number | null;
+  /** Output tokens over the whole call. This is what a vendor advertises. */
   endToEndTokensPerSecond: number | null;
   costUsd: number | null;
 }

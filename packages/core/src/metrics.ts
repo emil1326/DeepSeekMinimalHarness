@@ -7,15 +7,24 @@ export interface CallMetrics {
   /** Milliseconds from the request going out to the last token, measured on the client. */
   durationMs: number;
   timeToFirstTokenMs: number | null;
-  /** Milliseconds from the first token to the last. */
+  /** Milliseconds from the first output token to the last, of any kind. */
   streamingMs: number | null;
+  /** The longest wait between two output tokens, for telling a burst from a decode. */
+  largestGapMs: number;
   promptTokens: number;
   cacheHitTokens: number;
   cacheMissTokens: number;
   completionTokens: number;
-  /** What people mean by tokens per second: decode only. */
+  /** Of `completionTokens`, how many were thinking rather than answer. */
+  reasoningTokens: number;
+  /**
+   * Decode only, and null when the stream did not span enough to measure one.
+   *
+   * Not the number to quote as "the model's speed": see the note on
+   * `deepseek.ts`'s `decodeRate`. The honest headline is end to end.
+   */
   generationTokensPerSecond: number | null;
-  /** Decode plus prompt processing plus the network. */
+  /** Output tokens over the whole call. This is what a vendor advertises. */
   endToEndTokensPerSecond: number | null;
 }
 
@@ -80,6 +89,7 @@ export function totalsOf(previous: RunTotals, metrics: CallMetrics, price: Price
     promptTokens: previous.promptTokens + metrics.promptTokens,
     cacheHitTokens: previous.cacheHitTokens + metrics.cacheHitTokens,
     completionTokens: previous.completionTokens + metrics.completionTokens,
+    reasoningTokens: previous.reasoningTokens + metrics.reasoningTokens,
     timeToFirstTokenMs,
     // The most recent measurement, not a mean of speeds: averaging tokens per
     // second across calls of wildly different lengths means nothing.

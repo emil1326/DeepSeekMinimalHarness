@@ -110,13 +110,15 @@ describe('the agent loop', () => {
       [
         {
           text: 'let me look at the file first and then change the constant',
-          tokenDelayMs: 10,
+          reasoning: 'the constant is the only thing the task names, so read the file it is in',
+          tokenDelayMs: 20,
           toolCalls: [{ name: 'read_file', args: { path: 'src/a.ts' } }],
         },
         // A tool call streams its arguments, so this turn has a real decode
-        // window. It is short, so the speed is high, but it is a measurement.
+        // window. Long enough between chunks to be a measurement rather than
+        // scheduler granularity.
         {
-          tokenDelayMs: 5,
+          tokenDelayMs: 25,
           toolCalls: [{ name: 'replace_in_file', args: { path: 'src/a.ts', old: '= 1', new: '= 2' } }],
         },
         { toolCalls: [{ name: 'run_check', args: { name: 'echo' } }] },
@@ -151,6 +153,17 @@ describe('the agent loop', () => {
     if (first?.type === 'metrics') {
       expect(first.call.generationTokensPerSecond).not.toBeNull();
       expect(first.call.timeToFirstTokenMs).not.toBeNull();
+    }
+    // The thinking is its own channel, streamed and counted. It is billed as
+    // output, so a run that hid it would be hiding most of its own cost.
+    const thinking = result.events.filter((event) => event.type === 'thinking.delta');
+    expect(thinking.length).toBeGreaterThan(0);
+    expect(thinking.map((event) => (event.type === 'thinking.delta' ? event.text : '')).join('')).toContain(
+      'the constant is the only thing the task names',
+    );
+    if (first?.type === 'metrics') {
+      expect(first.call.reasoningTokens).toBeGreaterThan(0);
+      expect(first.totals.reasoningTokens).toBeGreaterThan(0);
     }
     // The second streams its tool arguments, so it has a real, short window:
     // a number, and faster than the end-to-end figure that includes the wait.

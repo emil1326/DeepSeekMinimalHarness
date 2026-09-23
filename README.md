@@ -124,8 +124,20 @@ message box to tell the agent something. A config tab shows the task exactly as
 the run used it, and a diff tab shows the worktree.
 
 Every model call is measured in passing, no separate benchmark: time to first
-token, generation speed (decode only, which is the number people mean), end to
-end speed, and DeepSeek's cache hits. `dsh stats` adds them up per model.
+token, speed over the whole call, and DeepSeek's cache hits. `dsh stats` adds them
+up per model.
+
+Two things worth knowing about those numbers, because I got them wrong first:
+
+- **The speed to look at is output tokens over the whole call.** That is the
+  number a vendor advertises. There is also a decode-only figure, one click in,
+  and it is usually higher and often blank: a call can spend six seconds waiting
+  for its first token and one second decoding, so quoting the decode rate would
+  claim 1229 tokens a second for a call that delivered 183.
+- **The model thinks, and you pay for that.** Most of the billed output tokens
+  are a reasoning channel that arrives before the answer. It shows up as a
+  collapsed block under the turn it belongs to rather than being thrown away,
+  and `dsh run --thinking` prints it as it streams.
 
 ## Checking the sandbox actually holds
 

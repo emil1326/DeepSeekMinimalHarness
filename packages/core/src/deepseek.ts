@@ -34,6 +34,15 @@ export interface Usage {
   total_tokens: number;
   prompt_cache_hit_tokens: number;
   prompt_cache_miss_tokens: number;
+  /**
+   * Of `completion_tokens`, how many were thinking rather than answer.
+   *
+   * deepseek-flash streams a reasoning channel on `delta.reasoning_content` and
+   * bills it as output. Measured on a plain prose request it was 797 of 902
+   * billed tokens, so "output tokens" and "what the answer cost" are not the
+   * same number, and a reader needs to know which one they are looking at.
+   */
+  reasoning_tokens: number;
 }
 
 export interface StreamRequest {
@@ -43,11 +52,16 @@ export interface StreamRequest {
   /** Aborted the instant a run is cancelled. */
   signal?: AbortSignal;
   temperature?: number;
+  /** The answer, as it streams. */
   onText?: (delta: string) => void;
+  /** The model thinking, as it streams. Arrives before the answer. */
+  onReasoning?: (delta: string) => void;
 }
 
 export interface StreamOutcome {
   message: ChatMessage;
+  /** The thinking channel, which is billed as output and arrives first. */
+  reasoning: string;
   usage: Usage;
   metrics: CallMetrics;
 }
@@ -155,11 +169,35 @@ export class DeepSeekClient {
 
     const state = {
       text: '',
+      reasoning: '',
       toolCalls: new Map<number, { id: string; name: string; args: string }>(),
       usage: emptyUsage(),
       firstTokenMs: null as number | null,
       lastTokenMs: 0,
+      /** The longest wait between two output deltas, so a burst shows up. */
+      largestGapMs: 0,
+      lastDeltaAt: null as number | null,
       finished: false,
+    };
+
+    /**
+     * One output delta arrived, of any kind.
+     *
+     * Everything counts, including the reasoning channel and tool arguments,
+     * because the window this builds is the span the model spent producing
+     * output and the token count it gets divided by includes all of it. Timing
+     * only `content` was the bug behind a reported 930 tokens a second: the
+     * denominator held the whole output while the denominator held the answer's
+     * share of it, and the thinking that made up most of the rest went untimed.
+     */
+    const sawOutput = (at: number): void => {
+      const since = at - start;
+      if (state.firstTokenMs === null) state.firstTokenMs = since;
+      if (state.lastDeltaAt !== null) {
+        state.largestGapMs = Math.max(state.largestGapMs, since - state.lastDeltaAt);
+      }
+      state.lastDeltaAt = since;
+      state.lastTokenMs = since;
     };
 
     const handle = (payload: string): void => {
@@ -180,15 +218,18 @@ export class DeepSeekClient {
       if (delta === undefined) return;
 
       const at = performance.now();
+      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content !== '') {
+        sawOutput(at);
+        state.reasoning += delta.reasoning_content;
+        request.onReasoning?.(delta.reasoning_content);
+      }
       if (typeof delta.content === 'string' && delta.content !== '') {
-        if (state.firstTokenMs === null) state.firstTokenMs = at - start;
-        state.lastTokenMs = at - start;
+        sawOutput(at);
         state.text += delta.content;
         request.onText?.(delta.content);
       }
       for (const call of delta.tool_calls ?? []) {
-        if (state.firstTokenMs === null) state.firstTokenMs = at - start;
-        state.lastTokenMs = at - start;
+        sawOutput(at);
         const index = call.index ?? 0;
         const current = state.toolCalls.get(index) ?? { id: '', name: '', args: '' };
         if (typeof call.id === 'string' && call.id !== '') current.id = call.id;
@@ -214,11 +255,13 @@ export class DeepSeekClient {
       durationMs,
       timeToFirstTokenMs: state.firstTokenMs === null ? null : round(state.firstTokenMs, 1),
       streamingMs,
+      largestGapMs: round(state.largestGapMs, 1),
       promptTokens: state.usage.prompt_tokens,
       cacheHitTokens: state.usage.prompt_cache_hit_tokens,
       cacheMissTokens: state.usage.prompt_cache_miss_tokens,
       completionTokens: state.usage.completion_tokens,
-      generationTokensPerSecond: rate(state.usage.completion_tokens, streamingMs),
+      reasoningTokens: state.usage.reasoning_tokens,
+      generationTokensPerSecond: decodeRate(state.usage.completion_tokens, streamingMs, state.largestGapMs),
       endToEndTokensPerSecond: rate(state.usage.completion_tokens, durationMs),
     };
 
@@ -237,8 +280,35 @@ export class DeepSeekClient {
       ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
     };
 
-    return { message, usage: state.usage, metrics };
+    return { message, reasoning: state.reasoning, usage: state.usage, metrics };
   }
+}
+
+/**
+ * How long a window has to be before a speed derived from it means anything.
+ *
+ * Below this the number is mostly scheduler granularity and TCP timing rather
+ * than decoding. It is a floor on measuring, not a cap on speed: a genuinely
+ * fast short answer reports null here and its real rate end to end.
+ */
+export const MIN_DECODE_WINDOW_MS = 100;
+
+/**
+ * The decode rate, or null when the stream did not actually span enough to
+ * measure one.
+ *
+ * Two things disqualify a window. Too short, for the reason above. And bursty:
+ * if one single wait accounts for most of the span, the span is a wait rather
+ * than a decode, and dividing a whole answer's tokens by it invents a speed.
+ * The measured evidence for that guard is a real tool call whose 4430 tokens
+ * arrived across 34 ms in two clumps, which the naive division turned into
+ * 129,799 tokens a second.
+ */
+export function decodeRate(tokens: number, windowMs: number | null, largestGapMs = 0): number | null {
+  if (windowMs === null || !Number.isFinite(windowMs)) return null;
+  if (windowMs < MIN_DECODE_WINDOW_MS) return null;
+  if (largestGapMs >= windowMs * 0.5) return null;
+  return rate(tokens, windowMs);
 }
 
 export class AbortedError extends Error {
@@ -252,6 +322,8 @@ interface ChatChunk {
   choices?: {
     delta?: {
       content?: string | null;
+      /** The thinking channel. Billed as output, and the bulk of it. */
+      reasoning_content?: string | null;
       tool_calls?: {
         index?: number;
         id?: string;
@@ -268,6 +340,8 @@ interface RawUsage {
   total_tokens: number;
   prompt_cache_hit_tokens: number;
   prompt_cache_miss_tokens: number;
+  prompt_tokens_details?: { cached_tokens?: number } | null;
+  completion_tokens_details?: { reasoning_tokens?: number } | null;
 }
 
 export function emptyUsage(): Usage {
@@ -277,12 +351,13 @@ export function emptyUsage(): Usage {
     total_tokens: 0,
     prompt_cache_hit_tokens: 0,
     prompt_cache_miss_tokens: 0,
+    reasoning_tokens: 0,
   };
 }
 
 function normaliseUsage(raw: Partial<RawUsage>): Usage {
   const prompt = raw.prompt_tokens ?? 0;
-  const hit = raw.prompt_cache_hit_tokens ?? 0;
+  const hit = raw.prompt_cache_hit_tokens ?? raw.prompt_tokens_details?.cached_tokens ?? 0;
   const miss = raw.prompt_cache_miss_tokens ?? Math.max(0, prompt - hit);
   return {
     prompt_tokens: prompt,
@@ -290,6 +365,7 @@ function normaliseUsage(raw: Partial<RawUsage>): Usage {
     total_tokens: raw.total_tokens ?? prompt + (raw.completion_tokens ?? 0),
     prompt_cache_hit_tokens: hit,
     prompt_cache_miss_tokens: miss,
+    reasoning_tokens: raw.completion_tokens_details?.reasoning_tokens ?? 0,
   };
 }
 

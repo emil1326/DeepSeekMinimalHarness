@@ -51,6 +51,16 @@ function BlockView({ block, runId, streaming }: { block: Block; runId: string; s
           <pre>{block.text}</pre>
         </div>
       );
+    case 'thinking':
+      return (
+        <details className="thinking">
+          <summary>
+            <span>thought it through</span>
+            {block.tokens !== null && <span className="cost">{block.tokens.toLocaleString()} tokens</span>}
+          </summary>
+          <div className="thinking-body">{block.text}</div>
+        </details>
+      );
     case 'tool':
       return <ToolCall block={block} />;
     case 'question':
@@ -81,8 +91,8 @@ function TurnRule({ block }: { block: Extract<Block, { kind: 'turn' }> }) {
     <details className="turn">
       <summary className="turn-rule">
         <span className="turn-label">turn {block.turn}</span>
-        {block.call !== null && block.call.generationTokensPerSecond !== null && (
-          <span className="turn-peek">{block.call.generationTokensPerSecond.toFixed(0)}/s</span>
+        {block.call !== null && block.call.endToEndTokensPerSecond !== null && (
+          <span className="turn-peek">{block.call.endToEndTokensPerSecond.toFixed(0)}/s</span>
         )}
       </summary>
       {block.call !== null && (
@@ -92,11 +102,7 @@ function TurnRule({ block }: { block: Extract<Block, { kind: 'turn' }> }) {
             <dd>{seconds(block.call.timeToFirstTokenMs)}</dd>
           </div>
           <div>
-            <dt>generating</dt>
-            <dd>{speed(block.call.generationTokensPerSecond)}</dd>
-          </div>
-          <div>
-            <dt>end to end</dt>
+            <dt>speed</dt>
             <dd>{speed(block.call.endToEndTokensPerSecond)}</dd>
           </div>
           <div>
@@ -105,6 +111,18 @@ function TurnRule({ block }: { block: Extract<Block, { kind: 'turn' }> }) {
               {tokens(block.call.promptTokens)} in, {block.call.completionTokens} out
             </dd>
           </div>
+          {block.call.reasoningTokens > 0 && (
+            <div>
+              <dt>thinking</dt>
+              <dd>{block.call.reasoningTokens} of them</dd>
+            </div>
+          )}
+          {block.call.generationTokensPerSecond !== null && (
+            <div>
+              <dt>decode</dt>
+              <dd>{speed(block.call.generationTokensPerSecond)}</dd>
+            </div>
+          )}
           {block.call.cacheHitTokens > 0 && (
             <div>
               <dt>cached</dt>

@@ -6,6 +6,8 @@ import type { CallMetrics, RunEvent, Speaker } from './types';
  */
 export type Block =
   | { kind: 'text'; key: string; turn: number; text: string; streaming: boolean }
+  /** The model thinking. Billed as output, and the bulk of it. */
+  | { kind: 'thinking'; key: string; turn: number; text: string; tokens: number | null }
   | {
       kind: 'tool';
       key: string;
@@ -34,6 +36,7 @@ export function fold(events: RunEvent[]): Block[] {
   const questionAt = new Map<string, number>();
   const turnAt = new Map<number, number>();
   let openText: Extract<Block, { kind: 'text' }> | null = null;
+  let openThinking: Extract<Block, { kind: 'thinking' }> | null = null;
 
   for (const event of events) {
     const key = `e${event.seq}`;
@@ -43,17 +46,30 @@ export function fold(events: RunEvent[]): Block[] {
           openText.text += event.text;
           break;
         }
+        openThinking = null;
         openText = { kind: 'text', key, turn: event.turn, text: event.text, streaming: false };
         blocks.push(openText);
         break;
       }
+      case 'thinking.delta': {
+        if (openThinking !== null && openThinking.turn === event.turn) {
+          openThinking.text += event.text;
+          break;
+        }
+        openText = null;
+        openThinking = { kind: 'thinking', key, turn: event.turn, text: event.text, tokens: null };
+        blocks.push(openThinking);
+        break;
+      }
       case 'turn.start':
         openText = null;
+        openThinking = null;
         turnAt.set(event.turn, blocks.length);
         blocks.push({ kind: 'turn', key, turn: event.turn, call: null });
         break;
       case 'tool.call':
         openText = null;
+        openThinking = null;
         toolAt.set(event.id, blocks.length);
         blocks.push({
           kind: 'tool',
@@ -67,6 +83,7 @@ export function fold(events: RunEvent[]): Block[] {
         break;
       case 'tool.result': {
         openText = null;
+        openThinking = null;
         const at = toolAt.get(event.id);
         if (at === undefined) {
           blocks.push({
@@ -109,6 +126,12 @@ export function fold(events: RunEvent[]): Block[] {
         const at = turnAt.get(event.turn);
         const block = at === undefined ? undefined : blocks[at];
         if (block?.kind === 'turn') block.call = event.call;
+        // How many of this turn's output tokens were thinking, attached to the
+        // thinking block so its collapsed line can say what it cost.
+        if (event.call.reasoningTokens > 0) {
+          const thoughts = blocks.findLast((each) => each.kind === 'thinking' && each.turn === event.turn);
+          if (thoughts?.kind === 'thinking') thoughts.tokens = event.call.reasoningTokens;
+        }
         break;
       }
       case 'summary':

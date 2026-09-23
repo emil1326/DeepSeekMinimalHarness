@@ -32,6 +32,8 @@ export default tseslint.config(
         console: 'readonly',
         fetch: 'readonly',
         URL: 'readonly',
+        TextDecoder: 'readonly',
+        performance: 'readonly',
         setTimeout: 'readonly',
         setInterval: 'readonly',
         clearTimeout: 'readonly',

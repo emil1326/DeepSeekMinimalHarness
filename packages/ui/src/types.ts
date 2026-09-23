@@ -23,11 +23,16 @@ export interface CallMetrics {
   durationMs: number;
   timeToFirstTokenMs: number | null;
   streamingMs: number | null;
+  largestGapMs: number;
   promptTokens: number;
   cacheHitTokens: number;
   cacheMissTokens: number;
   completionTokens: number;
+  /** Of `completionTokens`, how many were thinking rather than answer. */
+  reasoningTokens: number;
+  /** Decode only, and null when the stream did not span enough to measure one. */
   generationTokensPerSecond: number | null;
+  /** Output tokens over the whole call. The honest headline number. */
   endToEndTokensPerSecond: number | null;
 }
 
@@ -37,6 +42,7 @@ export interface RunTotals {
   promptTokens: number;
   cacheHitTokens: number;
   completionTokens: number;
+  reasoningTokens: number;
   timeToFirstTokenMs: number | null;
   generationTokensPerSecond: number | null;
   endToEndTokensPerSecond: number | null;
@@ -53,6 +59,7 @@ export type RunEventBody =
   | { type: 'status'; status: RunStatus; detail?: string }
   | { type: 'turn.start'; turn: number }
   | { type: 'text.delta'; turn: number; text: string }
+  | { type: 'thinking.delta'; turn: number; text: string }
   | { type: 'tool.call'; turn: number; id: string; name: string; args: unknown }
   | { type: 'tool.result'; turn: number; id: string; name: string; ok: boolean; result: string }
   | { type: 'question'; id: string; question: string }

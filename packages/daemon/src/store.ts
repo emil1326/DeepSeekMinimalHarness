@@ -239,6 +239,7 @@ interface Accumulator {
   promptTokens: number;
   cacheHitTokens: number;
   completionTokens: number;
+  reasoningTokens: number;
   ttftSum: number;
   ttftCount: number;
   generationSum: number;
@@ -262,6 +263,7 @@ export function summarise(
       promptTokens: 0,
       cacheHitTokens: 0,
       completionTokens: 0,
+      reasoningTokens: 0,
       ttftSum: 0,
       ttftCount: 0,
       generationSum: 0,
@@ -274,6 +276,9 @@ export function summarise(
     current.promptTokens += number(call.promptTokens);
     current.cacheHitTokens += number(call.cacheHitTokens);
     current.completionTokens += number(call.completionTokens);
+    // Runs recorded before the reasoning channel was read have no field for it,
+    // so this reads zero rather than turning the total into a NaN.
+    current.reasoningTokens += number(call.reasoningTokens);
     if (typeof call.timeToFirstTokenMs === 'number') {
       current.ttftSum += call.timeToFirstTokenMs;
       current.ttftCount += 1;
@@ -308,6 +313,7 @@ export function summarise(
     promptTokens: entry.promptTokens,
     cacheHitTokens: entry.cacheHitTokens,
     completionTokens: entry.completionTokens,
+    reasoningTokens: entry.reasoningTokens,
     timeToFirstTokenMs: average(entry.ttftSum, entry.ttftCount),
     generationTokensPerSecond: average(entry.generationSum, entry.generationCount),
     endToEndTokensPerSecond: average(entry.endToEndSum, entry.endToEndCount),

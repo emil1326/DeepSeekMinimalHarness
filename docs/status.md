@@ -44,7 +44,7 @@ mark-timeouts   finished   4 turns   2,137 out tokens   23 s
 typecheck and prettier both pass; one file changed, and it was the allowed one
 ```
 
-**The speed numbers, which are the interesting part.**
+**The speed numbers, as first measured.**
 
 |                               | single smoke call | the 4-turn task |
 | ----------------------------- | ----------------- | --------------- |
@@ -55,25 +55,75 @@ typecheck and prettier both pass; one file changed, and it was the allowed one
 
 The plan predicted the generation figure would come out well above the
 prototype's end-to-end one, since the prototype could not stream and measured
-whole calls. It is seven times higher, and the gap is not the harness.
+whole calls. It came out seven times higher. It also came out wrong, and what it
+took to find that out is the most useful thing in this document, so the table
+stays as it was first written.
 
-**What that says about latency, which is the thing that actually matters here.**
-End-to-end is 130 tok/s while decode is 930. Nothing in the tool path is
-spending that difference: it is prompt processing and the wait for the first
-token, and the first token is 0.7 s at best and 5.9 s on the turn with the whole
-file in it. So a turn costs about a second before a single token exists, whatever
-the tools cost.
+## The 930 was a bug, and the reason is worth more than the fix
 
-Which means the lever is **the number of turns, not the speed of a tool call**.
-Four turns here, and three of the four paid a fresh first-token wait. That is
-what the diagnostics in `diagnose.ts` are for: a `replace_in_file` that says
-which line was wrong instead of "matched 0 times" is a turn not spent, and a
-turn not spent is a second of first-token wait not paid. The syscall work is
-real but it is measured in milliseconds against a second.
+Emil asked why 930 tokens a second when DeepSeek advertises about 200. He was
+right and the number was mine.
 
-One more thing worth knowing: **74% of the prompt came from DeepSeek's cache**
-across the run, and 97% on the last two calls. The context is re-sent every turn
-and the cache is what makes that affordable.
+`node tools/raw-stream.mjs` prints the shape of the stream rather than the text.
+It shows every delta carrying **two** payloads, and the usage reporting what each
+cost:
+
+```
+delta.content                     857
+delta.reasoning_content           857
+usage.completion_tokens_details   { reasoning_tokens: 797 of 902 billed }
+```
+
+**797 of 902 billed output tokens were the model thinking**, on a channel the
+harness was not reading, not showing and not timing. So the numerator was every
+output token including the thinking, and the denominator was the arrival span of
+only the answer's share of them. A turn whose output was almost entirely
+thinking divided a whole response's token count by a few milliseconds of visible
+answer: one real tool call did it across **34 ms** and reported **129,799 tokens
+a second**.
+
+The correction is three things:
+
+1. **Time every output delta**, thinking and tool arguments included, so the
+   window spans what the token count describes.
+2. **Refuse to report a decode speed from a window that is not a measurement**:
+   under 100 ms, or where a single wait is half the span, which is a burst
+   wearing a decode's clothes. Both rules come from the measured evidence above.
+3. **Lead with output tokens over the whole call.** That is what a vendor
+   advertises and what answers "how long did this take". Decode stays, one click
+   in, labelled as decode and often blank.
+
+Re-measured on the same task after the fix: **114.7 tok/s over the whole call**,
+against 629 on the old arithmetic. That is consistent with a ~200 tps claim once
+the wait for the first token is in the arithmetic, which is the whole point.
+
+**And the real finding is a product bug rather than a metrics one: the harness was
+silently discarding the model's thinking.** It is most of the output tokens, most
+of the cost, and arguably the most interesting thing to watch an agent do. It now
+streams as its own `thinking.delta`, shows as a collapsed block under the turn it
+belongs to, has a THOUGHT column in `dsh stats`, and is dim-printed by `dsh run
+--thinking`.
+
+One consequence worth knowing: runs recorded before this carry decode figures
+computed the old way, and the event log is append-only, so an aggregate across
+old and new runs mixes the two.
+
+**What the corrected numbers say about latency, which is the thing that actually
+matters.** Over a whole call the model reads far slower than it decodes, and the
+difference is the wait for the first token: 0.7 s at best, 2.28 s on average,
+5.9 s on the turn with the whole file in its prompt. So a turn costs about a
+second before a single token exists, whatever the tools cost.
+
+Which makes the lever **the number of turns, not the speed of a tool call**. The
+first run took four turns and three of them paid a fresh first-token wait. That
+is what the diagnostics in `diagnose.ts` are for: a `replace_in_file` that names
+the line it could not find is a turn not spent, and a turn not spent is a second
+of first-token wait not paid. The syscall work is real and it is measured in
+milliseconds against a second.
+
+Worth knowing too: **74% of the prompt came from DeepSeek's cache** across the
+run, and 97% on the last two calls. The context is re-sent every turn and the
+cache is what makes that affordable.
 
 Cost is not shown because no price table has been filled into `config.json`,
 deliberately, since prices move and hardcoding one is worse than a blank.

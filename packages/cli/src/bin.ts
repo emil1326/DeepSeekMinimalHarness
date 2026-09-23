@@ -162,7 +162,7 @@ program
         return;
       }
       process.stdout.write(
-        `${pad('ID', 14)}${pad('NAME', 22)}${pad('STATUS', 16)}${pad('MODEL', 18)}${pad('TURNS', 7)}${pad('OUT TOK', 9)}${pad('GEN/S', 8)}${pad('COST', 9)}${pad('DURATION', 10)}\n`,
+        `${pad('ID', 14)}${pad('NAME', 22)}${pad('STATUS', 16)}${pad('MODEL', 18)}${pad('TURNS', 7)}${pad('OUT TOK', 9)}${pad('TOK/S', 8)}${pad('COST', 9)}${pad('DURATION', 10)}\n`,
       );
       for (const run of runs) {
         process.stdout.write(
@@ -229,15 +229,19 @@ program
         return;
       }
       process.stdout.write(
-        `${pad('MODEL', 20)}${pad('CALLS', 7)}${pad('IN TOK', 10)}${pad('CACHED', 10)}${pad('OUT TOK', 10)}${pad('FIRST TOK', 11)}${pad('GEN/S', 8)}${pad('E2E/S', 8)}${pad('COST', 10)}\n`,
+        `${pad('MODEL', 20)}${pad('CALLS', 7)}${pad('IN TOK', 10)}${pad('CACHED', 10)}${pad('OUT TOK', 10)}${pad('THOUGHT', 10)}${pad('FIRST TOK', 11)}${pad('TOK/S', 8)}${pad('DECODE', 8)}${pad('COST', 10)}\n`,
       );
       for (const model of stats.models) {
         process.stdout.write(
-          `${pad(model.model, 20)}${pad(String(model.calls), 7)}${pad(String(model.promptTokens), 10)}${pad(String(model.cacheHitTokens), 10)}${pad(String(model.completionTokens), 10)}${pad(seconds(model.timeToFirstTokenMs), 11)}${pad(number(model.generationTokensPerSecond), 8)}${pad(number(model.endToEndTokensPerSecond), 8)}${pad(model.costUsd === null ? '-' : `$${model.costUsd.toFixed(4)}`, 10)}\n`,
+          `${pad(model.model, 20)}${pad(String(model.calls), 7)}${pad(String(model.promptTokens), 10)}${pad(String(model.cacheHitTokens), 10)}${pad(String(model.completionTokens), 10)}${pad(String(model.reasoningTokens), 10)}${pad(seconds(model.timeToFirstTokenMs), 11)}${pad(number(model.endToEndTokensPerSecond), 8)}${pad(number(model.generationTokensPerSecond), 8)}${pad(model.costUsd === null ? '-' : `$${model.costUsd.toFixed(4)}`, 10)}\n`,
         );
       }
       process.stdout.write(
-        `\nfrom ${stats.runs} run(s). Prices come from ${'config.json'} in the harness home.\n`,
+        `\nTOK/S is output tokens over the whole call, which is the number a vendor advertises.\n` +
+          `DECODE counts only the streaming window, is often blank because the call spent longer\n` +
+          `waiting for its first token than decoding, and is not the number to quote.\n` +
+          `THOUGHT is the part of OUT TOK the model spent thinking, which is billed as output.\n` +
+          `\nfrom ${stats.runs} run(s). Prices come from config.json in the harness home.\n`,
       );
     }),
   );

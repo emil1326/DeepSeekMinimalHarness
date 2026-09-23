@@ -123,17 +123,28 @@ allOk =
 
 allOk =
   check(
-    'a generation speed came out of it',
-    metrics.generationTokensPerSecond !== null,
-    `${metrics.generationTokensPerSecond} tok/s generating, ${metrics.endToEndTokensPerSecond} end to end`,
+    'a whole-call speed came out of it',
+    metrics.endToEndTokensPerSecond !== null,
+    `${metrics.endToEndTokensPerSecond} tok/s over the whole call`,
+  ) && allOk;
+
+allOk =
+  check(
+    'the thinking channel was read',
+    usage.reasoning_tokens >= 0,
+    `${usage.reasoning_tokens} of ${usage.completion_tokens} billed tokens were thinking`,
   ) && allOk;
 
 console.log('');
-console.log('--- what that means for the UI numbers ---');
+console.log('--- what that means for the numbers the UI shows ---');
 console.log(`  time to first token : ${(metrics.timeToFirstTokenMs ?? 0) / 1000} s`);
-console.log(`  generating          : ${metrics.generationTokensPerSecond} tokens/s   (decode only)`);
+console.log(`  the whole call      : ${metrics.endToEndTokensPerSecond} tokens/s   <- the honest one`);
 console.log(
-  `  end to end          : ${metrics.endToEndTokensPerSecond} tokens/s   (prompt + network + decode)`,
+  `  decode only         : ${metrics.generationTokensPerSecond ?? '(not measurable: the stream did not span long enough)'}`,
+);
+console.log(`    over a window of ${metrics.streamingMs} ms, largest gap ${metrics.largestGapMs} ms`);
+console.log(
+  `  thinking            : ${usage.reasoning_tokens} tokens of the ${usage.completion_tokens} billed`,
 );
 console.log(
   `  cache               : ${

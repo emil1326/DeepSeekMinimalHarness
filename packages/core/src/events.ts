@@ -35,8 +35,12 @@ export interface RunTotals {
   promptTokens: number;
   cacheHitTokens: number;
   completionTokens: number;
+  /** Of `completionTokens`, how many were thinking rather than answer. */
+  reasoningTokens: number;
   timeToFirstTokenMs: number | null;
+  /** Decode only, and null when the stream did not span enough to measure one. */
   generationTokensPerSecond: number | null;
+  /** Output tokens over the whole call. The honest headline number. */
   endToEndTokensPerSecond: number | null;
   costUsd: number | null;
 }
@@ -50,6 +54,8 @@ interface Base {
 export type RunEventBody =
   | { type: 'status'; status: RunStatus; detail?: string }
   | { type: 'text.delta'; turn: number; text: string }
+  /** The model thinking. It arrives before the answer and is billed as output. */
+  | { type: 'thinking.delta'; turn: number; text: string }
   | { type: 'turn.start'; turn: number }
   | { type: 'tool.call'; turn: number; id: string; name: string; args: unknown }
   | { type: 'tool.result'; turn: number; id: string; name: string; ok: boolean; result: string }
@@ -83,6 +89,7 @@ export function emptyTotals(): RunTotals {
     promptTokens: 0,
     cacheHitTokens: 0,
     completionTokens: 0,
+    reasoningTokens: 0,
     timeToFirstTokenMs: null,
     generationTokensPerSecond: null,
     endToEndTokensPerSecond: null,

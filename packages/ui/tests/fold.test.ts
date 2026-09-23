@@ -25,10 +25,12 @@ function call(overrides: Partial<CallMetrics> = {}): CallMetrics {
     durationMs: 1200,
     timeToFirstTokenMs: 300,
     streamingMs: 900,
+    largestGapMs: 12,
     promptTokens: 1000,
     cacheHitTokens: 600,
     cacheMissTokens: 400,
     completionTokens: 120,
+    reasoningTokens: 90,
     generationTokensPerSecond: 133.3,
     endToEndTokensPerSecond: 100,
     ...overrides,
@@ -41,6 +43,7 @@ const totals: RunTotals = {
   promptTokens: 1000,
   cacheHitTokens: 600,
   completionTokens: 120,
+  reasoningTokens: 90,
   timeToFirstTokenMs: 300,
   generationTokensPerSecond: 133.3,
   endToEndTokensPerSecond: 100,
@@ -48,6 +51,44 @@ const totals: RunTotals = {
 };
 
 describe('folding the event log', () => {
+  it('keeps the thinking separate from the answer', () => {
+    // The model thinks before it answers, on its own channel, and that thinking
+    // is billed as output. Folding it into the answer would both misrepresent
+    // the conversation and hide what the run cost.
+    const blocks = fold([
+      event({ type: 'turn.start', turn: 1 }),
+      event({ type: 'thinking.delta', turn: 1, text: 'the file is the thing ' }),
+      event({ type: 'thinking.delta', turn: 1, text: 'the task names' }),
+      event({ type: 'text.delta', turn: 1, text: 'Reading it now.' }),
+    ]);
+    expect(blocks).toMatchObject([
+      { kind: 'turn', turn: 1 },
+      { kind: 'thinking', turn: 1, text: 'the file is the thing the task names', tokens: null },
+      { kind: 'text', turn: 1, text: 'Reading it now.' },
+    ]);
+  });
+
+  it('attaches what the thinking cost to the thinking block', () => {
+    const metrics = call({ reasoningTokens: 797 });
+    const blocks = fold([
+      event({ type: 'turn.start', turn: 1 }),
+      event({ type: 'thinking.delta', turn: 1, text: 'thinking about it' }),
+      event({ type: 'text.delta', turn: 1, text: 'Done.' }),
+      event({ type: 'metrics', turn: 1, call: metrics, totals }),
+    ]);
+    const thinking = blocks.find((block) => block.kind === 'thinking');
+    expect(thinking).toMatchObject({ kind: 'thinking', tokens: 797 });
+  });
+
+  it('leaves the thinking block numberless when the API reported none', () => {
+    const blocks = fold([
+      event({ type: 'turn.start', turn: 1 }),
+      event({ type: 'thinking.delta', turn: 1, text: 'hmm' }),
+      event({ type: 'metrics', turn: 1, call: call({ reasoningTokens: 0 }), totals }),
+    ]);
+    expect(blocks.find((block) => block.kind === 'thinking')).toMatchObject({ tokens: null });
+  });
+
   it('joins the streamed text of one turn into a single block', () => {
     const blocks = fold([
       event({ type: 'turn.start', turn: 1 }),

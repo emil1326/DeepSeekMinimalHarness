@@ -941,6 +941,56 @@ table.runs td.num {
   margin-left: 1px;
 }
 
+/* The model thinking. It is billed as output and it is usually most of it, so
+   it belongs on the page, but it is not the answer: quiet, indented, folded. */
+.thinking {
+  margin: 0 0 var(--s3);
+  max-width: 72ch;
+}
+
+.thinking > summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s3);
+  cursor: pointer;
+  list-style: none;
+  color: var(--text-faint);
+  font-size: var(--t-data);
+  padding: var(--s1) 0;
+}
+
+.thinking > summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking > summary::before {
+  content: '›';
+  transition: transform var(--step) var(--ease);
+  display: inline-block;
+}
+
+.thinking[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.thinking > summary .cost {
+  font-family: var(--mono);
+  color: var(--line);
+}
+
+.thinking-body {
+  border-left: 2px solid var(--line);
+  padding: var(--s2) var(--s4);
+  color: var(--text-muted);
+  font-size: var(--t-data);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 340px;
+  overflow: auto;
+  font-style: italic;
+}
+
 .said {
   margin: 0 0 var(--s4);
   padding: var(--s3) var(--s4);

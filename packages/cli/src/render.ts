@@ -23,6 +23,8 @@ export interface RendererOptions {
   /** One JSON event per line, for a machine to read. */
   json: boolean;
   color: boolean;
+  /** Print the model's thinking, which is billed as output. */
+  thinking?: boolean;
 }
 
 /** The readable stream. With `--json` the same events go out as JSON lines instead. */
@@ -43,6 +45,11 @@ export class Renderer {
         break;
       case 'text.delta':
         this.write(event.text);
+        break;
+      case 'thinking.delta':
+        // Not the answer, and it is usually most of what was billed. Dim, and
+        // only worth printing when somebody asked to see it.
+        if (this.options.thinking) this.write(paint(this.options.color, 'dim', event.text));
         break;
       case 'tool.call':
         this.write(
@@ -107,20 +114,22 @@ export function metricsLine(
     endToEndTokensPerSecond: number | null;
     promptTokens: number;
     completionTokens: number;
+    reasoningTokens: number;
     cacheHitTokens: number;
   },
   totals: RunTotals,
 ): string {
   const parts = [
     call.timeToFirstTokenMs === null ? null : `first token ${(call.timeToFirstTokenMs / 1000).toFixed(2)}s`,
+    call.endToEndTokensPerSecond === null ? null : `${call.endToEndTokensPerSecond.toFixed(0)} tok/s`,
+    // Marked as decode only, because it is not the number to compare with a
+    // vendor's headline and it is often null.
     call.generationTokensPerSecond === null
       ? null
-      : `${call.generationTokensPerSecond.toFixed(0)} tok/s generating`,
-    call.endToEndTokensPerSecond === null
-      ? null
-      : `${call.endToEndTokensPerSecond.toFixed(0)} tok/s end to end`,
+      : `${call.generationTokensPerSecond.toFixed(0)} tok/s decoding`,
     `cache ${hitRate(call)}%`,
     `${call.promptTokens} in / ${call.completionTokens} out`,
+    call.reasoningTokens > 0 ? `${call.reasoningTokens} of them thinking` : null,
   ].filter((part): part is string => part !== null);
   const run = totals.costUsd === null ? '' : ` | run cost $${totals.costUsd.toFixed(4)}`;
   return `   · ${parts.join(' | ')}${run}`;

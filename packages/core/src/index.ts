@@ -53,6 +53,8 @@ export {
   AbortedError,
   DeepSeekClient,
   DeepSeekError,
+  MIN_DECODE_WINDOW_MS,
+  decodeRate,
   emptyUsage,
   type ChatMessage,
   type DeepSeekOptions,

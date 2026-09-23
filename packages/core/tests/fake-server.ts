@@ -11,10 +11,14 @@ import type { AddressInfo } from 'node:net';
 
 export interface ScriptedTurn {
   text?: string;
+  /** The thinking channel. Billed as output, and it arrives before the answer. */
+  reasoning?: string;
   toolCalls?: { name: string; args: unknown }[];
   promptTokens?: number;
   cacheHitTokens?: number;
   completionTokens?: number;
+  /** Of `completionTokens`, how many were thinking. Defaults to a quarter. */
+  reasoningTokens?: number;
   /** Wait this long before the first chunk, so time to first token is measurable. */
   delayMs?: number;
   /** Wait this long between chunks, so generation speed is measurable. */
@@ -75,6 +79,9 @@ export async function startFakeDeepSeek(script: ScriptedTurn[]): Promise<FakeSer
         total_tokens: (turn.promptTokens ?? 1000) + (turn.completionTokens ?? 50),
         prompt_cache_hit_tokens: turn.cacheHitTokens ?? 0,
         prompt_cache_miss_tokens: (turn.promptTokens ?? 1000) - (turn.cacheHitTokens ?? 0),
+        completion_tokens_details: {
+          reasoning_tokens: turn.reasoningTokens ?? Math.floor((turn.completionTokens ?? 50) / 4),
+        },
       };
 
       if (turn.hang === true) {
@@ -87,6 +94,16 @@ export async function startFakeDeepSeek(script: ScriptedTurn[]): Promise<FakeSer
       const schedule = (fn: () => void): void => {
         timers.push(setTimeout(fn, clock));
       };
+
+      // Thinking comes first, the way the real stream does it, and it is billed
+      // as output. A fake that cannot produce it cannot catch the class of bug
+      // it caused: a token count that includes it divided by a window that did
+      // not, which is what turned a real 34 ms tool call into 129,799 tokens a
+      // second.
+      for (const piece of splitIntoChunks(turn.reasoning ?? '')) {
+        schedule(() => delta({ reasoning_content: piece }));
+        clock += turn.tokenDelayMs ?? 0;
+      }
 
       const pieces = splitIntoChunks(turn.text ?? '');
       for (const piece of pieces) {
