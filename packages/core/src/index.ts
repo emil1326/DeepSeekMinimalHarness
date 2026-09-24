@@ -52,12 +52,14 @@ export {
   type TaskFile,
   type TaskProblem,
 } from './task.js';
+export { causeOf, describeCause, needsAttention } from './failure.js';
 export {
   RUN_STATUSES,
   TERMINAL_STATUSES,
   emptyTotals,
   isTerminal,
   type EventNotice,
+  type FailureCause,
   type RunEvent,
   type RunEventBody,
   type RunEventType,

@@ -63,7 +63,7 @@ export interface RunTotals {
  *
  * `histogram` is a fixed bucket ladder, which is what makes a merge across runs
  * exact, so the percentiles are read from it rather than recomputed here: the
- * UI reads the same buckets the CLI does.
+ * UI asks the plane the same question the CLI does, over the same buckets.
  */
 export interface TimingStat {
   name: string;
@@ -85,13 +85,7 @@ export interface RunTimings {
   at: string | null;
 }
 
-/**
- * Where the time went across every run, and in the daemon itself.
- *
- * `process` is the daemon's own readings, kept out of `entries` because a daemon
- * outlives hundreds of runs and adding its uptime to their runtime would make
- * both numbers mean nothing.
- */
+/** Where the time went across every run, and in the daemon itself. */
 export interface TimingsResponse {
   runs: number;
   wallMs: number;
@@ -256,6 +250,15 @@ export interface CheckOutcome {
   name: string;
   outcome: 'pass' | 'fail' | 'unavailable';
   output: string;
+  /**
+   * A profile check, or a command the project declared.
+   *
+   * Kept apart because they are different evidence. A declared command is the
+   * project's own verification — a real test run — and it used to be invisible
+   * here, which meant a run that had genuinely checked its work reported that
+   * nothing verified it.
+   */
+  kind?: 'check' | 'command';
 }
 
 /**
@@ -280,8 +283,21 @@ export interface RunReport {
   claimSupported: boolean | null;
   checks: CheckOutcome[];
   allowed: string[];
+  /** Files the run's own write tools touched, from its event log. */
   changed: string[];
+  /**
+   * Files git sees a change in, read when the report was built.
+   *
+   * Deliberately separate from `changed`, which is what the run did and does not
+   * change afterwards. They disagree whenever somebody committed or reset the
+   * worktree in between, and the panel says so rather than showing one of them.
+   */
+  onDisk: string[];
   stray: string[];
+  /** Files outside the plan that the task said it might still need. */
+  offPlan: string[];
+  /** Files already changed before the run started, so not its doing. */
+  preExisting: string[];
   strayFailure: string | null;
   questions: { question: string; answer: string | null }[];
   /** True when the harness warned the agent before a limit, and how often. */

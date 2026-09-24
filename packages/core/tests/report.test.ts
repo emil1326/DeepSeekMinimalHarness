@@ -176,6 +176,159 @@ describe('a run that stopped at a limit', () => {
   });
 });
 
+describe('what the report counts as verification', () => {
+  /** A write, as the loop records it, so the file list has a source. */
+  function wrote(path: string, turn = 1): RunEvent[] {
+    return [event({ type: 'tool.call', turn, id: `w-${path}`, name: 'replace_in_file', args: { path } })];
+  }
+
+  /** A command the project declared, called and answered. */
+  function ranCommand(name: string, exitCode: number, turn = 1): RunEvent[] {
+    return [
+      event({ type: 'tool.call', turn, id: `x-${name}`, name, args: {} }),
+      event({
+        type: 'tool.result',
+        turn,
+        id: `x-${name}`,
+        name,
+        ok: exitCode === 0,
+        result: `exit ${exitCode}\nran the project's own thing`,
+      }),
+    ];
+  }
+
+  it('credits a command the project declared, which is the strongest evidence there is', () => {
+    // Found live. A run that verified its work with the project's own test
+    // command reported "None were run, so nothing verified this change", because
+    // the report only ever looked for `run_check`. The project's own test is the
+    // best thing that can appear here and it was invisible.
+    const report = buildReport(
+      input({ commands: ['run_test'], events: [...wrote('src/a.ts'), ...ranCommand('run_test', 0)] }),
+    );
+    const command = report.checks.find((entry) => entry.name === 'run_test');
+    expect(command?.kind).toBe('command');
+    expect(command?.outcome).toBe('pass');
+    expect(report.headline).toContain('every check it ran passed');
+  });
+
+  it('does not count reading as verification', () => {
+    // `read_file`, `list_dir` and `search` are tool calls with results, and
+    // treating every tool call as a check would make the section meaningless.
+    const report = buildReport(
+      input({
+        events: [
+          event({ type: 'tool.call', turn: 1, id: 'r1', name: 'read_file', args: { path: 'a' } }),
+          event({ type: 'tool.result', turn: 1, id: 'r1', name: 'read_file', ok: true, result: 'stuff' }),
+        ],
+      }),
+    );
+    expect(report.checks).toEqual([]);
+  });
+
+  it('reports a command that failed as a failure, not as a pass', () => {
+    const report = buildReport(input({ commands: ['run_test'], events: ranCommand('run_test', 1) }));
+    expect(report.checks[0]?.outcome).toBe('fail');
+    expect(report.headline).toContain('did NOT pass');
+  });
+
+  it('keeps the two kinds of evidence apart', () => {
+    const report = buildReport(
+      input({ commands: ['run_test'], events: [...check('prettier', 0), ...ranCommand('run_test', 0)] }),
+    );
+    expect(report.checks.map((entry) => `${entry.kind}:${entry.name}`)).toEqual([
+      'check:prettier',
+      'command:run_test',
+    ]);
+  });
+
+  it('does not call a built-in tool a command, which was the first version of this', () => {
+    // Found by reading a real report against a real run: with no list to go on,
+    // the report treated "a tool result that is not a read" as a declared
+    // command, and listed `replace_in_file` and `finish` as the run's
+    // verification. The list is what the project declared, and only the
+    // workspace file knows it.
+    const report = buildReport(
+      input({
+        commands: ['run_test'],
+        events: [
+          event({
+            type: 'tool.call',
+            turn: 1,
+            id: 'w1',
+            name: 'replace_in_file',
+            args: { path: 'src/a.ts' },
+          }),
+          event({
+            type: 'tool.result',
+            turn: 1,
+            id: 'w1',
+            name: 'replace_in_file',
+            ok: true,
+            result: 'replaced',
+          }),
+          event({ type: 'tool.call', turn: 2, id: 'f1', name: 'finish', args: { summary: 'done' } }),
+          event({
+            type: 'tool.result',
+            turn: 2,
+            id: 'f1',
+            name: 'finish',
+            ok: true,
+            result: 'ok',
+          }),
+        ],
+      }),
+    );
+    expect(report.checks).toEqual([]);
+  });
+});
+
+describe('the files a run changed', () => {
+  it('are the ones it wrote, from its own record', () => {
+    // Measured live: a report built after the worktree had been reset said
+    // "nothing changed" and an empty file list, because it asked git what was
+    // different *now*. The run's own two edits were in its event log the whole
+    // time, and that is what somebody reading the report is asking about.
+    const report = buildReport(
+      input({
+        changed: [],
+        events: [
+          event({
+            type: 'tool.call',
+            turn: 1,
+            id: 'w1',
+            name: 'replace_in_file',
+            args: { path: 'src/a.ts' },
+          }),
+          event({
+            type: 'tool.call',
+            turn: 2,
+            id: 'w2',
+            name: 'create_file',
+            args: { path: 'src/b.ts' },
+          }),
+        ],
+      }),
+    );
+    expect(report.changed).toEqual(['src/a.ts', 'src/b.ts']);
+    // And what git sees now is kept beside it, not mixed in.
+    expect(report.onDisk).toEqual([]);
+  });
+
+  it('falls back to git when the log has no writes in it', () => {
+    // A run that changed something in a way not modelled here is still
+    // described, rather than being reported as having changed nothing.
+    const report = buildReport(input({ changed: ['src/a.ts'], events: [] }));
+    expect(report.changed).toEqual(['src/a.ts']);
+  });
+
+  it('names a file once however many times it was edited', () => {
+    const write = (turn: number): RunEvent =>
+      event({ type: 'tool.call', turn, id: `w${turn}`, name: 'replace_in_file', args: { path: 'src/a.ts' } });
+    const report = buildReport(input({ changed: [], events: [write(1), write(2), write(3)] }));
+    expect(report.changed).toEqual(['src/a.ts']);
+  });
+});
+
 describe('a run that finished', () => {
   it('says so in the headline when it had gone past a budget anyway', () => {
     // Found live. A call's cost is only known once it has been paid for, so the

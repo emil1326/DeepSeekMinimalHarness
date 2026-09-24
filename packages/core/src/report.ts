@@ -30,6 +30,17 @@ export interface CheckResult {
   outcome: CheckOutcome;
   /** Its output, trimmed to something a report can carry. */
   output: string;
+  /**
+   * Whether this was a profile check or a command the project declared.
+   *
+   * Kept apart because they are different kinds of evidence. A profile check is
+   * something the harness was told to run and largely knows the shape of; a
+   * declared command is the project's own verification, which is the strongest
+   * thing here and used to be invisible. A run that verified its own work with
+   * the project's test command reported "no check called ..." and nothing else,
+   * which is the wrong story entirely.
+   */
+  kind: 'check' | 'command';
 }
 
 export interface RunReport {
@@ -60,8 +71,18 @@ export interface RunReport {
   checks: CheckResult[];
   /** Files the run was allowed to change, for reference. */
   allowed: string[];
-  /** Files git says actually changed. */
+  /** Files the run's own write tools touched. See the note on `changed`. */
   changed: string[];
+  /**
+   * Files git sees a change in, read when the report was built.
+   *
+   * Deliberately separate from `changed`. `changed` comes from the run's own
+   * tool calls, so it is what the run did and does not change afterwards; this
+   * one is the worktree as it stands. They disagree whenever somebody reset the
+   * tree or committed the work, and a reader is told when they do rather than
+   * being shown one of them and left to guess.
+   */
+  onDisk: string[];
   /** Changed files that were not allowed. */
   stray: string[];
   /**
@@ -98,6 +119,17 @@ export interface ReportInput {
   model: string;
   task: string;
   allowed: string[];
+  /**
+   * The names of the commands this run's project declared.
+   *
+   * Needed rather than inferred. A first version of this treated "a tool result
+   * that is not a read" as a declared command, which swept up `replace_in_file`
+   * and `finish` and listed them as the run's verification — found by reading a
+   * real report against a real run, and not findable any other way. What a
+   * project declared is a fact the workspace file holds and nothing can work
+   * out from the log alone.
+   */
+  commands?: string[];
   limits: RunLimits;
   turns: number;
   totals: RunTotals;
@@ -151,8 +183,9 @@ function withOverspend(status: RunStatus, text: string, used: LimitUse[]): strin
 }
 
 export function buildReport(input: ReportInput): RunReport {
-  const checks = lastCheckOutcomes(input.events);
+  const checks = lastCheckOutcomes(input.events, input.commands ?? []);
   const questions = askedQuestions(input.events);
+  const written = writtenPaths(input.events);
   const warnings = input.events.filter((event) => event.type === 'warning').length;
   const warnedAbout = [
     ...new Set(
@@ -204,7 +237,8 @@ export function buildReport(input: ReportInput): RunReport {
     claimSupported: claim === null ? null : failed.length === 0,
     checks,
     allowed: input.allowed,
-    changed: input.changed,
+    changed: written.length > 0 ? written : input.changed,
+    onDisk: input.changed,
     stray: input.stray,
     offPlan: input.offPlan ?? [],
     preExisting: input.preExisting ?? [],
@@ -266,29 +300,70 @@ function headline(
   return `Ended after ${turns} as ${input.status}.`;
 }
 
-/** The last result of each check, in the order the checks were first run. */
-function lastCheckOutcomes(events: RunEvent[]): CheckResult[] {
-  const names = new Map<string, { name: string; callId: string }>();
+/**
+ * The last result of each check and each declared command the run ran.
+ *
+ * `commandNames` is what the run's project declared, passed in rather than
+ * worked out. A first version of this called "a tool result that is not a read"
+ * a declared command, which swept up `replace_in_file` and `finish` and listed
+ * them as the run's verification — found by reading a real report against a real
+ * run, and not findable any other way. What a project declared is a fact the
+ * workspace file holds and nothing else can infer.
+ */
+function lastCheckOutcomes(events: RunEvent[], commandNames: string[]): CheckResult[] {
+  const declared = new Set(commandNames);
+  const names = new Map<string, { name: string; kind: 'check' | 'command' }>();
   for (const event of events) {
-    if (event.type !== 'tool.call' || event.name !== 'run_check') continue;
-    const args = event.args as { name?: unknown } | null;
-    const name = typeof args?.name === 'string' ? args.name : '(unnamed)';
-    names.set(event.id, { name, callId: event.id });
+    if (event.type !== 'tool.call') continue;
+    if (event.name === 'run_check') {
+      const args = event.args as { name?: unknown } | null;
+      const name = typeof args?.name === 'string' ? args.name : '(unnamed)';
+      names.set(event.id, { name, kind: 'check' });
+      continue;
+    }
+    if (declared.has(event.name)) names.set(event.id, { name: event.name, kind: 'command' });
   }
+
   const order: string[] = [];
   const latest = new Map<string, CheckResult>();
   for (const event of events) {
     if (event.type !== 'tool.result') continue;
     const called = names.get(event.id);
     if (called === undefined) continue;
-    if (!order.includes(called.name)) order.push(called.name);
-    latest.set(called.name, {
+    const key = `${called.kind}:${called.name}`;
+    if (!order.includes(key)) order.push(key);
+    latest.set(key, {
       name: called.name,
+      kind: called.kind,
       outcome: checkOutcome(event.result),
       output: trim(event.result),
     });
   }
-  return order.map((name) => latest.get(name)).filter((entry): entry is CheckResult => entry !== undefined);
+  return order.map((key) => latest.get(key)).filter((entry): entry is CheckResult => entry !== undefined);
+}
+
+/**
+ * The files the run's own write tools touched, from its event log.
+ *
+ * Read from the events rather than from git, and that is the point. A report
+ * built later asked git what had changed, so a worktree that had been reset or
+ * committed in between reported nothing at all — the run's own record of two
+ * edited files, replaced by the current state of a directory. Measured: a
+ * finished run whose two edits had since been reverted reported "nothing
+ * changed" and an empty file list.
+ *
+ * Falls back to git only when the log has no writes in it, so a run that wrote
+ * something in a way not modelled here is still described rather than empty.
+ */
+function writtenPaths(events: RunEvent[]): string[] {
+  const written = new Set<string>();
+  for (const event of events) {
+    if (event.type !== 'tool.call') continue;
+    if (event.name !== 'replace_in_file' && event.name !== 'create_file') continue;
+    const args = event.args as { path?: unknown } | null;
+    if (typeof args?.path === 'string') written.add(args.path);
+  }
+  return [...written].sort();
 }
 
 function askedQuestions(events: RunEvent[]): { question: string; answer: string | null }[] {

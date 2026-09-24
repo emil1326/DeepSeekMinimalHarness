@@ -24,6 +24,14 @@ function doubleCost(value: number | undefined): number {
   return Math.round((value ?? 0) * 2 * 1e6) / 1e6;
 }
 
+/** Whether two file lists name the same set, whatever order they came in. */
+function sameFiles(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const left = [...a].sort();
+  const right = [...b].sort();
+  return left.every((value, at) => value === right[at]);
+}
+
 export function Report({ runId, live, taskPath }: { runId: string; live: boolean; taskPath: string | null }) {
   const queryClient = useQueryClient();
   const report = useQuery({
@@ -100,11 +108,15 @@ export function Report({ runId, live, taskPath }: { runId: string; live: boolean
         ) : (
           <ul className="report-checks">
             {data.checks.map((check) => (
-              <li key={check.name} data-outcome={check.outcome}>
+              <li key={`${check.kind ?? 'check'}:${check.name}`} data-outcome={check.outcome}>
                 <span className="word">
                   {check.outcome === 'pass' ? 'pass' : check.outcome === 'fail' ? 'FAIL' : 'n/a'}
                 </span>
                 <span className="name">{check.name}</span>
+                {/* A declared command is the project's own verification, and it
+                    is the strongest thing in this list. Marked, so it is not
+                    read as another profile check. */}
+                {check.kind === 'command' && <span className="tag">command</span>}
                 <span className="quiet">{check.output.split('\n').slice(0, 2).join(' · ')}</span>
               </li>
             ))}
@@ -119,6 +131,29 @@ export function Report({ runId, live, taskPath }: { runId: string; live: boolean
             <span>{data.changed.join(', ')}</span>
           )}
         </p>
+        {/* The run's own record against the worktree as it stands. They differ
+            when somebody committed or reset in between, and a reader deciding
+            whether to trust the list above needs to know which one this is. */}
+        {data.changed.length > 0 && data.onDisk.length === 0 && (
+          <p className="report-loud">
+            The worktree shows no change now: it was committed or reset since this run ended, so this list is
+            the run's own record rather than the current state.
+          </p>
+        )}
+        {data.changed.length > 0 && data.onDisk.length > 0 && !sameFiles(data.changed, data.onDisk) && (
+          <p className="report-loud">The worktree now differs from that list: {data.onDisk.join(', ')}.</p>
+        )}
+        {data.offPlan.length > 0 && (
+          <p className="quiet">
+            Also changed, outside the plan and allowed by it: {data.offPlan.join(', ')}.
+          </p>
+        )}
+        {data.preExisting.length > 0 && (
+          <p className="quiet">
+            {data.preExisting.length} file{data.preExisting.length === 1 ? '' : 's'} were already changed when
+            this run started, so they are not counted as its doing.
+          </p>
+        )}
         {data.strayFailure !== null ? (
           <p className="report-loud">
             Could not check for changes outside the allowed files: {data.strayFailure}

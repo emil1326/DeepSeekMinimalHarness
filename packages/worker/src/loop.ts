@@ -5,6 +5,7 @@ import {
   SandboxRefusal,
   SYSTEM_PROMPT,
   approaching,
+  causeOf,
   checkPassed,
   compact,
   emptyTotals,
@@ -21,6 +22,7 @@ import {
   totalsOf,
   type ChatMessage,
   type CumulativeLimit,
+  type FailureCause,
   type LimitUse,
   type PriceTable,
   type ResolvedRunConfig,
@@ -169,6 +171,14 @@ export interface LoopControl {
 export interface LoopResult {
   status: RunStatus;
   summary: string | null;
+  /**
+   * Why it failed, when it did, in a form a launcher can branch on.
+   *
+   * A spent account and a bad answer both leave the run `failed`, and one of
+   * them means stop launching. A launcher that has to read prose to tell them
+   * apart will keep starting runs against an account with no money on it.
+   */
+  cause?: FailureCause;
 }
 
 /**
@@ -393,7 +403,7 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
       thoughts.drain();
       if (control.signal.aborted || error instanceof AbortedError) return { status: 'cancelled', summary };
       emit({ type: 'error', message: (error as Error).message });
-      return { status: 'failed', summary };
+      return { status: 'failed', summary, cause: causeOf(error) };
     }
     buffer.drain();
     thoughts.drain();

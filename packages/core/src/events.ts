@@ -28,6 +28,30 @@ export function isTerminal(status: RunStatus): boolean {
 /** Who said a thing. The CLI is Claude; the UI is Emil. */
 export type Speaker = 'agent' | 'claude' | 'emil' | 'system';
 
+/**
+ * Why a run failed, in a form a script can branch on.
+ *
+ * A string in a `detail` field is for a person. A launcher deciding whether to
+ * start the next run needs something it can compare, and reading prose for
+ * "insufficient balance" is how an orchestrator keeps launching runs against an
+ * account that has no credit left — each one failing after a few seconds, for as
+ * long as somebody leaves it running.
+ */
+export const FAILURE_CAUSES = [
+  /** The provider says there is no money on the account. Stop launching. */
+  'provider_balance',
+  /** The key is missing, wrong, or revoked. Stop launching. */
+  'provider_auth',
+  /** The provider refused the request itself: too long, malformed, unsupported. */
+  'provider_refused',
+  /** The provider could not be reached after retries, or answered 5xx throughout. */
+  'provider_unreachable',
+  /** The harness itself failed: a bad worktree, a sandbox refusal, a crash. */
+  'harness',
+] as const;
+
+export type FailureCause = (typeof FAILURE_CAUSES)[number];
+
 export interface RunTotals {
   calls: number;
   /** How many of those calls managed to measure a first token. */
@@ -63,7 +87,7 @@ interface Base {
 }
 
 export type RunEventBody =
-  | { type: 'status'; status: RunStatus; detail?: string }
+  | { type: 'status'; status: RunStatus; detail?: string; cause?: FailureCause }
   | { type: 'text.delta'; turn: number; text: string }
   /** The model thinking. It arrives before the answer and is billed as output. */
   | { type: 'thinking.delta'; turn: number; text: string }

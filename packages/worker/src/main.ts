@@ -19,6 +19,7 @@ import {
   Sandbox,
   SandboxRefusal,
   checkPassed,
+  describeCause,
   harnessHome,
   readApiKey,
   realPath,
@@ -234,6 +235,16 @@ async function start(config: WorkerStart): Promise<void> {
       control,
     );
     reportStray(root, sandbox, baseline);
+    if (result.cause !== undefined) {
+      // On the terminal status, where a launcher already looks, rather than in
+      // a separate event it would have to know to watch for.
+      emit({
+        type: 'status',
+        status: result.status,
+        cause: result.cause,
+        detail: describeCause(result.cause),
+      });
+    }
     tellThenExit(result.status, result.summary);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

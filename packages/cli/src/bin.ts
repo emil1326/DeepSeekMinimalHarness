@@ -377,7 +377,10 @@ program
             : check.outcome === 'fail'
               ? paint('red', 'FAIL')
               : paint('yellow', 'n/a ');
-        line(`  ${check.name}`, `${word}  ${check.output.split('\n').slice(0, 2).join(' | ').slice(0, 160)}`);
+        // A declared command is the project's own verification, which is the
+        // strongest evidence in the section and used to be invisible here.
+        const what = check.kind === 'command' ? `${check.name} (command)` : check.name;
+        line(`  ${what}`, `${word}  ${check.output.split('\n').slice(0, 2).join(' | ').slice(0, 160)}`);
       }
 
       process.stdout.write(`\n${paint('bold', 'files')}\n`);
@@ -386,6 +389,23 @@ program
         line('  changed', 'nothing');
       } else {
         line('  changed', report.changed.join(', '));
+      }
+      // The run's own record against the worktree as it stands. They disagree
+      // whenever somebody committed or reset in between, and a reader deciding
+      // whether to trust the file list needs to know which one they are seeing.
+      if (report.changed.length > 0 && report.onDisk.length === 0) {
+        line('  on disk', paint('yellow', 'no changes now: the worktree was reset or committed since'));
+      } else if (report.changed.length > 0 && !sameSet(report.changed, report.onDisk)) {
+        line(
+          '  on disk',
+          paint('yellow', `differs from the list above: ${report.onDisk.join(', ') || '(nothing)'}`),
+        );
+      }
+      if (report.offPlan.length > 0) {
+        line('  off plan', paint('yellow', `${report.offPlan.join(', ')}  (outside the plan, allowed)`));
+      }
+      if (report.preExisting.length > 0) {
+        line('  before', `${report.preExisting.length} file(s) were already changed, so not counted`);
       }
       if (report.strayFailure !== null) {
         line('  stray', paint('red', `COULD NOT CHECK: ${report.strayFailure}`));
@@ -873,6 +893,14 @@ function nearestLimit(run: RunSummary): string {
 
 function cost(run: RunSummary): string {
   return run.totals.costUsd === null ? '-' : formatUsd(run.totals.costUsd);
+}
+
+/** Whether two file lists name the same set, whatever order they came in. */
+function sameSet(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const left = [...a].sort();
+  const right = [...b].sort();
+  return left.every((value, at) => value === right[at]);
 }
 
 function duration(run: RunSummary): string {

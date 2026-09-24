@@ -352,6 +352,7 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
           model: detail.model,
           task: detail.config.task,
           allowed: detail.config.allow,
+          commands: Object.keys(detail.config.commands ?? {}),
           limits: detail.limits,
           turns: detail.turns,
           totals: detail.totals,

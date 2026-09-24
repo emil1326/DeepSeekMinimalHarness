@@ -6,6 +6,7 @@ import {
   delay,
   isAlive,
   type DaemonRecord,
+  type FailureCause,
   type RunEvent,
   type RunStatus,
 } from '@emilswork/harness-core';
@@ -166,6 +167,19 @@ export const EXIT_CODES: Record<RunStatus, number> = {
   queued: 1,
 };
 
-export function exitCodeFor(status: RunStatus): number {
+/**
+ * The exit code for a run that failed for a reason worth stopping for.
+ *
+ * 6, because 0 to 5 are taken by the statuses and by a bad task file and an
+ * unreachable daemon. It exists so an orchestrator can stop: a run that failed
+ * because the account has no credit left or the key was refused will fail again
+ * the same way, in a few seconds, for as long as somebody leaves the loop
+ * running. Without a code of its own, that is indistinguishable from a run that
+ * failed because the model answered badly, which very much is worth retrying.
+ */
+export const EXIT_PROVIDER_REFUSED = 6;
+
+export function exitCodeFor(status: RunStatus, cause?: FailureCause): number {
+  if (cause === 'provider_balance' || cause === 'provider_auth') return EXIT_PROVIDER_REFUSED;
   return EXIT_CODES[status] ?? 1;
 }
