@@ -29,10 +29,16 @@ export interface TimingsTableOptions {
   sort: TimingSort;
 }
 
-/** A duration a person can read at a glance, in whatever unit fits. */
+/**
+ * A duration a person can read at a glance, in whatever unit fits.
+ *
+ * `us` rather than the micro sign: this goes to a Windows console as often as to
+ * a pipe, and the micro sign arrives there as mojibake in the middle of a column
+ * of numbers, which is the last place a reader wants to be decoding glyphs.
+ */
 function ms(value: number | null): string {
   if (value === null || !Number.isFinite(value)) return '-';
-  if (value < 1) return `${(value * 1000).toFixed(0)}µs`;
+  if (value < 1) return `${(value * 1000).toFixed(0)}us`;
   if (value < 1000) return `${value.toFixed(value < 10 ? 2 : 1)}ms`;
   return `${(value / 1000).toFixed(2)}s`;
 }
@@ -94,13 +100,16 @@ export function timingsTable(entries: TimingStat[], options: TimingsTableOptions
 
 /** What a reader has to know to read the table without being misled by it. */
 export function timingsFootnotes(): string {
+  // Plain ASCII throughout: this goes to a Windows console as often as to a
+  // pipe, and a curly apostrophe or an em dash arrives as mojibake there.
   return (
-    'SHARE is of the runs\u2019 own wall clock, model waiting included, so it is the right\n' +
+    "SHARE is of the runs' own wall clock, model waiting included, so it is the right\n" +
     'denominator for "how much of this run was the harness". The figures overlap on\n' +
     'purpose: a name contains the names it calls (worker.tool.read_file contains\n' +
     'core.sandbox.readFile), so shares do not add up to 100%.\n' +
-    'P50, P95 and MAX come from a fixed bucket ladder, so a percentile is the top edge\n' +
-    'of the bucket it lands in -- a bound, and never lower than what was measured.\n' +
+    'P50, P95 and MAX come from a fixed bucket ladder. A percentile is the top edge of\n' +
+    'the bucket it lands in, clamped to the largest reading actually seen, so it is a\n' +
+    'bound -- never lower than what was measured, and never above the maximum.\n' +
     'RATE divides the bytes a call handled by the time it took. It is blank where a\n' +
     'call has no size, and it is what tells a 3 ms read of 4 kB from a 3 ms read of 2 MB.\n'
   );

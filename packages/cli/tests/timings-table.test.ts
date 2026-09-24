@@ -51,7 +51,8 @@ describe('the timings table', () => {
       top: 5,
       sort: 'total',
     });
-    expect(table).toContain('500µs');
+    // `us`, not the micro sign: see `ms` in `timings.ts`.
+    expect(table).toContain('500us');
     expect(table).toContain('1.50s');
     // No wall clock given, so no share column to divide by zero.
     expect(table.split('\n')[0]).not.toContain('SHARE');
