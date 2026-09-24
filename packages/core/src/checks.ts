@@ -27,6 +27,23 @@ export function exitCodes(result: string): number[] {
 }
 
 /**
+ * The harness's own verdict on a command whose output proved nothing.
+ *
+ * The exit code is not enough. `cargo test -p x --test y <filter>` where the
+ * filter matches no test exits **0** and prints "0 passed; 0 failed", and a
+ * command like that reads as a green tick having executed nothing. Found in a
+ * real workspace: a command was declared to run one test by name, the name was a
+ * helper rather than a test, and it reported success for a long time while
+ * running nothing at all.
+ *
+ * A project says what proof looks like for its own tool (`expect` on a declared
+ * command), and `sandbox.ts` writes this marker in front of the output when the
+ * proof is missing. The marker is a constant rather than a magic string in two
+ * files so the writer and the reader cannot drift.
+ */
+export const NOT_PROVEN = '[harness] not proven:';
+
+/**
  * How a check ended, in three states rather than two.
  *
  * "It failed" and "it could not be run" are different facts, and a report that
@@ -53,7 +70,10 @@ export function checkOutcome(result: string): CheckOutcome {
   if (trimmed.startsWith('refused')) return 'unavailable';
   if (trimmed.startsWith('failed')) return 'fail';
   // Ran out of time. It did run and it did not finish, which is a failure.
-  if (trimmed.startsWith('the check ran past')) return 'fail';
+  if (/^the (check|command) ran past/.test(trimmed)) return 'fail';
+  // The harness, saying the project's own proof of work was missing. Read before
+  // the exit codes below, because the whole point is that they say zero.
+  if (trimmed.startsWith(NOT_PROVEN)) return 'fail';
   const codes = exitCodes(trimmed);
   if (codes.length === 0) return 'pass';
   return codes.every((code) => code === 0) ? 'pass' : 'fail';

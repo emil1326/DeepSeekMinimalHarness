@@ -10,7 +10,8 @@ import {
 } from './diagnose.js';
 import { isInside, matchesGlob, realPath, relNorm, toPosix } from './paths.js';
 import { killTree, resolveExecutable, spawnTool, UnsafeCommandError } from './process.js';
-import { commandArgv, trimOutput, type DeclaredCommand } from './commands.js';
+import { NOT_PROVEN } from './checks.js';
+import { commandArgv, trimOutput, unproven, type DeclaredCommand } from './commands.js';
 import type { CheckSpec, Profile } from './profile.js';
 import { timing } from './timing.js';
 
@@ -81,6 +82,12 @@ export const NEVER_WRITE = [
   // configuration, instead of having to be remembered somewhere else.
   'dsh.workspace.json',
   '.dsh/workspace.json',
+  // The whole directory, not just the workspace file in it. `.dsh` is the
+  // harness's own configuration for a project — the profile, the rules, the
+  // notification hook — and a profile is exactly the thing the agent must not be
+  // able to edit, because a check it can rewrite is a check that cannot refuse
+  // it. Found by a real project keeping its harness config there.
+  '.dsh/*',
 ];
 
 /** Dropped from a check process's environment, whatever else it inherits. */
@@ -703,24 +710,61 @@ export class Sandbox {
     }
     const built = commandArgv(declared, args);
     if ('refusal' in built) return built.refusal;
-    const output = await this.run(built.argv, (declared.timeoutSeconds ?? COMMAND_TIMEOUT_S) * 1000);
+    const ran = await this.spawnProcess(
+      built.argv,
+      (declared.timeoutSeconds ?? COMMAND_TIMEOUT_S) * 1000,
+      'command',
+    );
+    const full = formatRun(ran);
+    // A timeout already says what happened, and a proof pattern has nothing to
+    // add to "it never finished".
+    if (ran.timedOut) return full;
+    const reason = unproven(declared, ran.text);
+    if (reason !== null) return `${NOT_PROVEN} ${reason}\n${full}`;
     // Trimmed after the fact rather than while collecting, so the "ran past its
     // timeout" case still reports what it managed to print.
-    return declared.keep === undefined
-      ? output
-      : withExitLine(output, trimOutput(bodyOf(output), declared.keep));
+    return declared.keep === undefined ? full : withExitLine(full, trimOutput(bodyOf(full), declared.keep));
   }
 
   /** Run one check process: stripped environment, no shell, whole tree killable. */
   async run(argv: string[], timeoutMs = CHECK_TIMEOUT_MS): Promise<string> {
     return timing.measureAsync(
       'core.sandbox.run',
-      () => this.runProcess(argv, timeoutMs),
+      async () => formatRun(await this.spawnProcess(argv, timeoutMs, 'check')),
       (output) => output.length,
     );
   }
 
-  private async runProcess(argv: string[], timeoutMs: number): Promise<string> {
+  /**
+   * Run a process and hand back what it did, unformatted.
+   *
+   * Split out from `run` for one caller and one reason: a declared command's
+   * `expect` pattern has to be tested against the output **before** its `keep`
+   * pattern trims it. `keep` is a pattern for what a person wants to read, and
+   * the line that proves a test run actually ran some tests is very often not
+   * interesting to read — so testing `expect` on the trimmed text would fail
+   * exactly the commands that work.
+   */
+  private async spawnProcess(
+    argv: string[],
+    timeoutMs: number,
+    noun: 'check' | 'command',
+  ): Promise<RunOutcome> {
+    const outcome = await this.spawnAndWait(argv, timeoutMs);
+    return {
+      code: outcome.code,
+      text: outcome.text,
+      timedOut: outcome.timedOut,
+      timeoutMs,
+      noun,
+      ...(outcome.refused === undefined ? {} : { refused: outcome.refused }),
+    };
+  }
+
+  private async spawnAndWait(
+    argv: string[],
+    timeoutMs: number,
+  ): Promise<{ code: number; text: string; timedOut: boolean; refused?: string }> {
     const env: NodeJS.ProcessEnv = {};
     const buildEnv = timing.start('core.sandbox.run.env');
     for (const [key, value] of Object.entries(process.env)) {
@@ -749,8 +793,18 @@ export class Sandbox {
     try {
       child = timing.measure('core.sandbox.run.spawn', () => spawnTool(resolved, { cwd: this.root, env }));
     } catch (error) {
-      if (error instanceof UnsafeCommandError) return `refused: ${error.message}`;
-      return `could not start ${resolved[0]}: ${(error as Error).message}`;
+      // Verbatim, and not wrapped in an `exit` line. A refusal is the harness
+      // saying it would not run this, which is a different fact from a program
+      // that ran and failed, and `checkOutcome` reads the two differently.
+      if (error instanceof UnsafeCommandError) {
+        return { code: -1, text: '', timedOut: false, refused: `refused: ${error.message}` };
+      }
+      return {
+        code: -1,
+        text: '',
+        timedOut: false,
+        refused: `could not start ${resolved[0]}: ${(error as Error).message}`,
+      };
     }
 
     const pid = child.pid ?? -1;
@@ -787,15 +841,11 @@ export class Sandbox {
     // killed. `ranOut` is set by the timer itself, so this does not depend on
     // the callback arriving late and on the elapsed time being long enough to
     // measure — which it never was, because the timer fires on the dot.
-    if (ranOut || Date.now() - started >= timeoutMs) {
-      return `the command ran past ${Math.round(timeoutMs / 1000)} s and was stopped${output.text.trim() === '' ? '' : `\n${output.text.trim().slice(0, 2000)}`}`;
-    }
-    const text = output.text.trim();
-    const body =
-      text.length > RESULT_CHARS
-        ? `${text.slice(0, 2000)}\n[...]\n${text.slice(-(RESULT_CHARS - 2000))}`
-        : text;
-    return `exit ${output.code}\n${body}`;
+    return {
+      code: output.code,
+      text: output.text,
+      timedOut: ranOut || Date.now() - started >= timeoutMs,
+    };
   }
 
   /** Every check process this sandbox started, gone. Used when a run is cancelled. */
@@ -847,6 +897,48 @@ export class Sandbox {
   record(entry: Record<string, unknown>): void {
     this.onRecord?.(entry);
   }
+}
+
+/**
+ * What a process did, before it becomes the text a reader sees.
+ *
+ * Kept unformatted for one caller: a declared command's `expect` pattern has to
+ * be tested against the raw output, because `keep` trims it to what a person
+ * wants to read and the line that proves a test run ran any tests is usually not
+ * that.
+ */
+interface RunOutcome {
+  code: number;
+  text: string;
+  timedOut: boolean;
+  timeoutMs: number;
+  /** Whether it was a profile check or a command the project declared. */
+  noun: 'check' | 'command';
+  /**
+   * A failure to start at all, returned verbatim rather than as an `exit` line.
+   *
+   * Non-empty only when the process never ran, which `checkOutcome` reads as
+   * `unavailable` or `fail` rather than as a result. Wrapping it in `exit -1`
+   * would turn "the harness would not run this" into "it ran and failed", and
+   * the difference is the one that makes a report trustworthy.
+   */
+  refused?: string;
+}
+
+function formatRun(ran: RunOutcome): string {
+  if (ran.refused !== undefined) return ran.refused;
+  if (ran.timedOut) {
+    const printed = ran.text.trim();
+    return `the ${ran.noun} ran past ${Math.round(ran.timeoutMs / 1000)} s and was stopped${
+      printed === '' ? '' : `\n${printed.slice(0, 2000)}`
+    }`;
+  }
+  const text = ran.text.trim();
+  const body =
+    text.length > RESULT_CHARS
+      ? `${text.slice(0, 2000)}\n[...]\n${text.slice(-(RESULT_CHARS - 2000))}`
+      : text;
+  return `exit ${ran.code}\n${body}`;
 }
 
 /**

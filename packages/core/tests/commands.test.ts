@@ -18,11 +18,19 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   checkCommandArg,
   commandArgv,
   declaredCommandSchema,
+  loadRunConfig,
+  loadWorkspace,
+  mergeCommands,
+  taskFileSchema,
   trimOutput,
+  unproven,
   type DeclaredCommand,
 } from '@emilswork/harness-core';
 
@@ -216,5 +224,263 @@ describe('keeping only the output that matters', () => {
 
   it('does nothing at all when the project asked for nothing', () => {
     expect(trimOutput(output, undefined)).toBe(output);
+  });
+});
+
+/**
+ * A command that exits 0 having done nothing.
+ *
+ * Not a hypothesis. A real workspace declared a command that ran one test by
+ * name; the name was a helper function rather than a test, `cargo test -p x
+ * --test y <filter>` exited **0** and printed "0 passed; 0 failed", and the
+ * command reported a green tick for months of runs while executing nothing. It
+ * is the same class of mistake as a check that reports clean because it could
+ * not read the tree — the failure mode is success.
+ *
+ * The exit code cannot catch it, because the exit code is right. Only the
+ * project can say what proof looks like, in its own tool's words.
+ */
+describe('output that has to prove the command did something', () => {
+  it('accepts output matching what the project said proof looks like', () => {
+    const ran = command({ run: ['cargo', 'test', '-p', 'core'], expect: 'test result: ok\\. [1-9]' });
+    expect(unproven(ran, 'running 12 tests\ntest result: ok. 12 passed; 0 failed')).toBeNull();
+  });
+
+  it('refuses output that exits 0 having run nothing', () => {
+    // The whole reason `expect` exists. `0 passed; 0 failed` is a success by exit
+    // code and the run did not happen.
+    const ran = command({ run: ['cargo', 'test', '-p', 'core'], expect: 'test result: ok\\. [1-9]' });
+    const reason = unproven(ran, 'running 0 tests\ntest result: ok. 0 passed; 0 failed');
+    expect(reason).not.toBeNull();
+    expect(reason).toContain('has not proved anything');
+  });
+
+  it('says nothing at all when the project asked for no proof', () => {
+    // Every existing command in every existing workspace keeps working. This is
+    // opt-in, and a command without `expect` is exactly as it was.
+    expect(unproven(command(), 'anything at all')).toBeNull();
+  });
+
+  it('counts a broken pattern as unproven rather than as a pass', () => {
+    // A typo in a config file must not be able to turn into a green tick. Note
+    // the direction: an unusable pattern fails closed, the same way an unreadable
+    // tree does.
+    const ran = command({ expect: 'test result: ok. [1-9' });
+    expect(unproven(ran, 'test result: ok. 12 passed')).not.toBeNull();
+  });
+
+  it('is loaded from a workspace file, and refused when it is not a string', () => {
+    const parsed = declaredCommandSchema.safeParse({
+      description: 'run the suite',
+      run: ['npm', 'test'],
+      expect: 'Tests\\s+[1-9]\\d* passed',
+    });
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.expect).toBe('Tests\\s+[1-9]\\d* passed');
+    expect(declaredCommandSchema.safeParse({ description: 'x', run: ['a'], expect: 12 }).success).toBe(false);
+  });
+});
+
+/**
+ * A task narrowing a command the workspace declared.
+ *
+ * The gap: a workspace lists the test targets it knows about, and a task that
+ * owns one crate could only ever run those four. Which of them a run may touch
+ * is a fact about the line of backlog, so the task says so.
+ *
+ * Every way of getting this wrong is silent — an override naming a command that
+ * does not exist does nothing, one naming an argument that does not exist does
+ * nothing, and a narrowing that leaves an argument unconstrained is a shell by
+ * another name. So all three are problems rather than no-ops.
+ */
+describe('a task narrowing what a command may be pointed at', () => {
+  const four = {
+    run_test: command({ args: { target: { description: 'a target', values: ['a', 'b', 'c', 'd'] } } }),
+  };
+
+  it('narrows an argument to the values the task names', () => {
+    const merged = mergeCommands(four, { run_test: { args: { target: { values: ['a'] } } } });
+    expect('commands' in merged).toBe(true);
+    if (!('commands' in merged)) return;
+    expect(merged.commands.run_test?.args?.target?.values).toEqual(['a']);
+    // And the narrowing is real, not decorative: the other three are refused now.
+    expect(checkCommandArg('target', merged.commands.run_test!.args!.target!, 'b')).not.toBeNull();
+    expect(checkCommandArg('target', merged.commands.run_test!.args!.target!, 'a')).toBeNull();
+  });
+
+  it('leaves the commands the task did not mention exactly as they were', () => {
+    const merged = mergeCommands(four, { run_test: { args: { target: { values: ['a'] } } } });
+    if (!('commands' in merged)) throw new Error('expected a merge');
+    expect(merged.commands.run_test?.run).toEqual(['cargo', 'test', '-p', '{target}']);
+    expect(merged.commands.run_test?.description).toBe(four.run_test.description);
+  });
+
+  it('replaces a pattern with values rather than carrying both', () => {
+    // The trap: `checkCommandArg` prefers `values`, so a merged command holding
+    // the workspace's old `pattern` beside the task's new `values` would look
+    // narrowed and behave narrowed — until somebody read the file and believed
+    // the pattern. One constraint or the other, never both.
+    const byPattern = {
+      run_test: command({
+        args: { target: { description: 'a target', pattern: '^[a-z-]+$' } },
+      }),
+    };
+    const merged = mergeCommands(byPattern, { run_test: { args: { target: { values: ['a'] } } } });
+    if (!('commands' in merged)) throw new Error('expected a merge');
+    expect(merged.commands.run_test?.args?.target?.values).toEqual(['a']);
+    expect(merged.commands.run_test?.args?.target?.pattern).toBeUndefined();
+  });
+
+  it('refuses an override naming a command the workspace does not declare', () => {
+    const merged = mergeCommands(four, { run_everything: { args: {} } });
+    expect('problems' in merged).toBe(true);
+    if (!('problems' in merged)) return;
+    expect(merged.problems[0]?.path).toBe('commands.run_everything');
+    expect(merged.problems[0]?.message).toContain('does not declare');
+  });
+
+  it('refuses an override naming an argument the command does not have', () => {
+    // Otherwise a typo'd argument name reads as a successful narrowing and the
+    // run keeps its whole target list, which is the opposite of what was asked.
+    const merged = mergeCommands(four, { run_test: { args: { targets: { values: ['a'] } } } });
+    expect('problems' in merged).toBe(true);
+    if (!('problems' in merged)) return;
+    expect(merged.problems[0]?.path).toBe('commands.run_test.args.targets');
+  });
+
+  it('lets a task make an argument optional without freeing it', () => {
+    // The task may say a run need not name a target. It may not say the target
+    // can be anything: the constraint survives the override, because the
+    // constraint is the thing standing between a model-chosen string and an
+    // argv. "Optional" and "unconstrained" are different words and this is the
+    // line between them.
+    const two = {
+      run_test: command({
+        args: { target: { description: 'a target', values: ['a', 'b'] } },
+        run: ['cargo', 'test', '{target}'],
+      }),
+    };
+    const merged = mergeCommands(two, { run_test: { args: { target: { optional: true } } } });
+    if (!('commands' in merged)) throw new Error('expected a merge');
+    const target = merged.commands.run_test?.args?.target;
+    expect(target?.optional).toBe(true);
+    expect(target?.values).toEqual(['a', 'b']);
+    // Droppable, because the placeholder stands where the value goes rather than
+    // after a flag that would be left hanging.
+    expect(commandArgv(merged.commands.run_test!, {})).toEqual({ argv: ['cargo', 'test'] });
+    expect(commandArgv(merged.commands.run_test!, { target: 'b' })).toEqual({
+      argv: ['cargo', 'test', 'b'],
+    });
+  });
+
+  it('refuses an optional argument that would leave a flag with nothing after it', () => {
+    // Found while writing the test above. `["cargo","test","-p","{target}"]`
+    // with an optional target spawns `cargo test -p`, which is not "no target"
+    // — it is a broken command, and the failure would have surfaced as a
+    // confusing tool error several turns into a run.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-optional-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'work'), { recursive: true });
+      const file = path.join(dir, 'dsh.workspace.json');
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          name: 'demo',
+          commands: {
+            run_test: {
+              description: 'run one target',
+              args: { target: { description: 'a target', values: ['a'], optional: true } },
+              run: ['cargo', 'test', '-p', '{target}'],
+            },
+          },
+        }),
+      );
+      expect(() => loadWorkspace(file)).toThrowError(/cannot be optional/);
+
+      // And the same command is fine when the value stands on its own.
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          name: 'demo',
+          commands: {
+            run_test: {
+              description: 'run one target',
+              args: { target: { description: 'a target', values: ['a'], optional: true } },
+              run: ['cargo', 'test', '{target}'],
+            },
+          },
+        }),
+      );
+      expect(loadWorkspace(file).config.commands?.run_test?.run).toEqual(['cargo', 'test', '{target}']);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
+  });
+
+  it('refuses a command that would load with an argument it cannot constrain', () => {
+    // Unreachable through a real workspace — `checkCommandArg` refuses to run one
+    // — so this holds the branch down directly. An argument with neither values
+    // nor a pattern is free text spliced into an argv, and the merge has to say
+    // so rather than produce it.
+    const broken = {
+      run_test: command({ args: { target: { description: 'a target' } } }),
+    };
+    const merged = mergeCommands(broken, { run_test: { args: { target: { optional: true } } } });
+    expect('problems' in merged).toBe(true);
+    if (!('problems' in merged)) return;
+    expect(merged.problems[0]?.message).toContain('a shell by another name');
+  });
+
+  it('cannot reach the argv, only the arguments', () => {
+    // Deliberate, and the load-bearing half of the design: everything dangerous
+    // is in the argv, and it stays in the workspace where the project can be read
+    // as a whole. A task file that writes `run` is refused as an unknown key.
+    const parsed = taskFileSchema.safeParse({
+      name: 't',
+      worktree: '..',
+      allow: ['src/**'],
+      commands: { run_test: { run: ['rm', '-rf', '/'] } },
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it('merges into the task config, and fails the task on an unknown command', () => {
+    // Through `loadRunConfig`, because the merge only matters if it is wired in.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-task-cmd-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'work'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, 'dsh.workspace.json'),
+        JSON.stringify({
+          name: 'demo',
+          model: 'deepseek-flash',
+          defaultProfile: 'default',
+          profiles: { default: 'profile.json' },
+          commands: {
+            run_test: {
+              description: 'run one target',
+              args: { target: { description: 'a target', values: ['a', 'b'] } },
+              run: ['cargo', 'test', '-p', '{target}'],
+            },
+          },
+        }),
+      );
+      fs.writeFileSync(path.join(dir, 'profile.json'), JSON.stringify({ checks: {} }));
+      const task = (commands: unknown): string => {
+        const file = path.join(dir, `task-${Math.random().toString(36).slice(2)}.json`);
+        fs.writeFileSync(
+          file,
+          JSON.stringify({ name: 't', worktree: 'work', task: 'do it', allow: ['src/**'], commands }),
+        );
+        return file;
+      };
+
+      const narrowed = loadRunConfig(task({ run_test: { args: { target: { values: ['a'] } } } }));
+      expect(narrowed.commands.run_test?.args?.target?.values).toEqual(['a']);
+
+      expect(() => loadRunConfig(task({ nope: { args: {} } }))).toThrowError(/does not declare/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
   });
 });

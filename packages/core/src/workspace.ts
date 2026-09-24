@@ -297,6 +297,35 @@ function validateNames(config: Workspace, file: string): WorkspaceProblem[] {
         });
       }
     }
+
+    // An optional placeholder is dropped when the model leaves it out, and that
+    // is only safe when dropping it leaves a command. `["cargo","test","-p",
+    // "{target}"]` with an optional target becomes `cargo test -p`, which is a
+    // flag hanging off the end of an argv — not "no target", which is what was
+    // asked for. Found by writing the optional case down as a test: the harness
+    // was producing that argv and calling it fine.
+    //
+    // The rule is narrow on purpose. It fires only when the element before an
+    // optional placeholder is a literal beginning with `-`, which is a fact
+    // about those two elements rather than a guess about the tool. A command
+    // that wants an optional package writes `["cargo","test","{package}"]` and
+    // puts `-p core` in the values, or declares two commands.
+    for (const [at, part] of command.run.entries()) {
+      const whole = /^\{([A-Za-z0-9_]+)\}$/.exec(part);
+      if (whole === null) continue;
+      const arg = (command.args ?? {})[whole[1] as string];
+      if (arg?.optional !== true) continue;
+      const before = command.run[at - 1];
+      if (before !== undefined && /^-/.test(before)) {
+        problems.push({
+          path: `commands.${name}.run`,
+          message:
+            `${before} ${part} cannot be optional: leaving the value out would run ${before} with nothing after it. ` +
+            `Write the flag and the value as one argument's values, or declare two commands`,
+          file,
+        });
+      }
+    }
   }
   if (config.defaultProfile !== undefined && config.profiles?.[config.defaultProfile] === undefined) {
     problems.push({

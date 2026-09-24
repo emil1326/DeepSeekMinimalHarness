@@ -37,6 +37,29 @@ describe('reading a check result', () => {
     expect(checkPassed('the check ran past 15 minutes and was stopped')).toBe(false);
   });
 
+  it('is not a pass when it ran out of time, whether it was a check or a command', () => {
+    // A declared command is a tool the agent calls mid-run and says it stopped
+    // after 90 s rather than 15 minutes. The prefix is the only difference, and a
+    // timeout reading as a pass is the specific thing this function exists for.
+    expect(checkOutcome('the command ran past 90 s and was stopped')).toBe('fail');
+    expect(checkPassed('the command ran past 90 s and was stopped')).toBe(false);
+  });
+
+  it('is not a pass when the output did not prove the command did anything', () => {
+    // The exit code is 0 and the command printed a cheerful summary, and it ran
+    // no tests: a real command in a real workspace reported a green tick for
+    // months while executing nothing. The project says what proof looks like, and
+    // this is the harness agreeing to read it.
+    const result = [
+      '[harness] not proven: nothing it printed matches /test result: ok\\. [1-9]/',
+      'exit 0',
+      'running 0 tests',
+      'test result: ok. 0 passed; 0 failed',
+    ].join('\n');
+    expect(checkOutcome(result)).toBe('fail');
+    expect(checkPassed(result)).toBe(false);
+  });
+
   it('is a pass when there was nothing to do', () => {
     // `nothing to format` means the formatters found nothing to change, which is
     // the good outcome. Reading it as a failure would train a reader to ignore

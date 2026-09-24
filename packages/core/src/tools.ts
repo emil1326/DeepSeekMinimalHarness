@@ -135,6 +135,13 @@ export function toolDefinitions(context: ToolContext): ToolDefinition[] {
  * The argument list is the load-bearing part: a model that is told a target must
  * be one of four names gets it right, and one that is told "a test target"
  * guesses, calls the tool, is refused, and spends the turn anyway.
+ *
+ * The timeout and the proof requirement are stated for the same reason. A model
+ * that does not know a command stops after 90 seconds reads a timeout as a bug
+ * in the project and starts working around it; a model that does not know a
+ * command only counts as a pass when its output matches something reads a green
+ * tick off a run it should not trust. Telling it the rule is cheaper than
+ * correcting the two wrong turns it buys.
  */
 function describeCommand(command: DeclaredCommand): string {
   const described = Object.entries(command.args ?? {}).map(
@@ -143,7 +150,15 @@ function describeCommand(command: DeclaredCommand): string {
   );
   const body = command.description.trim();
   const args = described.length === 0 ? '' : `\nArguments: ${described.join('; ')}.`;
-  return `${body}${args}`;
+  const facts = [
+    command.timeoutSeconds === undefined
+      ? null
+      : `Stops after ${command.timeoutSeconds} s, and a stop is a failure rather than a result.`,
+    command.expect === undefined
+      ? null
+      : `Only counts as a pass if the output matches /${command.expect}/; an exit code of 0 is not enough.`,
+  ].filter((fact): fact is string => fact !== null);
+  return `${body}${args}${facts.length === 0 ? '' : `\n${facts.join(' ')}`}`;
 }
 
 export function toolSpecs(context: ToolContext): ToolSpec[] {

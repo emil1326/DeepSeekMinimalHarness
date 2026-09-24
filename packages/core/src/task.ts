@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { DeclaredCommand } from './commands.js';
+import { commandOverrideSchema, mergeCommands } from './commands.js';
 import { harnessHome } from './config.js';
 import { profileProblems, profileSchema, type Profile } from './profile.js';
 import {
@@ -65,6 +66,15 @@ export const taskFileSchema = z
      * Added to whatever the workspace declares. See `ResolvedRunConfig.soft`.
      */
     soft: z.array(z.string().min(1)).optional(),
+    /**
+     * Narrowings of the commands the workspace declared.
+     *
+     * A workspace lists the test targets it knows about; whether a given task
+     * owns all of them is a fact about the task. This lets a task say which one
+     * its run may point at, without being able to invent a command. See
+     * `mergeCommands` in `commands.ts` for why the argv is not in here.
+     */
+    commands: z.record(commandOverrideSchema).optional(),
   })
   .strict();
 
@@ -377,6 +387,15 @@ export function loadRunConfig(taskPath: string): ResolvedRunConfig {
   }
   if (problems.length > 0) throw new TaskError(problems);
 
+  // The task's narrowing, folded into the workspace's commands. Refused rather
+  // than ignored at every step: an override that names a command or an argument
+  // that does not exist would silently do nothing, and a model told it may pass
+  // one value while every value is still accepted is being lied to.
+  const merged = mergeCommands(workspace?.config.commands ?? {}, task.commands ?? {});
+  if ('problems' in merged) {
+    throw new TaskError(merged.problems.map((problem) => ({ ...problem, file: absolute })));
+  }
+
   return {
     name: task.name,
     worktree,
@@ -399,7 +418,7 @@ export function loadRunConfig(taskPath: string): ResolvedRunConfig {
       workspace === null ? null : { path: workspace.path, name: workspace.config.name, hash: workspace.hash },
     rules: rulesText,
     soft: [...(workspace?.config.soft ?? []), ...(task.soft ?? [])],
-    commands: workspace?.config.commands ?? {},
+    commands: merged.commands,
     env,
     setup: workspace?.config.setup ?? [],
     onAsk: workspace?.config.onAsk ?? null,

@@ -1,6 +1,6 @@
 export { IS_WINDOWS, isInside, matchesGlob, realPath, relNorm, samePath, toPosix } from './paths.js';
 export { GIT_MAX_BUFFER, git, gitFailure, gitOrNull, type GitOptions } from './git.js';
-export { checkOutcome, checkPassed, exitCodes, type CheckOutcome } from './checks.js';
+export { checkOutcome, checkPassed, exitCodes, NOT_PROVEN, type CheckOutcome } from './checks.js';
 export {
   readTranscript,
   transcriptFile,
@@ -132,13 +132,19 @@ export {
   COMMAND_NAME,
   RESERVED_TOOL_NAMES,
   checkCommandArg,
+  commandArgOverrideSchema,
   commandArgSchema,
   commandArgv,
+  commandOverrideSchema,
   declaredCommandSchema,
   describeArg,
+  mergeCommands,
   trimOutput,
+  unproven,
   type CommandArg,
+  type CommandOverride,
   type DeclaredCommand,
+  type MergeProblem,
 } from './commands.js';
 export {
   WORKSPACE_FILES,

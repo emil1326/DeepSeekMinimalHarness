@@ -88,6 +88,28 @@ export const declaredCommandSchema = z
      */
     keep: z.string().min(1).optional(),
     /**
+     * A pattern the output must match for this to count as a pass.
+     *
+     * The exit code is not enough, and that is not a theory: `cargo test -p x
+     * --test y <filter>` where the filter matches no test exits **0** and prints
+     * "0 passed; 0 failed". A command like that reads as a green tick having run
+     * nothing at all, which is the same class of mistake as a control that
+     * reports clean because it could not read the tree.
+     *
+     * Found in a real workspace: a command was declared to run one test by name,
+     * the name was a helper function rather than a test, and the command
+     * reported success for months' worth of runs while executing nothing.
+     *
+     * Tested against the output **before** `keep` trims it, because `keep` is a
+     * pattern for what a reader wants to see and the line that proves a command
+     * did something is very often not interesting to read.
+     *
+     * The harness still knows nothing about the tool: the project says what
+     * proof looks like in its own words. `test result: ok\\. [1-9]` for cargo,
+     * `Tests\\s+[1-9]\\d* passed` for vitest.
+     */
+    expect: z.string().min(1).optional(),
+    /**
      * True when the command runs code from the worktree.
      *
      * Not a refusal, and not a permission: the project declared it, so the
@@ -261,4 +283,121 @@ export function trimOutput(text: string, keep: string | undefined, context = 2):
     }
   }
   return kept.join('\n');
+}
+
+/**
+ * Why a command's output does not prove it did anything, or null when it does.
+ *
+ * See `expect` on the schema. A pattern that is not a regular expression counts
+ * as unproven rather than as a pass: a typo in a config file must not be able to
+ * turn into a green tick.
+ */
+export function unproven(command: DeclaredCommand, output: string): string | null {
+  const expected = command.expect;
+  if (expected === undefined) return null;
+  let regex: RegExp;
+  try {
+    regex = new RegExp(expected);
+  } catch {
+    return `this command's expect pattern is not a regular expression, so it can never pass: ${expected}`;
+  }
+  if (regex.test(output)) return null;
+  return (
+    `nothing it printed matches /${expected}/, and this workspace says a run that prints nothing ` +
+    `matching that has not proved anything — so it does not count as a pass`
+  );
+}
+
+/**
+ * What a task file may say about a command the workspace declared.
+ *
+ * The gap this closes: a workspace lists the test targets it knows about, and a
+ * task that owns one crate could only ever run those four. The list is a fact
+ * about the project and which of them a run may touch is a fact about the line
+ * of backlog, so the task says so.
+ *
+ * The argv is deliberately **not** overridable. A task narrows what a command
+ * may be pointed at; it does not get to invent a command. Everything dangerous
+ * about this mechanism lives in the argv, and it stays in the workspace where
+ * the project can be read as a whole.
+ */
+export const commandArgOverrideSchema = z
+  .object({
+    values: z.array(z.string().min(1)).min(1).optional(),
+    pattern: z.string().min(1).optional(),
+    optional: z.boolean().optional(),
+  })
+  .strict();
+
+export const commandOverrideSchema = z.object({ args: z.record(commandArgOverrideSchema) }).strict();
+
+export type CommandOverride = z.infer<typeof commandOverrideSchema>;
+
+export interface MergeProblem {
+  path: string;
+  message: string;
+}
+
+/**
+ * A workspace's commands with a task's overrides folded in.
+ *
+ * Refuses rather than ignores, at every step, because every way of getting this
+ * wrong is silent: an override naming a command that does not exist would do
+ * nothing, an override naming an argument that does not exist would do nothing,
+ * and a narrowed command that ends up with no constraint at all would turn into
+ * a shell. All three are config mistakes and all three are said out loud when
+ * the task is read.
+ */
+export function mergeCommands(
+  declared: Record<string, DeclaredCommand>,
+  overrides: Record<string, CommandOverride>,
+): { commands: Record<string, DeclaredCommand> } | { problems: MergeProblem[] } {
+  const problems: MergeProblem[] = [];
+  const commands: Record<string, DeclaredCommand> = { ...declared };
+
+  for (const [name, override] of Object.entries(overrides)) {
+    const base = declared[name];
+    if (base === undefined) {
+      problems.push({
+        path: `commands.${name}`,
+        message: `this task narrows a command called ${name}, which the workspace does not declare`,
+      });
+      continue;
+    }
+
+    const args: Record<string, CommandArg> = { ...(base.args ?? {}) };
+    for (const [arg, patch] of Object.entries(override.args)) {
+      const was = base.args?.[arg];
+      if (was === undefined) {
+        problems.push({
+          path: `commands.${name}.args.${arg}`,
+          message: `${name} has no argument called ${arg}`,
+        });
+        continue;
+      }
+      // One constraint or the other, never both: `checkCommandArg` prefers
+      // `values`, so a narrowed command carrying the workspace's old `pattern`
+      // alongside it would quietly ignore the narrowing.
+      const values = patch.values ?? (patch.pattern === undefined ? was.values : undefined);
+      const pattern = patch.pattern ?? (patch.values === undefined ? was.pattern : undefined);
+      if (values === undefined && pattern === undefined) {
+        problems.push({
+          path: `commands.${name}.args.${arg}`,
+          message: 'that leaves the argument with no values and no pattern, which is a shell by another name',
+        });
+        continue;
+      }
+      args[arg] = {
+        description: was.description,
+        ...(values === undefined ? {} : { values }),
+        ...(pattern === undefined ? {} : { pattern }),
+        ...((patch.optional ?? was.optional) === undefined
+          ? {}
+          : { optional: (patch.optional ?? was.optional) as boolean }),
+      };
+    }
+    commands[name] = { ...base, args: Object.keys(args).length === 0 ? undefined : args } as DeclaredCommand;
+  }
+
+  return problems.length > 0 ? { problems } : { commands };
 }
