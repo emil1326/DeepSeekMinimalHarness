@@ -73,6 +73,11 @@ export interface DaemonRecord {
   port: number;
   pid: number;
   startedAt: string;
+  /**
+   * `buildStamp()` when the daemon started, so a CLI can tell a daemon that is
+   * older than the code on disk. Absent in a record written before it existed.
+   */
+  build?: string;
 }
 
 /**

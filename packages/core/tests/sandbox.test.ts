@@ -224,8 +224,21 @@ async function runSuite(normalise?: (value: string) => string): Promise<Map<stri
   fs.writeFileSync(profileInside, JSON.stringify(PROFILE));
   note(
     'a profile inside the sandbox is refused',
-    refused(() => Sandbox.assertOutsideSandbox(profileInside, repo, 'the profile')),
+    refused(() => Sandbox.assertOutsideOrProtected(profileInside, repo, 'the profile')),
   );
+  // Except under `.dsh/`, which is on the never-write list, so no tool the
+  // agent can call reaches it. The control is the refusal just above: the same
+  // file one directory up is refused.
+  fs.mkdirSync(path.join(repo, '.dsh'), { recursive: true });
+  const profileProtected = path.join(repo, '.dsh', 'profile.json');
+  fs.writeFileSync(profileProtected, JSON.stringify(PROFILE));
+  let protectedAccepted = true;
+  try {
+    Sandbox.assertOutsideOrProtected(profileProtected, repo, 'the profile');
+  } catch {
+    protectedAccepted = false;
+  }
+  note('a profile under .dsh/ is accepted, because no tool writes there', protectedAccepted);
   note(
     "sandboxing the harness's own tree is refused",
     refused(() => Sandbox.assertOutsideSandbox(path.join(repo, 'dsx.py'), repo, 'the harness')),

@@ -26,6 +26,7 @@ import {
   writePrivateJson,
 } from '@emilswork/harness-core';
 import { Guard } from './guard.js';
+import { buildStamp } from './index.js';
 import { defaultUiDir, startServer } from './server.js';
 import { Store } from './store.js';
 import { Supervisor } from './supervisor.js';
@@ -83,6 +84,7 @@ async function main(): Promise<void> {
     port: server.port,
     pid: process.pid,
     startedAt: new Date().toISOString(),
+    build: buildStamp(),
   });
 
   process.stdout.write(`dsh daemon listening on 127.0.0.1:${server.port} (pid ${process.pid})\n`);

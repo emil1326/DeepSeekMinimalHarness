@@ -5,12 +5,13 @@ import {
   daemonFile,
   delay,
   isAlive,
+  isTerminal,
   type DaemonRecord,
   type FailureCause,
   type RunEvent,
   type RunStatus,
 } from '@emilswork/harness-core';
-import { daemonEntry, type RunDetail, type RunSummary } from '@emilswork/harness-daemon';
+import { buildStamp, daemonEntry, type RunDetail, type RunSummary } from '@emilswork/harness-daemon';
 import type { RunReport } from '@emilswork/harness-core';
 
 /** Nothing is running and nothing could be started. */
@@ -129,7 +130,24 @@ export class DaemonClient {
   /** Started automatically by the first CLI call if it is not running. */
   static async connect(): Promise<DaemonClient> {
     const existing = readDaemonRecord();
-    if (existing !== null && (await responds(existing))) return new DaemonClient(existing);
+    if (existing !== null && (await responds(existing))) {
+      const client = new DaemonClient(existing);
+      // A daemon with no stamp predates the stamp, which makes it older than
+      // any build that has one. See `buildStamp`.
+      if (existing.build === buildStamp()) return client;
+      const going = (await client.runs()).runs.filter((run) => !isTerminal(run.status));
+      if (going.length > 0) {
+        process.stderr.write(
+          `dsh: the daemon is older than the build on disk, and ${going.length} run(s) are going, ` +
+            'so it was left running; `dsh daemon stop` once they end starts a fresh one\n',
+        );
+        return client;
+      }
+      await client.json('POST', '/daemon/stop').catch(() => undefined);
+      const gone = Date.now() + 5000;
+      while (Date.now() < gone && (await responds(existing))) await delay(100);
+      process.stderr.write('dsh: the daemon was older than the build on disk, so it was restarted\n');
+    }
 
     const before = existing?.pid;
     const child = spawn(process.execPath, [daemonEntry()], {

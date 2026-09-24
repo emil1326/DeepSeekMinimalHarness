@@ -303,6 +303,30 @@ export class Sandbox {
     }
   }
 
+  /**
+   * The same, except that a file on the never-write list may sit inside.
+   *
+   * `.dsh/**` is on that list so a project can keep its harness config beside
+   * its code, and the profile is the one file there that decides what a check
+   * runs. Refusing it inside while the list promises `.dsh/` as its place was
+   * two answers to one question, and a project that followed the second got a
+   * run that failed before its first turn. What the outside rule stood in for
+   * is that no tool the agent can call writes the file, and a never-write path
+   * is exactly that. The harness's own code still has to be outside: it is not
+   * a project file, and nothing puts it on the list.
+   */
+  static assertOutsideOrProtected(trusted: string, root: string, what: string): void {
+    const real = realPath(trusted);
+    const top = realPath(root);
+    if (!isInside(real, top)) return;
+    const rel = toPosix(path.relative(top, real)).toLowerCase();
+    if (NEVER_WRITE.some((pattern) => matchesGlob(rel, pattern.toLowerCase()))) return;
+    throw new SandboxRefusal(
+      `${what} is inside the sandbox, where the model could edit its own rules; ` +
+        'keep it outside the worktree or under .dsh/, which no tool writes',
+    );
+  }
+
   private matches(name: string, pattern: string): boolean {
     return matchesGlob(name.toLowerCase(), pattern.toLowerCase());
   }

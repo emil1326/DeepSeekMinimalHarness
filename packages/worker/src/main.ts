@@ -160,7 +160,7 @@ async function start(config: WorkerStart): Promise<void> {
     if (!fs.existsSync(path.join(root, '.git')) || !isGitWorktree(root)) {
       throw new SandboxRefusal('the sandbox must be a git worktree, so every change it makes is a diff');
     }
-    Sandbox.assertOutsideSandbox(config.config.profile, root, 'the profile');
+    Sandbox.assertOutsideOrProtected(config.config.profile, root, 'the profile');
     Sandbox.assertOutsideSandbox(fileURLToPath(import.meta.url), root, 'the harness');
     try {
       Sandbox.assertOutsideSandbox(

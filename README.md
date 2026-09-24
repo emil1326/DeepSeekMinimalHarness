@@ -20,11 +20,11 @@ and I couldn't watch it work.
 - **Finish** with a summary.
 
 Reads are checked on the real path, so a symlink or a Windows junction can't point
-outside. **The profile has to live outside the worktree**, or a run could edit the
-checks that are supposed to be refusing it, and a task naming one inside is refused
-before the run starts. A **workspace** is the exception, deliberately: it may sit
-inside the worktree, where a project keeps its own configuration, because its
-filename is on the never-write list instead. Check processes get the secrets
+outside. **The profile has to live outside the worktree or under `.dsh/`**, or a run
+could edit the checks that are supposed to be refusing it, and a task naming one
+anywhere else inside is refused before the run starts. `.dsh/**` and the workspace's
+own filename are on the never-write list, which is what lets a project keep its
+configuration beside its code. Check processes get the secrets
 stripped out of their environment. At the end, `git status` is compared with the
 allowed files and anything stray is reported loudly.
 
