@@ -49,6 +49,10 @@ async function bench(script: ScriptedTurn[]): Promise<Bench> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-cli-'));
   const keyFile = path.join(home, 'api_key');
   fs.writeFileSync(keyFile, 'a-test-key-that-is-never-real\n');
+  // Port 0, in this home's own `config.json`. Several of these benches run at once
+  // and the daemon's default port is a fixed one, so the file has to say so — the
+  // daemon does not guess from where its files are, it reads the file.
+  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ prices: {}, port: 0 }));
 
   const fake = await startFakeDeepSeek(script);
 

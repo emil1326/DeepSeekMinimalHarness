@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { samePath } from './paths.js';
 import type { PriceTable } from './metrics.js';
 
 /** Where the key lives. Only the daemon and the worker ever read this. */
@@ -28,11 +27,6 @@ export function readApiKey(): string {
 
 export function harnessHome(): string {
   if (process.env.DSH_HOME) return path.resolve(process.env.DSH_HOME);
-  return defaultHarnessHome();
-}
-
-/** Where the harness lives when nothing overrides it. */
-export function defaultHarnessHome(): string {
   const local = process.env.LOCALAPPDATA;
   return local
     ? path.join(local, 'EmilsDeepSeekHarness')
@@ -66,31 +60,13 @@ export interface DaemonRecord {
 }
 
 /**
- * The port the daemon binds when `config.json` does not say otherwise.
+ * The port the daemon binds when `config.json` does not name one.
  *
  * Deliberately below 49152, which is where Windows starts handing out ephemeral
  * ports: a fixed port inside that range would collide with a transient
  * allocation sooner or later, and the failure would look random.
  */
 export const DEFAULT_DAEMON_PORT = 41777;
-
-/**
- * The port this home's daemon binds, before `config.json` is consulted.
- *
- * The real home gets the fixed one, so its URL can be bookmarked and survives a
- * restart. Any **other** home gets a random port instead, and that is not a
- * fallback but the point: a port is a machine-wide resource, so two homes holding
- * the same number cannot both be up. The dev loop and the test suite each run a
- * daemon beside the real one, and a fixed port everywhere would mean starting one
- * of them failing with "already in use" — which is exactly what happened the
- * first time this was written as a plain constant.
- *
- * A scratch home that wants a stable URL can still have one by naming a port in
- * its own `config.json`.
- */
-export function defaultDaemonPort(home = harnessHome()): number {
-  return samePath(home, defaultHarnessHome()) ? DEFAULT_DAEMON_PORT : 0;
-}
 
 export interface HarnessConfig {
   /**
@@ -119,11 +95,12 @@ export interface HarnessConfig {
    */
   uiHosts?: string[];
   /**
-   * The port the daemon binds.
+   * The port the daemon binds. Defaults to `DEFAULT_DAEMON_PORT`.
    *
-   * Defaults to `defaultDaemonPort()`: the fixed `DEFAULT_DAEMON_PORT` for the
-   * real home, and a random one for any other, so a scratch home cannot collide
-   * with it. Set `0` to ask the OS for any free port whatever the home is.
+   * A number, or `0` to take any free one. A second daemon on the same machine —
+   * a test home, the dev loop — says so here rather than the daemon guessing from
+   * where its files happen to be, because where the files are is not a fact about
+   * which ports are free.
    */
   port?: number;
 }

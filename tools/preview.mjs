@@ -205,6 +205,10 @@ const fakeUrl = `http://127.0.0.1:${fake.address().port}`;
 
 const keyFile = path.join(home, 'api_key');
 fs.writeFileSync(keyFile, 'preview-key-never-real\n');
+// Port 0: this preview daemon runs beside the real one, and the port it should
+// use is a fact it states in its own `config.json` rather than something the
+// daemon guesses from where the file lives.
+fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ prices: {}, port: 0 }));
 
 const env = {
   ...process.env,

@@ -71,6 +71,13 @@ export function buildFixture(options = {}) {
 
   for (const dir of [root, outside, armed, home]) fs.mkdirSync(dir, { recursive: true });
 
+  // Port 0, in this scratch home's own `config.json`.
+  //
+  // The daemon binds the port its file names, or a fixed default. A red-team
+  // fixture runs beside the real daemon, so it has to name its own — and naming it
+  // in a file is the only way that needs no special case in the daemon.
+  write(path.join(home, 'config.json'), JSON.stringify({ prices: {}, port: 0 }));
+
   // --- the worktree, which looks like a small app --------------------------
 
   write(path.join(root, 'src', 'app.ts'), 'export const answer = 41;\n');

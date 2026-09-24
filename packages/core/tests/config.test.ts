@@ -10,15 +10,11 @@
  * from starting.
  */
 
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import {
-  DEFAULT_DAEMON_PORT,
-  defaultDaemonPort,
-  defaultHarnessHome,
-  uiHostnames,
-} from '@emilswork/harness-core';
+import { DEFAULT_DAEMON_PORT, loadHarnessConfig, uiHostnames } from '@emilswork/harness-core';
 
 describe('uiHostnames', () => {
   it('is empty when nothing is configured', () => {
@@ -80,35 +76,48 @@ describe('uiHostnames', () => {
 });
 
 /**
- * Which port a home gets.
+ * The port rule, which is one line and has no cases.
  *
  * The first version of the fixed port was a plain constant, and it broke seven
  * tests in `packages/cli` immediately: a port is a machine-wide resource, so a
- * test home and the real home could not both be up, and the test daemons failed
- * to bind against the daemon a person already had running. That is not a test
- * problem, it is the design being wrong — the dev loop runs beside the real
- * daemon for exactly the same reason, and it would have broken the same way.
+ * test home and the real home could not both be up. The second version fixed that
+ * by making the default depend on **which home it was** — real home fixed, any
+ * other random — which is worse: it makes the daemon's behaviour a function of
+ * where its files are, and where its files are is not a fact about which ports
+ * are free.
  *
- * The rule this pins: the home a person actually uses gets the stable address,
- * and a scratch home gets a random one unless it asks for a number.
+ * What is left is `config.port ?? DEFAULT_DAEMON_PORT`. A home that has to run
+ * beside this one says so in its own `config.json`, in a file, like everything
+ * else about how a run behaves.
  */
-describe('the port a harness home uses', () => {
-  it('is the fixed one for the real home, wherever its files are', () => {
-    const real = defaultHarnessHome();
-    expect(defaultDaemonPort(real)).toBe(DEFAULT_DAEMON_PORT);
-    // Windows paths are case-insensitive, and `LOCALAPPDATA` is written both ways
-    // depending on who is asking.
-    expect(defaultDaemonPort(real.toUpperCase())).toBe(DEFAULT_DAEMON_PORT);
-  });
-
-  it('is a random one for any other home, so two can be up at once', () => {
-    expect(defaultDaemonPort(path.join(os.tmpdir(), 'dsh-somewhere-else'))).toBe(0);
-    expect(defaultDaemonPort(path.join(os.tmpdir(), 'EmilsDeepSeekHarness-dev'))).toBe(0);
-  });
-
+describe('the daemon port', () => {
   it('is below the ephemeral range, so it cannot land on a transient allocation', () => {
     // Windows hands out ephemeral ports from 49152 up. A fixed port in that range
     // would collide eventually and the failure would look random.
     expect(DEFAULT_DAEMON_PORT).toBeLessThan(49152);
+  });
+
+  it('is taken from config.json when that file names one', () => {
+    // The point of the whole rule: the file says how it behaves. Written through
+    // a real home so this goes through the same read the daemon does.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-port-'));
+    const before = process.env.DSH_HOME;
+    try {
+      process.env.DSH_HOME = home;
+      // Nothing there yet, so it is seeded and answers with no port — which is
+      // what makes the daemon fall back to the default.
+      expect(loadHarnessConfig().port).toBeUndefined();
+
+      // A number, and 0 for "any free one". Both are just what the file says.
+      fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ prices: {}, port: 42000 }));
+      expect(loadHarnessConfig().port).toBe(42000);
+
+      fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ prices: {}, port: 0 }));
+      expect(loadHarnessConfig().port).toBe(0);
+    } finally {
+      if (before === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = before;
+      fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
   });
 });

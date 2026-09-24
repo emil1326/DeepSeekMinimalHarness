@@ -19,8 +19,8 @@
 import fs from 'node:fs';
 import {
   DEFAULT_BASE_URL,
+  DEFAULT_DAEMON_PORT,
   daemonFile,
-  defaultDaemonPort,
   harnessHome,
   loadHarnessConfig,
   runsDbFile,
@@ -72,10 +72,10 @@ async function main(): Promise<void> {
     store,
     supervisor,
     guard,
-    // A fixed port for the real home so the URL is worth bookmarking, and a
-    // random one for any other, so a dev or test home can run beside it. See
-    // `defaultDaemonPort`.
-    port: config.port ?? defaultDaemonPort(),
+    // The port `config.json` names, or the default. One rule, no second daemon
+    // and no guessing: a home that must run beside this one names `0` or a
+    // number of its own in its own file.
+    port: config.port ?? DEFAULT_DAEMON_PORT,
     ...(config.prices ? { prices: config.prices } : {}),
     uiDir: defaultUiDir(),
     onStop: shutdown,

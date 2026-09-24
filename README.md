@@ -272,12 +272,17 @@ Then:
 ```
 dsh run task.json          start it and watch it until it ends
 dsh run task.json --json   the same, one JSON event per line
-dsh ui                     open the UI, already logged in
+dsh ui                     open the UI
 ```
 
-The daemon starts itself the first time, on a random port, and stays up. Killing
-`dsh run` kills the agent, including every check process it started. Ctrl+C asks
-politely first.
+The daemon starts itself the first time and stays up, on a **fixed** port —
+`41777` — so the URL is worth bookmarking and survives a restart. There is no
+token, no cookie and no login: it answers any program on this machine, and refuses
+only a web page that is not its own. One daemon, one address, and it learns what a
+run is from the task file the run arrives with.
+
+Killing `dsh run` kills the agent, including every check process it started. Ctrl+C
+asks politely first.
 
 Because it streams, whoever launched it can talk to it mid-run:
 

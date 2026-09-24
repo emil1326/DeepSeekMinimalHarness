@@ -183,6 +183,31 @@ async function chooseHome() {
   }
   // Whatever was decided, including a `DSH_HOME` inherited from the shell.
   homeLabel = process.env.DSH_HOME ?? 'the real one';
+  ensureOwnPort();
+}
+
+/**
+ * A port for this home, written into its own `config.json`.
+ *
+ * The daemon binds `config.port`, or a fixed default when the file is silent.
+ * This loop runs *beside* the real daemon — that is the whole reason it has its
+ * own home, because restarting a daemon kills its runs — so it has to name a
+ * different port, and naming it in the file is the only way that needs no special
+ * case in the daemon. `0` takes any free one, which is fine here: the browser only
+ * ever sees Vite's port, and the proxy is told this one.
+ */
+function ensureOwnPort() {
+  if (process.env.DSH_HOME === undefined) return;
+  const file = path.join(process.env.DSH_HOME, 'config.json');
+  let config = {};
+  try {
+    config = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    /* absent or not JSON yet; it gets written below either way */
+  }
+  if (typeof config.port === 'number') return;
+  fs.mkdirSync(process.env.DSH_HOME, { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify({ ...config, port: 0 }, null, 2)}\n`, 'utf8');
 }
 
 async function readRecord() {
