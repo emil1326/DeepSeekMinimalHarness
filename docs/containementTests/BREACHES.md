@@ -51,7 +51,7 @@ why before moving on.
 | #                                                                                                     | Breach                                                                        | Severity | Where                                               |
 | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | -------- | --------------------------------------------------- |
 | BR-1                                                                                                  | The stray-change report fails **open**                                        | Critical | `packages/worker/src/stray.ts:18-20`                |
-| BR-2                                                                                                  | The harness executes the repository's own `.git/config`                       | Critical | `stray.ts:18` + `packages/daemon/src/server.ts:386` |
+| BR-2                                                                                                  | The harness executes the repository's own `.git/config`                       | Critical | `stray.ts:18` + `packages/daemon/src/server.ts:356` |
 | BR-3                                                                                                  | A regex with no bound wedges the worker, and the cancel with it               | Critical | `packages/core/src/sandbox.ts:245`                  |
 | BR-4                                                                                                  | The never-write list catches each toolchain's **primary** name and no variant | High     | `packages/core/src/sandbox.ts:35`                   |
 | BR-5                                                                                                  | A hard link to a file outside the worktree is readable                        | High     | `packages/core/src/sandbox.ts` `resolve`            |
@@ -60,13 +60,28 @@ why before moving on.
 | BR-8                                                                                                  | Nothing bounds how much a run may write                                       | Medium   | `packages/core/src/sandbox.ts:361,369`              |
 | BR-9                                                                                                  | Trailing dot and space names are missed, not refused                          | Low      | `packages/core/src/sandbox.ts` `matches`            |
 | BR-10                                                                                                 | The `.git` write refusal depends on the read list                             | Low      | `packages/core/src/sandbox.ts` `writable`           |
-| BR-11                                                                                                 | The speaker of a message is taken from the request body                       | Medium   | `packages/daemon/src/server.ts:295,311`             |
-| BR-12                                                                                                 | `Origin: null` is accepted                                                    | Low      | `packages/daemon/src/auth.ts:68`                    |
-| BR-13                                                                                                 | The served UI is guarded by a directory name, and never verified              | Low      | `packages/daemon/src/server.ts:345`                 |
+| BR-11                                                                                                 | The speaker of a message is taken from the request body                       | Medium   | `packages/daemon/src/server.ts:396,408`             |
+| BR-12                                                                                                 | `Origin: null` is accepted                                                    | Low      | **fixed** — `packages/daemon/src/guard.ts`          |
+| BR-13                                                                                                 | The served UI is guarded by a directory name, and never verified              | Low      | `packages/daemon/src/server.ts:496`                 |
 | **Severity means:** _Critical_ = it silently defeats a control, or runs code with no user action.     |
 | _High_ = a route out that is reachable and leads somewhere valuable. _Medium_ = resource damage or a  |
 | record that lies. _Low_ = structural, or currently blocked by something else that you should not rely |
 | on.                                                                                                   |
+
+**Read this with `docs/api.md` open.** The daemon no longer has a token, a session cookie or a login,
+so any finding below that names one is describing the state it was found in rather than the state
+now. Three things changed under this document and each is noted where it lands:
+
+- `packages/daemon/src/auth.ts` is **gone**, replaced by `guard.ts`: three request headers, no secret.
+  BR-12 was fixed on the way past.
+- The daemon answers **any local program** and refuses only a web page. So a finding whose chain went
+  "reach the environment → read `daemon.json` → get the token → drive the daemon" now stops one link
+  earlier: reaching the daemon needs nothing from the environment at all. That makes BR-6 and BR-11
+  **easier to reach, not harder** — process containment is the whole of the defence now, and there is
+  no second wall to fall back on.
+- The harness keeps everything in **one directory**, `%LOCALAPPDATA%\EmilsDeepSeekHarness`. The
+  "harness home" this document refers to is that directory; there is no longer a `DSH_HOME` and no
+  second one to hide in.
 
 **BR-1, BR-2 and BR-3 first.** BR-2 and BR-4 are one shape — something executes a file that was in
 scope — and BR-1 is the control that would have noticed.
@@ -116,7 +131,7 @@ Two things make it worse than a bug:
    (`server.ts:386`) already uses 32 MB, so the two disagree about how much output is too much —
    pick one and share it.
 3. **Update every caller.** `packages/worker/src/main.ts` (the `stray` event) and
-   `packages/daemon/src/server.ts:282` (the Diff tab's `stray`). A caller that cannot render the
+   `packages/daemon/src/server.ts:356` (the Diff tab's `stray`). A caller that cannot render the
    failure must surface it, not drop it.
 4. **Emit the failure as an event.** `{ type: 'stray' }` has no field for it, and a run whose report
    did not run is a run a human must not sign off.
@@ -144,7 +159,7 @@ ESCAPED  H1  code the agent could write was executed
 
 - `packages/worker/src/stray.ts:18` — `git status --porcelain -uall`
 - `packages/worker/src/stray.ts:37` — `git rev-parse --is-inside-work-tree`
-- `packages/daemon/src/server.ts:386` — `git diff` for the Diff tab
+- `packages/daemon/src/server.ts:356` — `git diff` for the Diff tab
 
 **Why it works:** git reads its configuration from the repository it is standing in, and several keys
 **name a command to run**:
@@ -398,21 +413,29 @@ otherwise inherits the user's real environment.
 
 The consequence is concrete. A check that runs code (BR-2, BR-4) gets:
 
-- `HOME` / `LOCALAPPDATA` → the harness home → `daemon.json` → **the daemon token**;
-- and with the token, the daemon: start a run with any task and any worktree, read every other run's
+- `HOME` / `LOCALAPPDATA` → the harness's own directory → `daemon.json` → **the port**, and
+  `~/.deepseek/api_key` → **the DeepSeek key**;
+- and with the port, the daemon: start a run with any task and any worktree, read every other run's
   configuration, cancel other people's work.
 
-The token is regenerated on each daemon start (`newToken()` in `packages/daemon/src/auth.ts`), so this
-is not a standing credential — but it is a live one for as long as the daemon runs, which is the whole
-session. Catching it is a `cat` away from an execution primitive, which is why this ranks High.
+**This used to be worse and the chain used to be longer, and it is worth being precise about which.**
+`daemon.json` held a bearer token, so the environment leak ended in a live credential — regenerated on
+each start, but valid for the whole session, and a `cat` away from an execution primitive.
+
+That token is gone; the daemon answers local programs and refuses only web pages. The good news is
+that a leaked `daemon.json` is now a port number anybody could have guessed. The bad news is that the
+**destination** of this chain never needed the environment entry — a check that can make an HTTP
+request can drive the daemon whether or not it can read a file — so what was one route is now the only
+route, and process containment is carrying it alone. The key file is the sharper end: it is not a
+capability, it is the account.
 
 **Fix.** Stop filtering by name; **allowlist** the variables checks need. Something like `PATH`,
 `PATHEXT`, `SystemRoot`, `windir`, `ComSpec`, `TEMP`, `TMP`, `TMPDIR`, `LANG`, `LC_ALL`, plus
 `HOME`/`USERPROFILE` **pointed at a scratch directory**, plus whatever the profile's `env` adds. A
 denylist can be incomplete; an allowlist is complete by construction.
 
-**Test to add.** Print the environment from inside a check and assert the harness home is not
-reachable through anything in it.
+**Test to add.** Print the environment from inside a check and assert the harness's own directory is
+not reachable through anything in it, and neither is the key file.
 
 **Careful.** `HOME` is needed by tools. Do not drop it — **redirect** it.
 
@@ -532,7 +555,7 @@ validated before use in server.ts:    false
 taken straight from the body:         true
 ```
 
-**Where:** `packages/daemon/src/server.ts:295` and `:311`
+**Where:** `packages/daemon/src/server.ts:396` and `:408`
 
 ```ts
 supervisor.sendMessage(messageRoute[1] as string, body.text, body.by ?? 'claude');
@@ -546,23 +569,28 @@ who is recorded as having said it. `Speaker` is `'agent' | 'claude' | 'emil' | '
 TypeScript union and therefore **not a runtime check** — at a boundary the type is a promise the
 compiler cannot keep, and nothing validates the value before it is stored and rendered.
 
-So anything holding the token can write a turn into any run's log that reads as **`emil`**. In a UI
-where the whole point is seeing who said what, and in a log the plan treats as the audit trail, that
+So anything that can reach the daemon can write a turn into any run's log that reads as **`emil`**. In a
+UI where the whole point is seeing who said what, and in a log the plan treats as the audit trail, that
 is the integrity of every other claim in it.
 
-**How it is reached, and why it is Medium rather than Low.** Every route here is behind the token, so
-this is not open by default. But the chain from the catalogue is: code execution in a check (BR-2,
-BR-4) → `HOME` in the check's environment (BR-6) → the harness home → `daemon.json` → the token →
-this. Each link is separately verified. And a nastier variant needs no question at all: a check that
-spawns a **detached** process which posts a fake `answer` with `by: 'emil'` unblocks the run's `ask`
-with a reply from a human who never saw it.
+**Still open, and reachable by a shorter chain than this document describes.** It used to be: code
+execution in a check (BR-2, BR-4) → `HOME` in the check's environment (BR-6) → the harness's own
+directory → `daemon.json` → the token → this. The token is gone and the daemon answers any local
+program, so the middle three links are unnecessary: a check that can make one HTTP request gets here.
+The detached-process variant is the nastiest one and needs no careful work at all — a check that
+spawns a process which posts a fake `answer` with `by: 'emil'` unblocks the run's `ask` with a reply
+from a human who never saw it.
 
-**Fix.** Derive the speaker from the **authenticated channel**, not the body. The CLI is `claude`, the
-UI's session cookie is `emil`, and the worker's own events are `agent`. Then ignore `by` if a client
-sends one, and validate the value against the union at every boundary rather than trusting the type.
+**Fix.** Derive the speaker from the **channel**, not the body, and stop reading `by` entirely. There
+is no per-caller credential any more, so the channel is weaker than it was: the CLI is a plain local
+HTTP client and so is `curl`. What is left that is checkable is the route and the `Origin` — a body
+that arrives on `/answers` from a browser that is not the UI is already refused by `guard.ts` — and,
+for the UI's own writes, the values it is allowed to claim. Validate against the union at every
+boundary rather than trusting the type.
 
-**Test to add.** A request with `by: 'emil'` over the CLI's bearer token must record `claude`, not
-`emil`. Control: today it records `emil`.
+**Test to add.** A request with `by: 'emil'` posted to `/answers` from a foreign `Origin` is refused
+by the guard before the speaker is ever read. Control: the same body from the UI's own origin is
+accepted, so the check is not just refusing everything.
 
 **Careful.** Keep `by` in the request type if you like, so callers do not break — but stop reading it.
 
@@ -570,37 +598,28 @@ sends one, and validate the value against the union at every boundary rather tha
 
 ## BR-12 — `Origin: null` is accepted
 
-**Low, defence in depth. Verified.**
+**Fixed.** Kept here for the shape of it, which is the reusable part: the bug was one clause in an
+allowance, and the clause was there for a reason nobody could name.
 
-```
-ACCEPTS  undefined
-ACCEPTS  ""
-ACCEPTS  "null"
-ACCEPTS  "http://localhost:5173"
-ACCEPTS  "http://127.0.0.1:5173"
-refuses  "http://evil.example"
-```
-
-**Where:** `packages/daemon/src/auth.ts:68`
+**Where it was:** `packages/daemon/src/auth.ts:68`, in a file that no longer exists.
 
 ```ts
 if (header === undefined || header === '' || header === 'null') return true;
 ```
 
-**Why it matters, and why it is Low.** A foreign `Origin` is correctly refused. `null` is the one
-that is not, and it is a real value: sandboxed iframes and `file://` pages send `Origin: null`, which
-is exactly the set of contexts the check exists to exclude.
+**Why it mattered, and why it was Low.** A foreign `Origin` was correctly refused. `null` was the one
+that was not, and it is a real value: sandboxed iframes and `file://` pages send `Origin: null`, which
+is exactly the set of contexts the check existed to exclude.
 
-The token still blocks them — a `SameSite=Strict` cookie is not sent cross-site, and a page cannot
-read `daemon.json` — so this is not a way in on its own. But it is one line, and the _only_ reason to
-allow it is that the CLI sends no `Origin` at all — which is `undefined`, already covered by the first
-condition. So `'null'` is doing nothing but widening the check.
+**What it is now.** `packages/daemon/src/guard.ts` refuses `null` outright, tests it, and says why:
+`null` is the one value that means "a page, but not a page I can name" while looking like "no page at
+all". The third check it gained — `Sec-Fetch-Site` — matters more than this one did, because it is the
+header a page cannot write, and it closes the gap this document worried about elsewhere: a request
+with no `Origin` at all is allowed through, and `Sec-Fetch-Site: cross-site` is what stops that being a
+way in.
 
-**Fix.** Drop `|| header === 'null'`. If some non-browser client turns out to need it, add it back
-with a comment saying which one and why.
-
-**Test to add.** A request with `Origin: null` is refused. Control: `undefined` is still accepted, so
-the CLI keeps working.
+**Test.** `packages/daemon/tests/server.test.ts` asserts `Origin: null` is refused and that a request
+with no `Origin` is still accepted, so the CLI keeps working. Both directions, as rule 3 requires.
 
 ---
 
@@ -616,7 +635,7 @@ packages/daemon/dist/public/assets/*.js  SandboxRefusal: in a directory the sand
 public/index.html  (no `dist` segment)   ALLOWED
 ```
 
-and `packages/daemon/src/server.ts:345`:
+and `packages/daemon/src/server.ts:496`:
 
 ```ts
 response.writeHead(200, { 'content-type': contentType(target) });
@@ -635,11 +654,19 @@ need no restart, so the design choice that makes the dev loop pleasant is the sa
 fragile.
 
 **Why the consequence would be the worst here.** The UI is served from the daemon's own origin, so it
-is **same-origin with the API and carries the session cookie**. A page that replaced `index.html`
-would not be a defaced UI; it would be a page that can call every route as the logged-in user: start
-runs with any task and any worktree, read every run's configuration, cancel work, and (BR-11) write
-turns into any log as `emil`. And it would keep doing it on **every future visit**, long after the run
-that planted it.
+is **same-origin with the API** — and `guard.ts` allows exactly that, on purpose, because the UI has to
+talk to the daemon and refusing its own page would refuse the product. A page that replaced
+`index.html` would therefore not be a defaced UI; it would be a page that passes every check and can
+call every route: start runs with any task and any worktree, read every run's configuration, cancel
+work, and (BR-11) write turns into any log as `emil`. And it would keep doing it on **every future
+visit**, long after the run that planted it.
+
+**This finding got worse when the token went, and that should be said plainly.** It was previously
+blocked by the session cookie: a replaced page would render and then get `401` from the API. There is
+no cookie now and no credential to be missing, so the served page is fully authorised by virtue of
+having been served. The three header checks do not help — a request from this page is `same-origin` and
+carries this daemon's `Host`, which is what they require. The read-the-file guard above is the whole of
+the defence, which is why it is the first fix below.
 
 **Fix.** Make the guarantee explicit instead of incidental, and put a check on the serving side:
 
@@ -721,13 +748,13 @@ independent reasons are the point.
 
 **The UI's `dangerouslySetInnerHTML` (`packages/ui/src/components/Json.tsx:28`).** Sound today: it
 escapes `&<>` **before** injecting its own `<span>`s, so the only markup in there is markup that
-function wrote. The UI is served from the daemon, **same origin as the API, with the session cookie**,
-so an XSS there is full API access. Keep the escape-before-inject order, add a test that pins it, and
-treat any **new** `dangerouslySetInnerHTML` in this codebase as a finding.
+function wrote. The UI is served from the daemon, **same origin as the API**, so an XSS there is full
+API access — and with the token gone there is no session left for it to fail to steal, which makes the
+page's own origin the entire authorisation. Keep the escape-before-inject order, add a test that pins
+it, and treat any **new** `dangerouslySetInnerHTML` in this codebase as a finding.
 
-**`uiOrigins` in `HarnessConfig` (`packages/core/src/config.ts:60`).** Declared and never read. Dead
+**`uiOrigins` in `HarnessConfig` (`packages/core/src/config.ts`).** Declared and never read. Dead
 code, not a breach. Wire it or delete it — do not "fix" it by making the daemon start trusting it.
-
 ---
 
 ## Suspected, not verified — probe before fixing

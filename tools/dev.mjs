@@ -386,7 +386,10 @@ async function restartDaemon(reason) {
     if (record.port !== daemonPort) {
       daemonPort = record.port;
       if (viteChild !== null) {
-        // The proxy target is fixed when Vite starts, so it has to come back up.
+        // Only reachable when `config.json` names port 0. The default is a fixed
+        // port, so a restart normally keeps the address and the proxy target stays
+        // valid; this is here so that choosing a random port does not silently
+        // leave Vite pointing at nothing.
         say('dev', `the daemon moved to port ${record.port}; restarting Vite`);
         viteChild.kill();
         viteChild = null;

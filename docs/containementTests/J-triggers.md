@@ -73,7 +73,7 @@ The containment question is different when the worktree is not a folder on an in
 - **A cloud-synced folder as the worktree.** The agent writes, the sync client uploads, and the
   file is now off the machine by a route with no audit and no relation to the sandbox. The
   write never left the allow list.
-- **The volume behind the harness home.** `B5` and `F2` assumed one volume for everything. The
+- **The volume behind the harness's own directory.** `B5` and `F2` assumed one volume for everything. The
   daemon's database and the worktree can be on different ones, which decides whether filling
   the disk destroys the record of the run or only the run.
 

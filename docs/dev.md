@@ -8,11 +8,9 @@ One command. It builds once, starts the daemon, starts Vite, and then watches
 everything. Save a file and the thing that runs your change has it.
 
 ```
-npm run dev                 its own harness home, so nothing of yours is disturbed
+npm run dev                 everything, watching
 npm run dev -- --no-ui      daemon and workers only, no Vite
 npm run dev -- --no-open    do not open a browser
-npm run dev -- --real-home  take over the real daemon instead
-npm run dev -- --home X     some other harness home entirely
 ```
 
 It runs against the same daemon and the same database as `dsh`. One install, one
@@ -73,10 +71,11 @@ Two details that are easy to get wrong, and are handled:
   alone means the daemon restarts twice at startup, for nothing. The loop
   digests the built `.js` files and compares, so an identical rewrite is a
   no-op, and so is a source map or a `.d.ts`.
-- **The port moves.** The daemon binds a random free port each time it starts,
-  so a restart gives it a new one. Vite's proxy target is fixed when Vite
-  starts, so Vite is restarted too — around 400 ms, and the browser reloads.
-  This is the one rough edge in the loop, and it is the price of a random port.
+- **The port does not move any more.** The daemon binds a fixed port, so a restart
+  keeps the same address and Vite's proxy target stays valid — the loop used to
+  have to bring Vite down and back up on every daemon restart, at the cost of a
+  browser reload, because the port was random. The restart path still checks, so a
+  `config.json` that names `0` gets the old behaviour rather than a broken proxy.
 
 ## The UI's proxy
 
@@ -89,9 +88,8 @@ optional:
 - rewrites `Origin` the same way, because the daemon refuses any origin that is
   not its own, and from Vite the UI's origin is `localhost:5173`.
 
-Without the second one the UI logs in and then sees nothing but 403s. The
-WebSocket routes carry `ws: true`, which is what makes the live view work at all
-through the proxy; `npm run dev` was checked against `/events` upgrading
+Without the second one the UI gets nothing but 403s. The WebSocket routes carry
+`ws: true`, which is what makes the live view work at all through the proxy; `npm run dev` was checked against `/events` upgrading
 successfully, because a broken upgrade there fails quietly.
 
 The proxy is the one place allowed to speak for the daemon, and it does not
@@ -157,18 +155,16 @@ One field, three readers, all built from the same list:
 That is honest rather than elegant: a name is only reachable if the address
 resolves, the dev server accepts the `Host` header, _and_ the daemon accepts that
 and the `Origin`. Miss one and the failure looks like a different bug each time —
-a dead page, `Blocked request`, or an empty UI behind a `401`.
+a dead page, `Blocked request`, or an empty UI behind a `403`.
 
 Three things worth knowing before you spend an evening on it:
 
 - **It is one name, not a wildcard.** A configured name is added next to
   `127.0.0.1` and `localhost`, never instead of them. Everything else is still
   refused, which is the whole point of the check.
-- **A session belongs to one name.** The cookie is set for the host the browser
-  was sent to, so signing in at `localhost:5173` does not sign you in at
-  `EmilsHarnessUI:5173`: that is a second, empty session, and the UI has no login
-  screen to fix it with. Run the loop again — or `npx dsh ui` — and it signs in at
-  the name it now knows.
+- **A name and a port are not the same thing.** The port is fixed at `41777` and is
+  what the daemon binds; the name from `config.json` is what the browser types. Only
+  the first has to be free.
 - **Vite compares the name character for character.** Browsers send the `Host`
   header lowercased, so the config lowercases the name before handing it over. A
   capital in that list is a name that can never match.

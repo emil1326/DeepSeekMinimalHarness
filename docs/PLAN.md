@@ -41,7 +41,7 @@ flowchart LR
   end
   ui[UI in the browser<br/>Vite + React]
   subgraph daemon[daemon, one per machine]
-    api[HTTP + WebSocket API<br/>127.0.0.1 only, token auth]
+    api[HTTP + WebSocket API<br/>127.0.0.1 only, no credentials]
     sup[run supervisor]
     db[(SQLite<br/>runs + event log)]
   end
@@ -76,7 +76,7 @@ packages/
   daemon/   HTTP + WebSocket server, supervisor, SQLite, serves the built UI
   cli/      the `dsh` command
   ui/       Vite + React front end
-profiles/   esap.json and friends (outside any worktree)
+profiles/   esap.json and friends (a worked example, not part of the build)
 legacy/     dsx.py and test_sandbox.py, kept until the port passes their tests
 ```
 
@@ -103,7 +103,13 @@ The key is **not** in the task file. The daemon reads it from `~/.deepseek/api_k
 
 ## The daemon
 
-- Binds **127.0.0.1 only**, on a random free port. Writes `{port, pid, token}` to `%LOCALAPPDATA%/EmilsDeepSeekHarness/daemon.json`, readable by the user only.
+**Read this section alongside `docs/status.md`.** Two things it asks for were built,
+used, and then removed: the token, and the random port. What replaced them and the
+reasoning are in `status.md` under "Three things the plan asked for that are now gone
+on purpose"; the text below is kept as written, with the two places it is no longer
+true marked inline.
+
+- Binds **127.0.0.1 only**, on a **fixed** port (`41777`, or whatever `config.json` names). Writes `{port, pid, startedAt}` to `%LOCALAPPDATA%/EmilsDeepSeekHarness/daemon.json`, readable by the user only. No token: see the next line for what replaced it.
 - **Any local program may drive it; only a web page may not.** Three request headers decide that: `Host` must be this daemon (which is what stops DNS rebinding), an `Origin` if present must be the UI's own, and `Sec-Fetch-Site` if present must not be `cross-site`. A localhost server is reachable from any page the browser has open, so without these a random website could drive agents — and a *secret* cannot fix that, because it has to be handed out on the same machine to callers that can read it. There is no token, no cookie and no login. The port is fixed so the URL is worth bookmarking.
 - Started automatically by the first CLI call if it isn't running. `dsh daemon stop|status`.
 - On startup, any run left `running` by a crash becomes `interrupted`.
@@ -113,6 +119,7 @@ API sketch (the building agent can refine it, but keep it small and write it dow
 - `POST /runs` with a task, returns the run id
 - `GET /runs`, `GET /runs/:id` (config, status, metrics), `GET /runs/:id/events?after=n`
 - `WS /runs/:id/attach` streams events; the connection **owns** the run unless the run was started detached
+- `WS /runs/:id/watch` is the same stream **without** owning it, so a second terminal can follow a run it cannot end
 - `POST /runs/:id/messages` (tell the agent something), `POST /runs/:id/answers` (answer its question), `POST /runs/:id/cancel`
 - `GET /runs/:id/diff` (git diff of the worktree)
 - `WS /events` for the UI's live list
@@ -125,7 +132,8 @@ dsh send <run> "message"                 tell a running agent something
 dsh reply <run> "answer"                 answer the question it's waiting on
 dsh cancel <run>
 dsh list | show <run> | logs <run> | diff <run> | stats
-dsh ui                                   open the UI, logged in
+dsh watch <run>                          follow it without owning it
+dsh ui                                   open the UI
 dsh daemon start | stop | status
 ```
 
@@ -179,7 +187,7 @@ Each one ends with its own tests green. Don't start the next one early.
 2. **The sandbox.** Port every guard and every test from `legacy/test_sandbox.py`, including the case where a read fails because a file is missing, which must count as *not refused*. Add realpath and case-insensitive containment with tests (a junction pointing outside must be refused). **Done when all ported tests pass, and reinstating the `lstrip` bug turns exactly the dot-dependent tests red.**
 3. **DeepSeek client.** Streaming with tool calls, abort, retry with backoff on 429 and 5xx, metrics captured. Tested against a fake server; one real smoke call behind an opt-in flag.
 4. **Agent loop in a worker.** Closed tools, `ask`, queued messages, limits, `finish`. Tested with a scripted fake model.
-5. **Daemon.** API, auth, Host and Origin checks, supervisor, SQLite event log, restart turning `running` into `interrupted`. Tests include a request without a token and one with a foreign `Origin`, both refused.
+5. **Daemon.** API, header checks, supervisor, SQLite event log, restart turning `running` into `interrupted`. Tests include a request from a foreign `Origin` and one from a foreign `Host`, both refused — and, because those are now the *only* checks, a control that the CLI's own request with no headers at all is still accepted. *(As written this milestone said "auth" and "a request without a token"; see `status.md` for why the token is gone.)*
 6. **CLI.** Attach and stream, `--json`, `send`, `reply`, `cancel`, exit codes. **Done when a test kills the CLI process hard and proves, within 2 s, that the worker and a long-running check process it started are both gone.**
 7. **UI.** List, chat, config, diff, metrics, reply, message, cancel, live updates.
 8. **Real run.** Redo the prototype's first task (`mark.spec.ts` timeouts, commit `3671dac` in Emil's Super App Planner has the expected result) through `dsh`, from Claude's shell, with the UI open. Record the speed numbers.

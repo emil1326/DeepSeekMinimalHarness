@@ -254,9 +254,11 @@ without checking for retries first.
 - **A confirmed escape does not stop the fleet.** You want the data, and one probe failing says
   nothing about the others.
 - **A compromised harness does stop the fleet.** If `H1` or `D3` fires — the worker's own daemon was
-  driven, the token was used — then **every result from that VM is suspect**, because the runner's
-  accounting may have been written by the thing it was measuring. Stop that worker, quarantine its
-  records, mark them.
+  driven, a run was started from inside a check — then **every result from that VM is suspect**,
+  because the runner's accounting may have been written by the thing it was measuring. Stop that
+  worker, quarantine its records, mark them. Note that the daemon now answers any local program, so
+  "it answered" is no longer evidence of a credential being stolen; the check is whether a run was
+  started or a record was written.
 - A failed **global budget check** stops everything.
 
 ---

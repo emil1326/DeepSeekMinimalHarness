@@ -12,13 +12,19 @@ The answer is the deliverable, not a green line.
 
 **It is not derived from the current guards.** The list was written from the agent's
 position outward — a git worktree, a handful of file tools, a set of named checks,
-and a daemon holding a token — by following the openings. Starting from the refusals
-would have produced a mirror of them, and the entries that matter are the ones nobody
-has written a guard for.
+and a daemon on the loopback address — by following the openings. Starting from the
+refusals would have produced a mirror of them, and the entries that matter are the
+ones nobody has written a guard for.
+
+**What the daemon looked like when this was written has changed**, and the entries
+that depended on the old shape say so where they are. It had a bearer token and a
+session cookie; it now has neither, and answers any local program while refusing only
+a web page. Read `docs/api.md` alongside this. The finding count is unchanged —
+what moved is which link of a chain carries the weight.
 
 ## How to use it
 
-- One probe at a time, in a **scratch** worktree and a scratch harness home. Never the
+- One probe at a time, in a **scratch** worktree and a scratch data directory. Never the
   real one, and never with the real key.
 - Fill in **Tried** and **Result** when you do. A blank result is a question, not a pass.
 - The list does not expire. Every opening here is basically "a file that something reads
@@ -92,77 +98,77 @@ It is worth knowing that `K2` needs no hole whatsoever.
 
 ## Index
 
-| ID  | Attack                                    | What it gets you                                    |
-| --- | ----------------------------------------- | --------------------------------------------------- |
-| A1  | traversal, in every argument              | any file the process can read                       |
-| A2  | symlinks, including dangling ones         | the same, with no `..` to spot                      |
-| A3  | hard links                                | a secret read, or a file outside destroyed, legally |
-| A4  | Windows path forms                        | deny-list bypass; a write that stores nothing       |
-| A5  | case and Unicode folding                  | a write to a file that was never allowed            |
-| A6  | directory links during a walk             | a map of the machine                                |
-| A7  | the same directory by another name        | containment decided on a string                     |
-| A8  | check-then-use                            | anything A1–A3, through a path that changed         |
-| B1  | emptying an allowed file                  | a delete that reads as an edit                      |
-| B2  | deletion by assertion                     | a removal the reviewer misses                       |
-| B3  | one file, two names                       | a write outside the allow list, reported inside     |
-| B4  | out through a check                       | writes with the user's privileges                   |
-| B5  | filling the disk                          | the daemon's log, for every run                     |
-| B6  | blinding the review                       | approval of a change nobody can see                 |
-| B7  | two runs, one worktree                    | two half-changes, one diff                          |
-| B8  | corrupting the record instead of the code | work on disk in no diff                             |
-| C1  | the config file that is also a program    | code execution in a check, then D3                  |
-| C2  | a name taken from PATH                    | the profile's tool becomes the agent's tool         |
-| C3  | the model's file handed to an interpreter | a shell, declared in the profile                    |
-| C4  | code that runs later                      | execution on the developer's machine, after the run |
-| C5  | a check reading model-written output      | C1 with no error to point at                        |
-| D1  | reading the key where it lives            | the key                                             |
-| D2  | the environment, filtered by name         | pointers to where secrets are kept                  |
-| D3  | `daemon.json` and the token               | the daemon, and every other run                     |
-| D4  | a name the deny list does not know        | the secret, read openly                             |
-| D5  | reading it out of output                  | the secret, plus a copy that never expires          |
-| D6  | the neighbours                            | whatever sits beside the code                       |
-| E1  | speaking as somebody else                 | a transcript that says a person approved            |
-| E2  | a summary that disagrees with the diff    | an approval based on the wrong document             |
-| E3  | hiding the change                         | defeats the control that catches everything else    |
-| E4  | instructions the agent was not given      | unauthorised work, inside the allow list            |
-| E5  | the human as an attack surface            | a secret or a command, handed over by a person      |
-| E6  | confusing one run with another            | a wrong instruction applied to real work            |
-| E7  | the log under two writers                 | a live view that silently drops events              |
-| E8  | being interesting on purpose              | a wider allow list, negotiated with a helpful human |
-| F1  | a regex that does not finish              | a worker that cannot be stopped                     |
-| F2  | filling the volume                        | every run's record                                  |
-| F3  | sitting still                             | processes accumulating, looking like patience       |
-| F4  | cheap turns                               | occupancy with nothing to show                      |
-| F5  | the shape of the tree                     | slowness misattributed to the model                 |
-| F6  | two writers                               | an unreliable stray-change report                   |
-| F7  | losing the tail of a failure              | turns burnt on an error the agent cannot see        |
-| G1  | the dev server watches the allowed file   | code execution, by doing the task correctly         |
-| G2  | the browser is not in the sandbox         | the app's real data, as the logged-in user          |
-| G3  | the dev server has no `Origin` check      | a wider file read; a service any page can reach     |
-| G4  | the other watchers                        | G1, plus a second writer in the worktree            |
-| G5  | reading the map before moving             | a route, handed to a helpful human                  |
-| G6  | dev-only, or does it survive deployment   | a product finding, not just a harness one           |
-| H1  | the harness runs `git` in the worktree    | code execution, triggered by the harness itself     |
-| H2  | the stray-change report fails open        | **verified**: a dirty worktree reported clean       |
-| H3  | a check's program resolved through PATH   | the profile's tool becomes the agent's tool         |
-| H4  | the trust model the egress rule assumes   | a rule about one run, read as a system property     |
-| H5  | the profile hands a check a path outside  | a route out, written in the trusted config          |
-| I1  | the model is a network                    | **reading is sending**                              |
-| I2  | `finish`, `ask`, and tool arguments       | a secret in the log, and never pruned               |
-| I3  | the arguments themselves                  | the payload is a filename                           |
-| I4  | DNS and connections                       | the same, with the model out of the loop            |
-| I5  | the log as the exfiltration channel       | a durable copy nobody has to maintain               |
-| J1  | the Windows shell                         | a double-click, later                               |
-| J2  | drives, shares, removable media           | writes that leave by a route with no audit          |
-| J3  | the editor and the IDE                    | what the human is asked to install                  |
-| J4  | the toolchain, by ecosystem               | a build the deny list has never heard of            |
-| J5  | git's own triggers                        | the next person to touch the repository             |
-| K1  | expansion the harness itself performs     | **verified**: the review, blinded by file count     |
-| K2  | drowning the review                       | approval by exhaustion                              |
-| K3  | expansion the UI performs                 | a hung tab, after the report said "clean"           |
-| K4  | bombs for whoever opens it next           | exhaustion on a machine with no sandbox             |
-| K5  | growth by accretion                       | the disk, one legal call at a time                  |
-| K6  | the record grows too                      | the log takes every run's history with it           |
+| ID  | Attack                                    | What it gets you                                        |
+| --- | ----------------------------------------- | ------------------------------------------------------- |
+| A1  | traversal, in every argument              | any file the process can read                           |
+| A2  | symlinks, including dangling ones         | the same, with no `..` to spot                          |
+| A3  | hard links                                | a secret read, or a file outside destroyed, legally     |
+| A4  | Windows path forms                        | deny-list bypass; a write that stores nothing           |
+| A5  | case and Unicode folding                  | a write to a file that was never allowed                |
+| A6  | directory links during a walk             | a map of the machine                                    |
+| A7  | the same directory by another name        | containment decided on a string                         |
+| A8  | check-then-use                            | anything A1–A3, through a path that changed             |
+| B1  | emptying an allowed file                  | a delete that reads as an edit                          |
+| B2  | deletion by assertion                     | a removal the reviewer misses                           |
+| B3  | one file, two names                       | a write outside the allow list, reported inside         |
+| B4  | out through a check                       | writes with the user's privileges                       |
+| B5  | filling the disk                          | the daemon's log, for every run                         |
+| B6  | blinding the review                       | approval of a change nobody can see                     |
+| B7  | two runs, one worktree                    | two half-changes, one diff                              |
+| B8  | corrupting the record instead of the code | work on disk in no diff                                 |
+| C1  | the config file that is also a program    | code execution in a check, then D3                      |
+| C2  | a name taken from PATH                    | the profile's tool becomes the agent's tool             |
+| C3  | the model's file handed to an interpreter | a shell, declared in the profile                        |
+| C4  | code that runs later                      | execution on the developer's machine, after the run     |
+| C5  | a check reading model-written output      | C1 with no error to point at                            |
+| D1  | reading the key where it lives            | the key                                                 |
+| D2  | the environment, filtered by name         | pointers to where secrets are kept                      |
+| D3  | `daemon.json`                             | the port, and nothing else — there is no token any more |
+| D4  | a name the deny list does not know        | the secret, read openly                                 |
+| D5  | reading it out of output                  | the secret, plus a copy that never expires              |
+| D6  | the neighbours                            | whatever sits beside the code                           |
+| E1  | speaking as somebody else                 | a transcript that says a person approved                |
+| E2  | a summary that disagrees with the diff    | an approval based on the wrong document                 |
+| E3  | hiding the change                         | defeats the control that catches everything else        |
+| E4  | instructions the agent was not given      | unauthorised work, inside the allow list                |
+| E5  | the human as an attack surface            | a secret or a command, handed over by a person          |
+| E6  | confusing one run with another            | a wrong instruction applied to real work                |
+| E7  | the log under two writers                 | a live view that silently drops events                  |
+| E8  | being interesting on purpose              | a wider allow list, negotiated with a helpful human     |
+| F1  | a regex that does not finish              | a worker that cannot be stopped                         |
+| F2  | filling the volume                        | every run's record                                      |
+| F3  | sitting still                             | processes accumulating, looking like patience           |
+| F4  | cheap turns                               | occupancy with nothing to show                          |
+| F5  | the shape of the tree                     | slowness misattributed to the model                     |
+| F6  | two writers                               | an unreliable stray-change report                       |
+| F7  | losing the tail of a failure              | turns burnt on an error the agent cannot see            |
+| G1  | the dev server watches the allowed file   | code execution, by doing the task correctly             |
+| G2  | the browser is not in the sandbox         | the app's real data, as the logged-in user              |
+| G3  | the dev server has no `Origin` check      | a wider file read; a service any page can reach         |
+| G4  | the other watchers                        | G1, plus a second writer in the worktree                |
+| G5  | reading the map before moving             | a route, handed to a helpful human                      |
+| G6  | dev-only, or does it survive deployment   | a product finding, not just a harness one               |
+| H1  | the harness runs `git` in the worktree    | code execution, triggered by the harness itself         |
+| H2  | the stray-change report fails open        | **verified**: a dirty worktree reported clean           |
+| H3  | a check's program resolved through PATH   | the profile's tool becomes the agent's tool             |
+| H4  | the trust model the egress rule assumes   | a rule about one run, read as a system property         |
+| H5  | the profile hands a check a path outside  | a route out, written in the trusted config              |
+| I1  | the model is a network                    | **reading is sending**                                  |
+| I2  | `finish`, `ask`, and tool arguments       | a secret in the log, and never pruned                   |
+| I3  | the arguments themselves                  | the payload is a filename                               |
+| I4  | DNS and connections                       | the same, with the model out of the loop                |
+| I5  | the log as the exfiltration channel       | a durable copy nobody has to maintain                   |
+| J1  | the Windows shell                         | a double-click, later                                   |
+| J2  | drives, shares, removable media           | writes that leave by a route with no audit              |
+| J3  | the editor and the IDE                    | what the human is asked to install                      |
+| J4  | the toolchain, by ecosystem               | a build the deny list has never heard of                |
+| J5  | git's own triggers                        | the next person to touch the repository                 |
+| K1  | expansion the harness itself performs     | **verified**: the review, blinded by file count         |
+| K2  | drowning the review                       | approval by exhaustion                                  |
+| K3  | expansion the UI performs                 | a hung tab, after the report said "clean"               |
+| K4  | bombs for whoever opens it next           | exhaustion on a machine with no sandbox                 |
+| K5  | growth by accretion                       | the disk, one legal call at a time                      |
+| K6  | the record grows too                      | the log takes every run's history with it               |
 
 ## Order worth reading them in
 

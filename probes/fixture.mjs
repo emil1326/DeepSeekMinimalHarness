@@ -21,7 +21,7 @@
  *     default for safety and useless as a measurement.
  *
  * Everything lives under one scratch directory: the worktree, the neighbours,
- * and the harness home. Nothing here touches the real ones.
+ * and the harness's own directory. Nothing here touches the real ones.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -71,7 +71,7 @@ export function buildFixture(options = {}) {
 
   for (const dir of [root, outside, armed, home]) fs.mkdirSync(dir, { recursive: true });
 
-  // Port 0, in this scratch home's own `config.json`.
+  // Port 0, in this scratch directory's own `config.json`.
   //
   // The daemon binds the port its file names, or a fixed default. A red-team
   // fixture runs beside the real daemon, so it has to name its own — and naming it

@@ -38,7 +38,10 @@ from writing it. See `packages/daemon/src/guard.ts`.
 | `POST` | `/runs/:id/messages`       | `{ text, by? }`           | `{ ok }`                                         |
 | `POST` | `/runs/:id/answers`        | `{ id?, text, by? }`      | `{ ok, id }`, or `409` when it is not waiting    |
 | `POST` | `/runs/:id/cancel`         |                           | `{ ok }`                                         |
-| `GET`  | `/stats`                   |                           | `{ runs, models: ModelStats[] }`                 |
+| `POST` | `/runs/:id/limits`         | `{ turns?, costUsd?, … }` | `{ ok, limits }` — more room for a live run      |
+| `POST` | `/runs/:id/tag`            | `{ outcome, note?, … }`   | `{ ok, tag }` — what happened to the work        |
+| `GET`  | `/runs/:id/report`         |                           | `{ report: RunReport }`                          |
+| `GET`  | `/stats`                   |                           | `{ runs, models: ModelStats[], outcomes[] }`     |
 | `GET`  | `/runs/:id/timings`        |                           | `{ runId, wallMs, at, entries[] }`               |
 | `GET`  | `/timings`                 |                           | `{ runs, wallMs, entries[], process[] }`         |
 | `POST` | `/daemon/stop`             |                           | `{ ok }`, then it stops                          |
@@ -115,19 +118,18 @@ event and a `bye` at the end, and it can neither start a run nor cancel one. Thi
 is what `dsh watch` uses, so a second terminal can follow a run without being able
 to end it.
 
-**`WS /events`** is a nudge channel for the UI: a message per change, and the UI
-fetches what changed.
+**`WS /events`** is a nudge channel for the UI. Every event on every run, and every
+status change, sends `{ type: 'notice', runId }`. The payload is not included: the UI
+batches these for 250 ms and then refetches what changed, so a streaming run does not
+push a hundred messages a second.
+
+`attach` and `watch` speak the same language:
 
 | Message                             | Meaning                               |
 | ----------------------------------- | ------------------------------------- |
 | `{ type: 'hello', detail, events }` | on connect, with the whole log so far |
 | `{ type: 'event', event }`          | one new event                         |
 | `{ type: 'bye', status }`           | the run reached a terminal status     |
-
-**`WS /events`** is a nudge channel for the UI. Every event on every run, and
-every status change, sends `{ type: 'notice', runId }`. The payload is not
-included: the UI batches these for 250 ms and then refetches what changed, so a
-streaming run does not push a hundred messages a second.
 
 ## Events
 
@@ -147,7 +149,7 @@ type RunEvent = { seq: number; runId: string; at: string } & (
   | { type: 'answer'; id: string; answer: string; by: Speaker }
   | { type: 'message'; by: Speaker; text: string }
   | { type: 'metrics'; turn: number; call: CallMetrics; totals: RunTotals }
-  | { type: 'summary'; text: string }
+  | { type: 'summary'; text: string; changed?: string[] }
   | { type: 'retry'; turn: number; attempt: number; status: number; waitMs: number }
   | {
       type: 'context';
@@ -174,6 +176,7 @@ type RunEvent = { seq: number; runId: string; at: string } & (
       detail: string;
     }
   | { type: 'stray'; files: string[] }
+  | { type: 'offPlan'; files: string[] }
   | { type: 'error'; message: string }
 );
 ```
@@ -182,6 +185,16 @@ type RunEvent = { seq: number; runId: string; at: string } & (
 `costUsd` is the one counted in dollars: a reader that formats every one of these
 as a whole number would show a run that has spent three cents as having spent
 nothing.
+
+`stray` and `offPlan` are two different facts and are meant to be read differently.
+`stray` is a changed file on **no** list, which nobody allowed. `offPlan` is one on
+the soft list, which the task said it might need. Reporting them together would teach
+a reader to skim the loud one.
+
+`summary.changed` is the agent's own list of what it touched, and it is compared
+against what the run actually wrote — `dsh report` flags a file it claimed and never
+changed. It is absent when the agent did not give one, which is not the same as an
+empty list.
 
 Statuses are `queued`, `running`, `waiting`, `finished`, `failed`, `cancelled`,
 `interrupted` and `stopped_at_limit`. The last five are terminal, and a run that

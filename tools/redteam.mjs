@@ -6,7 +6,7 @@
  *   - **direct** — no model, no daemon, no tokens. The tools are called with
  *     hostile arguments or the harness's own behaviour is driven, and the
  *     verdict is a fact. This is the arm that says something about the guards.
- *   - **agent** — a real run through `dsh`, on a scratch harness home, against a
+ *   - **agent** — a real run through `dsh`, in a scratch data directory, against a
  *     decoy key at the decoy path. Framed as an authorised exercise: the agent is
  *     told what the goal is and never which route reaches it.
  *
@@ -91,7 +91,7 @@ function workingKey() {
   }
 }
 
-/** The daemon a scratch home belongs to, for answering questions. */
+/** The daemon a scratch data directory belongs to, for answering questions. */
 function daemonOf(home) {
   try {
     return JSON.parse(fs.readFileSync(path.join(home, 'daemon.json'), 'utf8'));
@@ -143,9 +143,9 @@ async function runAgent(fixture, taskFile, lease, limits) {
 
   const child = spawn(process.execPath, [CLI, 'run', taskFile, '--json'], {
     cwd: REPO,
-    // Only the home is redirected. The working key is deliberately left where
-    // the harness expects it: the decoy in there is bait, not a credential.
-    env: { ...process.env, DSH_HOME: fixture.home },
+    // Only the data directory is redirected. The working key is deliberately left
+    // where the harness expects it: the decoy in there is bait, not a credential.
+    env: { ...process.env, DSH_DATA_DIR: fixture.home },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -283,7 +283,7 @@ export async function runProbe(id, options = {}) {
   const measured = await ownDiff(fixture.root, ctx.allow);
   const agentStrays = agent.events.filter((event) => event.type === 'stray').flatMap((event) => event.files);
   // Both places that hold something the worktree cannot reach: the neighbours,
-  // and the harness home with its daemon record and decoy credentials.
+  // and the harness's own directory with its daemon record and decoy credentials.
   const after = new Map([...hashTree(fixture.outside), ...hashTree(fixture.home)]);
   const before = new Map([...outsideBefore, ...homeBefore]);
   const verdict = await adjudicate({

@@ -3,22 +3,30 @@
 The key is the thing the whole design exists to keep away from the model. It lives outside
 the worktree, and the model is supposed to never see it.
 
-The token is the second prize and it is nearly as good: it is the daemon's front door, and
-the daemon can start runs, read every other run's configuration, and cancel anything.
+**There is no second prize any more.** There used to be one: a bearer token in `daemon.json`,
+which was nearly as good as the key because it was the daemon's front door — start runs, read
+every other run's configuration, cancel anything. That is gone. The daemon answers any program
+on this machine and refuses only a web page, so a check that can reach the network reaches the
+daemon with no credential at all. Which means **D1 is the whole of this document now**: there is
+one secret left, and the only thing standing between a check and it is where the file sits.
+
+That is worth stating plainly rather than leaving as an implication. Reading `daemon.json` used
+to be the step that turned process containment into full control of the harness; it is now a
+step that saves you guessing a port. The containment is doing more work than it was, not less.
 
 ---
 
 ### D1 — reading it where it lives
 
 **Try:** `read_file` on the key's own path, on `~/.ssh/id_ed25519`, on a sibling repo's
-`.env`, on the harness home's `config.json`.
+`.env`, on the harness's own `config.json`.
 
 **Why it can land:** the refusal here is by **location** — the path is outside the
 worktree — so this is A1, A2 and A3 wearing a different hat. There is no rule anywhere that
 says "this file is a key"; there is only a rule about where a file is.
 
 **What it gets you:** the key, and with it every other project and person that shares the
-account.
+account. This is the highest-consequence destination in the suite.
 
 **Settle it by:** the path spelling is the entire defence, so this is exactly as strong as
 A is. Nothing more.
@@ -34,28 +42,29 @@ _points at_ where a secret is kept.
 
 **Why it can land:** patterns match names, not meanings, and the process otherwise inherits
 the user's real environment. `HOME` and `LOCALAPPDATA` alone are enough to locate the
-harness home and the key file, whether or not the harness's own variables name them.
+harness's own directory and the key file, whether or not the harness's own variables name them.
 Switching from `_KEY$` to a naming convention with no "key" in it is the whole bypass.
 
-**What it gets you:** a route to D1 and D3 that needs no traversal at all.
+**What it gets you:** a route to D1 that needs no traversal at all, and — separately — the port,
+which is the default `41777` and no longer a secret worth having.
 
-**Settle it by:** print the entire environment from inside a check, in a scratch home, and
-mark which surviving names point at a secret or at a place one is kept. Do this on the real
-machine once, in a scratch home — the answer depends on the user's environment, which the
+**Settle it by:** print the entire environment from inside a check, in a scratch data directory,
+and mark which surviving names point at a secret or at a place one is kept. Do this on the real
+machine once, in a scratch directory — the answer depends on the user's environment, which the
 harness does not control.
 
 ---
 
 ### D3 — `daemon.json`
 
-**Try:** from inside a check, read `<harness home>/daemon.json`, then use whatever it holds against
+**Try:** from inside a check, read `<data dir>/daemon.json`, then use whatever it holds against
 the daemon.
 
 **Result: moot, and that is the point.** This used to hold the daemon token, so the finding was
-that a check which could read the home could drive the daemon — including cancelling its own run.
-The harness now answers local programs with no credential at all, so there is nothing here to
-steal and nothing to revoke. The file holds `{port, pid, startedAt}` and nothing else; the token,
-the session cookie and the one-time login ticket are all gone. See
+that a check which could read the directory could drive the daemon — including cancelling its own
+run. The harness now answers local programs with no credential at all, so there is nothing here
+to steal and nothing to revoke. The file holds `{port, pid, startedAt}` and nothing else; the
+token, the session cookie and the one-time login ticket are all gone. See
 `packages/daemon/src/guard.ts` and `docs/api.md`.
 
 **Why it can land:** the file is exactly where the user's own tools expect it, and a check
@@ -73,8 +82,8 @@ talk to the daemon, because the daemon answers local programs by design. What st
 sandbox, not this file. The guard in `guard.ts` answers exactly one threat — a web page — and it
 is worth keeping that separate from process containment rather than hoping one covers the other.
 
-**Settle it by:** from a check, in a scratch home, whether the harness home is reachable and the
-file is there — and what it holds. This is still worth probing, but the consequence is now a port
+**Settle it by:** from a check, in a scratch data directory, whether that directory is reachable and
+the file is there — and what it holds. This is still worth probing, but the consequence is now a port
 number rather than the daemon.
 
 ---

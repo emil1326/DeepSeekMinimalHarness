@@ -10,7 +10,7 @@
 | 2   | The sandbox, ported guard for guard, with realpath, junctions and the lstrip control | done  |
 | 3   | DeepSeek client: streaming, tools, abort, backoff, metrics, fake server              | done  |
 | 4   | Agent loop in a worker: closed tools, `ask`, queued messages, limits, `finish`       | done  |
-| 5   | Daemon: API, auth, Host and Origin checks, supervisor, SQLite, crash recovery        | done  |
+| 5   | Daemon: API, header checks, supervisor, SQLite, crash recovery                       | done  |
 | 6   | CLI: attach and stream, `--json`, `send`, `reply`, `cancel`, exit codes              | done  |
 | 7   | UI: list, chat, config, diff, metrics, reply, message, cancel, live                  | done  |
 | 8   | A real run through `dsh` with the UI open, and the speed numbers recorded            | done  |
@@ -155,6 +155,30 @@ hits.
   first-token wait, and a refusal that says why is a turn not spent.
 - **The UI is denser than the plan's "dense, calm" suggests** after a pass on it,
   because the first version buried the conversation under its own numbers.
+
+## Three things the plan asked for that are now gone on purpose
+
+Each was built, used, and then removed because it cost more than it bought. They
+are recorded here rather than left out, because "the plan said so" is not a reason
+to keep something and the reasoning is the part worth keeping.
+
+- **The token, and the login that existed to protect it.** The plan puts "every
+  request needs the token" in the daemon's section, and it was implemented — bearer
+  header, session cookie, one-time ticket. It went, because it was written to
+  `daemon.json` in plain text where every process that could plausibly be the
+  attacker could read it, and because it made the URL unbookmarkable and every
+  restart a logout. `guard.ts` keeps the part that was load-bearing: `Host` against
+  DNS rebinding, and `Origin` plus `Sec-Fetch-Site` against a web page. The
+  security reasoning is in `docs/api.md` and `docs/containementTests/D-secrets.md`,
+  including what got weaker.
+- **The random port.** The plan says "on a random free port", and it was. A port is
+  a machine-wide resource and the URL is a thing a person keeps open, so it is now
+  `41777` unless `config.json` says otherwise. Conflicts are refused loudly rather
+  than silently moved away from.
+- **The "homes".** Never in the plan, and they accumulated: a `-dev` directory, one
+  per agent, `--home X`, `DSH_HOME`, and a default that depended on which one it
+  was. Four ways to have a second database, and the result was 67 runs missing from
+  the history until they were merged back. One directory now.
 
 ## Deliberate deviations
 

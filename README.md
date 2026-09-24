@@ -20,11 +20,13 @@ and I couldn't watch it work.
 - **Finish** with a summary.
 
 Reads are checked on the real path, so a symlink or a Windows junction can't point
-outside. The profile and the harness both have to live outside the worktree,
-otherwise the model could edit its own rules, and it refuses to start if they
-don't. Check processes get the secrets stripped out of their environment. At the
-end, `git status` is compared with the allowed files and anything stray is
-reported loudly.
+outside. **The profile has to live outside the worktree**, or a run could edit the
+checks that are supposed to be refusing it, and a task naming one inside is refused
+before the run starts. A **workspace** is the exception, deliberately: it may sit
+inside the worktree, where a project keeps its own configuration, because its
+filename is on the never-write list instead. Check processes get the secrets
+stripped out of their environment. At the end, `git status` is compared with the
+allowed files and anything stray is reported loudly.
 
 ### "Static" checks are not always static
 
@@ -50,13 +52,6 @@ list can only ever be as complete as the last person's imagination. If you point
 a profile at something that executes the repository, the sandbox will not save
 you from it.
 
-Reads are checked on the real path, so a symlink or a Windows junction can't point
-outside. The profile and the harness both have to live outside the worktree,
-otherwise the model could edit its own rules, and it refuses to start if they
-don't. Check processes get the secrets stripped out of their environment. At the
-end, `git status` is compared with the allowed files and anything stray is
-reported loudly.
-
 ## Getting it running
 
 ```
@@ -73,11 +68,12 @@ npm run dev
 ```
 
 Rebuilds on save, restarts the daemon when its code changes, and serves the UI
-with hot reload on `http://localhost:5173`. It takes over your real daemon, so it
-interrupts whatever was running; `-- --home X` gives it one of its own instead.
-A save in the UI is instant, a save in the daemon's code is about a second, and
-both beat the 14 seconds of running `npm run build:server` by hand. How it works
-and what it gets wrong is in `docs/dev.md`.
+with hot reload on `http://localhost:5173`. It uses the same daemon and the same
+database as `dsh` — one install, one history — so **restarting the daemon
+interrupts whatever was running**, because a run's worker is a child of the
+daemon. A save in the UI is instant, a save in the daemon's code is about a
+second, and both beat the 14 seconds of running `npm run build:server` by hand.
+How it works and what it gets wrong is in `docs/dev.md`.
 
 If `http://localhost:5173` is not how you want to type it, `uiHosts` in the
 harness's own `config.json` puts it on a name of your own, `EmilsHarnessUI`
@@ -481,13 +477,14 @@ packages/worker   the agent loop, one child process per run
 packages/daemon   HTTP + WebSocket, the supervisor, SQLite, serves the UI
 packages/cli      the dsh command
 packages/ui       the React front end
-profiles/         the check profiles (outside any worktree)
+profiles/         a worked example: a profile, its rules and a workspace
 legacy/           dsx.py and its tests, kept until the port passed them
 tools/dev.mjs     the dev loop
 tools/preview.mjs a scripted run to look at the UI with
 docs/api.md       the daemon's API
 docs/dev.md       the dev loop, and what it restarts
-PLAN.md           what this was meant to be, and whether it got there
+docs/PLAN.md      what this was meant to be
+docs/status.md    whether it got there, and what changed on the way
 ```
 
 The UI's palette is lifted off my own site, [emils-work.freesite.online](https://emils-work.freesite.online),

@@ -197,7 +197,7 @@ C'était un vrai bug et il était dans le profil livré :
 ```
 
 Deux worktrees frères ont le même `{parent}`, donc le même target dir. Corrigé,
-et `{worktree}` / `{name}` / `{home}` existent maintenant partout où `{parent}`
+et `{worktree}` / `{name}` / `{data}` existent maintenant partout où `{parent}`
 existait.
 
 Et l'étape de setup, une fois par worktree :
@@ -207,7 +207,7 @@ Et l'étape de setup, une fois par worktree :
 ```
 
 Avant le premier appel au modèle, dans le worktree, avec l'environnement du
-workspace. Marquée par un fichier dans le home du harness, clé par (worktree,
+workspace. Marquée par un fichier dans le dossier du harness, clé par (worktree,
 étapes) — donc éditer les étapes les rejoue, et deux worktrees sont préparés
 indépendamment. Le marqueur est hors du worktree pour ne pas apparaître dans le
 diff du run.

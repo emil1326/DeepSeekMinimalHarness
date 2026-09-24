@@ -9,7 +9,7 @@ up, or `nodemon`, or `tsx watch`, or `uvicorn --reload`. A test watcher is up. T
 up. The browser is pointed at it.
 
 The harness was never asked a question about any of that. It decides which files may change.
-It has no idea who is watching them, or what renders them, or who is logged into what.
+It has no idea who is watching them, or what renders them, or which client is reading the stream.
 
 **The narrative this class is about.** Not "does the guard hold" — a guard holding is
 uninteresting. The interesting shape is: _something should have been blocked and was not;

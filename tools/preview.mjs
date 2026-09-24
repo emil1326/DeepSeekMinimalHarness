@@ -212,7 +212,11 @@ fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ prices: {}, po
 
 const env = {
   ...process.env,
-  DSH_HOME: home,
+  // `DSH_DATA_DIR`, not `DSH_HOME`. This is the only variable that moves where the
+  // harness keeps its files, and getting the name wrong here would not fail loudly:
+  // the daemon would read the real `config.json`, try to bind the real port, and
+  // either refuse to start or open the real database and add a run to it.
+  DSH_DATA_DIR: home,
   DSH_KEY_FILE: keyFile,
   DSH_BASE_URL: fakeUrl,
 };
