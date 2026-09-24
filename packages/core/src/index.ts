@@ -3,6 +3,7 @@ export {
   covered,
   isInside,
   isPattern,
+  mainRepoRoot,
   matchesGlob,
   realPath,
   relNorm,

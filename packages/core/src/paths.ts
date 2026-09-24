@@ -140,6 +140,59 @@ export function isPattern(entry: string): boolean {
 }
 
 /**
+ * The repository a linked worktree belongs to, or null for a normal checkout.
+ *
+ * A linked worktree — what a sandbox always is — has `.git` as a **file** whose
+ * whole content is `gitdir: <main>/.git/worktrees/<name>`, and that gitdir holds
+ * a `commondir` file naming the repository it shares. A normal checkout has
+ * `.git` as a directory and is already its own repository, and a submodule's
+ * gitdir has no `commondir` because that gitdir *is* its repository.
+ *
+ * `commondir` rather than counting `..` segments, which is what the first
+ * version did and what made a submodule indistinguishable from a worktree: their
+ * gitdirs are the same depth, `<main>/.git/worktrees/<name>` and
+ * `<main>/.git/modules/<name>`, so the arithmetic landed on the outer project for
+ * both — and would have handed a vendored dependency its parent's rules.
+ *
+ * Read rather than asked of git, deliberately. This runs while a task file is
+ * being resolved, and spawning a process there would cost time on every run to
+ * answer a question a one-line file answers already. It is also a question that
+ * has a right answer when git is not on PATH, which is why nothing here fails
+ * loudly: an unreadable `.git` means "not a linked worktree", and the caller goes
+ * on to whatever it would have done anyway.
+ */
+export function mainRepoRoot(worktree: string): string | null {
+  const dotGit = path.join(worktree, '.git');
+  let pointed: string;
+  try {
+    // A directory here is a normal checkout and a missing one is not a repo at
+    // all; neither is an error, and neither has a project root to find.
+    if (!fs.statSync(dotGit).isFile()) return null;
+    const found = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGit, 'utf8'));
+    if (found?.[1] === undefined) return null;
+    // Relative on some git versions and on Windows, hence the resolve.
+    pointed = path.resolve(worktree, found[1]);
+  } catch {
+    return null;
+  }
+
+  let common: string;
+  try {
+    // `<main>/.git/worktrees/<name>/commondir` holds `../..`, but it is resolved
+    // rather than assumed: `--separate-git-dir` puts the repository elsewhere.
+    common = path.resolve(pointed, fs.readFileSync(path.join(pointed, 'commondir'), 'utf8').trim());
+  } catch {
+    return null;
+  }
+
+  // `<main>/.git` for every ordinary layout, so the project is its parent. The
+  // check is what rules out the layouts where it is not, since a wrong answer
+  // here would give a project somebody else's rules.
+  const root = path.dirname(common);
+  return fs.existsSync(path.join(root, '.git')) ? root : null;
+}
+
+/**
  * Whether a path is covered by a list of allow-list entries.
  *
  * The bug this exists for, found live: every caller asked

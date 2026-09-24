@@ -20,11 +20,21 @@
  *       "commands": { "run_test": { ... } }
  *     }
  *
- * **Where it lives.** In the worktree, or above it, found by walking up. The
- * rule that keeps a model from editing its own rules is not "this file is
- * outside the worktree" — that never held, because a check can write anywhere
- * its process can reach. It is that the file's own name is on the never-write
- * list, so no tool the agent can call will touch it. See `WORKSPACE_FILES`.
+ * **Where it lives.** In the worktree, or above it, found by walking up — and
+ * when the worktree is a *linked* one, in the repository it was checked out
+ * from, which is a sibling directory rather than an ancestor. The rule that keeps
+ * a model from editing its own rules is not "this file is outside the worktree"
+ * — that never held, because a check can write anywhere its process can reach.
+ * It is that the file's own name is on the never-write list, so no tool the agent
+ * can call will touch it. See `WORKSPACE_FILES`.
+ *
+ * **Why the repository and not just the ancestors.** Found live. Every sandbox
+ * the harness makes is a linked worktree in a sibling directory —
+ * `F:/vsCode/esap-ds-1` beside `F:/vsCode/esap` — so walking up from one can
+ * never reach the project, and a project that had committed its workspace got
+ * runs with no rules, no declared commands, no setup and no `CARGO_TARGET_DIR`.
+ * The worktree's own `.git` file is what says which project it belongs to, and
+ * `mainRepoRoot` reads it.
  *
  * **Nothing about a project lives in the harness.** Every key here is either
  * plumbing (a path, an environment variable) or a description of this project's
@@ -37,6 +47,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { COMMAND_NAME, RESERVED_TOOL_NAMES, declaredCommandSchema } from './commands.js';
+import { mainRepoRoot } from './paths.js';
 import { checkSpecSchema } from './profile.js';
 
 /**
@@ -172,10 +183,17 @@ export function findWorkspace(input: {
     // project's rules because one happened to be further up the tree.
     return fs.existsSync(given) ? given : null;
   }
-  // The worktree first, then upwards, then the task file's own directory: the
-  // project's own config is next to the project, and a task file kept in a
-  // harness folder somewhere else should not have to say so.
-  for (const start of [input.worktree, path.dirname(input.taskPath)]) {
+  // The worktree first, then the repository it came from, then the task file's
+  // own directory: the project's own config is next to the project, and a task
+  // file kept in a harness folder somewhere else should not have to say so.
+  //
+  // The repository is on the list because a sandbox is always a *linked*
+  // worktree, and those live in sibling directories rather than inside the
+  // project — see `mainRepoRoot`. Without it, a project's workspace only reached
+  // the worktrees that happened to be checked out at a commit containing it.
+  const fromRepo = mainRepoRoot(input.worktree);
+  const starts = [input.worktree, ...(fromRepo === null ? [] : [fromRepo]), path.dirname(input.taskPath)];
+  for (const start of starts) {
     const found = walkUp(start);
     if (found !== null) return found;
   }

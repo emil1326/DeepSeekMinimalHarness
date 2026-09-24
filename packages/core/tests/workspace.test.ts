@@ -27,7 +27,6 @@ import {
   loadWorkspace,
   toolDefinitions,
 } from '@emilswork/harness-core';
-
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-workspace-'));
 afterAll(() => fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
 
@@ -427,6 +426,152 @@ describe('a task resolved against a workspace', () => {
       message = (error as Error).message;
     }
     expect(message).toContain('the workspace names default');
+  });
+});
+
+/**
+ * The workspace a *linked* worktree belongs to.
+ *
+ * Found live, and it made the whole layer a no-op on the project it was written
+ * for. Every sandbox the harness makes is a linked worktree in a sibling
+ * directory — `F:/vsCode/esap-ds-1` beside `F:/vsCode/esap` — so walking up from
+ * the worktree can never reach the project, and a project that had committed its
+ * `.dsh/workspace.json` got runs with no rules, no declared commands, no setup
+ * and no `CARGO_TARGET_DIR`. Measured: 63 runs on that project, all with
+ * `workspace: null`.
+ *
+ * The only thing on disk that says which project a linked worktree belongs to is
+ * its `.git` **file**, so that is what this reads. No git process, which is why
+ * these cases are built by hand: the layout below is exactly what
+ * `git worktree add` leaves, and a real one would be a slower way to write the
+ * same four lines.
+ */
+describe('a linked worktree, which is what every sandbox is', () => {
+  /** `git worktree add` layout: a sibling directory pointing into the project's .git. */
+  function link(project: string, at: string, name: string): string {
+    const worktree = path.join(at, `sibling-${name}`);
+    fs.mkdirSync(path.join(worktree, 'src'), { recursive: true });
+    const gitDir = path.join(project, '.git', 'worktrees', name);
+    fs.mkdirSync(gitDir, { recursive: true });
+    // What git writes, and the marker this reads: a worktree's gitdir shares a
+    // repository, a submodule's gitdir *is* one.
+    fs.writeFileSync(path.join(gitDir, 'commondir'), '../..\n', 'utf8');
+    fs.writeFileSync(path.join(worktree, '.git'), `gitdir: ${gitDir}\n`, 'utf8');
+    return worktree;
+  }
+
+  function project(dir: string, workspace: unknown): string {
+    const root = path.join(dir, 'the-project');
+    fs.mkdirSync(path.join(root, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(root, '.dsh'), { recursive: true });
+    fs.writeFileSync(path.join(root, '.dsh', 'workspace.json'), `${JSON.stringify(workspace)}\n`, 'utf8');
+    return root;
+  }
+
+  it('finds the workspace in the project it was checked out from', () => {
+    counter += 1;
+    const dir = path.join(scratch, `linked-${counter}`);
+    const root = project(dir, { name: 'esap', model: 'deepseek-flash' });
+    const worktree = link(root, dir, 'one');
+    const task = path.join(dir, 'task.json');
+
+    const found = findWorkspace({ worktree, taskPath: task });
+    expect(found).toBe(path.join(root, '.dsh', 'workspace.json'));
+  });
+
+  it('carries the commands, the rules and the environment with it', () => {
+    // The point is not that a path was found: it is that a run in a worktree of
+    // an older commit gets the project's declared commands and its target dir.
+    counter += 1;
+    const dir = path.join(scratch, `linked-config-${counter}`);
+    const root = project(dir, {
+      name: 'esap',
+      model: 'deepseek-flash',
+      profiles: { default: 'profile.json' },
+      defaultProfile: 'default',
+      env: { CARGO_TARGET_DIR: '{worktree}-target' },
+      rulesText: 'Never touch wire.rs.',
+      commands: {
+        run_test: {
+          description: 'run one test file',
+          args: { crate: { description: 'the crate', values: ['emils-planner-core'] } },
+          run: ['cargo', 'test', '-p', '{crate}', '--test', 'registry'],
+          expect: 'test result: ok\\. [1-9]',
+        },
+      },
+    });
+    // Beside the workspace file, because every path inside a workspace is
+    // relative to the workspace and not to the repository — `.dsh/profile.json`
+    // for a workspace at `.dsh/workspace.json`, which is the layout that also had
+    // the doubled-path bug in the shipped example.
+    fs.writeFileSync(path.join(root, '.dsh', 'profile.json'), `${JSON.stringify(PROFILE)}\n`, 'utf8');
+    const worktree = link(root, dir, 'two');
+    const task = path.join(dir, 'task.json');
+    fs.writeFileSync(
+      task,
+      `${JSON.stringify({ name: 'a-line', worktree, allow: ['src/one.ts'], task: 'do it' })}\n`,
+      'utf8',
+    );
+
+    const config = loadRunConfig(task);
+    expect(config.workspace?.name).toBe('esap');
+    expect(Object.keys(config.commands)).toEqual(['run_test']);
+    expect(config.commands.run_test?.expect).toBe('test result: ok\\. [1-9]');
+    expect(config.rules).toContain('Never touch wire.rs');
+    // Interpolated against the *worktree*, not the project: two worktrees sharing
+    // one target dir is how a check in one printed the other's compile errors.
+    expect(config.env.CARGO_TARGET_DIR).toBe(`${worktree}-target`);
+  });
+
+  it('still prefers a workspace in the worktree itself, which is nearer', () => {
+    // A worktree on a commit that has its own `.dsh/` keeps it. The project root
+    // is a fallback for the case that was broken, not an override.
+    counter += 1;
+    const dir = path.join(scratch, `linked-nearest-${counter}`);
+    const root = project(dir, { name: 'from-the-project', model: 'deepseek-flash' });
+    const worktree = link(root, dir, 'three');
+    fs.mkdirSync(path.join(worktree, '.dsh'), { recursive: true });
+    fs.writeFileSync(
+      path.join(worktree, '.dsh', 'workspace.json'),
+      `${JSON.stringify({ name: 'from-the-worktree', model: 'deepseek-flash' })}\n`,
+      'utf8',
+    );
+
+    expect(findWorkspace({ worktree, taskPath: path.join(dir, 'task.json') })).toBe(
+      path.join(worktree, '.dsh', 'workspace.json'),
+    );
+  });
+
+  it('finds nothing for a normal checkout with no workspace anywhere', () => {
+    // The control, and the reason `mainRepoRoot` returns null for a `.git`
+    // *directory*: a normal checkout is its own repository, and treating it as a
+    // linked worktree would send the walk off to a directory that is not a
+    // project at all.
+    counter += 1;
+    const dir = path.join(scratch, `plain-${counter}`);
+    const root = path.join(dir, 'plain-repo');
+    fs.mkdirSync(path.join(root, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+
+    expect(findWorkspace({ worktree: root, taskPath: path.join(dir, 'task.json') })).toBeNull();
+  });
+
+  it('does not mistake a submodule for a project root', () => {
+    // A submodule's gitdir is `<main>/.git/modules/<name>`, one level shallower
+    // than a worktree's, so the same arithmetic lands on `<main>/.git`. Nothing
+    // there has a `.git` entry, which is what tells the two apart.
+    counter += 1;
+    const dir = path.join(scratch, `submodule-${counter}`);
+    const root = project(dir, { name: 'outer', model: 'deepseek-flash' });
+    const sub = path.join(dir, 'the-submodule');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.mkdirSync(path.join(root, '.git', 'modules', 'the-submodule'), { recursive: true });
+    fs.writeFileSync(
+      path.join(sub, '.git'),
+      `gitdir: ${path.join(root, '.git', 'modules', 'the-submodule')}\n`,
+    );
+
+    expect(findWorkspace({ worktree: sub, taskPath: path.join(dir, 'task.json') })).toBeNull();
   });
 });
 
