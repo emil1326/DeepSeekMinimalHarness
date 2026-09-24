@@ -4,14 +4,20 @@ Réponse à `IMPROVEMENTS_CLAUDE_1.md`, point par point. Pour chacun : ce qui a 
 fait, ou pourquoi non. Écrit après avoir lu le code plutôt que de mémoire, et
 après avoir lancé les mécanismes contre la vraie API DeepSeek.
 
-**Onze points sur quatorze sont finis.** Les trois autres : le point 4 (les
-**globs** dans `allow` et `soft`), le point 9 _(skippé par Emil)_, et les parties
-que je refuse explicitement — `unattended` (point 3), `request_file` (point 4) et
-le classifieur comme barrière de sécurité (point 1). Chaque refus dit pourquoi.
+**Douze points sur quatorze sont finis, plus le point 4.** Il ne reste que le
+point 9 _(skippé par Emil)_ et les parties que je refuse explicitement —
+`unattended` (point 3), `request_file` (point 4) et le classifieur comme barrière
+de sécurité (point 1). Chaque refus dit pourquoi.
 
-Deux choses sont **faites mais pas vues en live**, et ce n'est pas la même chose
-que faites : le code de sortie 6 sur un solde épuisé, et les commandes Rust du
-profil esap. Elles sont listées à la fin.
+Le point 4 est passé de « pas fini » à « fini » après avoir trouvé en live que le
+problème était plus grave que noté : `matchesGlob` était correct et jamais appelé
+sur les listes `allow` et `soft`, donc `"allow": ["docs/**"]` n'autorisait qu'un
+fichier littéralement nommé `docs/**`. Le détail est dans
+`REPONSES_BUGS_ESAP.md`, avec les quatre bugs du template esap.
+
+Trois choses sont **faites mais pas vues en live**, et ce n'est pas la même chose
+que faites : le code de sortie 6 sur un solde épuisé, les commandes Rust du profil
+esap, et l'expansion de `{allowed}` depuis un glob. Elles sont listées à la fin.
 
 ---
 
@@ -136,7 +142,7 @@ tâche.
 
 ---
 
-## 4. Liste de fichiers autorisés — **partiellement**
+## 4. Liste de fichiers autorisés — **fait**
 
 Fait : une liste `soft`, dans le workspace et/ou la tâche.
 
@@ -156,11 +162,23 @@ comme des chemins littéraux :
 const files = [...this.allow].filter((a) => !when || when.some((s) => a.endsWith(s)));
 ```
 
-Si tu mets `crates/*/tests/**` dans `allow`, la chaîne du glob part telle quelle
-dans l'argv de prettier. Donc les globs demandent de **résoudre la liste en
-fichiers concrets à la construction** tout en gardant le motif pour les nouveaux
-fichiers. C'est là qu'est le travail, pas dans le matching, et c'est un
-changement qu'il faut faire pour `allow` et `soft` ensemble.
+_Note ajoutée après coup : ce point est **fini**. La prédiction ci-dessous sur
+où était le travail était juste — c'était bien la résolution en fichiers concrets,
+pas le matching — mais le diagnostic l'était moins : le matching ne marchait pas
+non plus. `matchesGlob` existait, correct, et n'était appelé que par les listes de
+refus. Partout ailleurs, `allowed.has(path)` : de l'égalité de chaînes. Donc
+`"allow": ["docs/**"]` n'autorisait qu'un fichier littéralement nommé `docs/**`,
+et une deuxième copie de la même comparaison dans `stray.ts` aurait en plus signalé
+un fichier créé sous un glob comme un changement sur aucune liste — c'est-à-dire
+une fausse alarme sur la seule chose au monde que le harness existe pour crier.
+Trouvé en live, pas par raisonnement._
+
+_Ce qui a été fait : `covered()` dans `paths.ts`, et `{allowed}` résout maintenant
+la liste en fichiers réels en parcourant l'arbre une fois. Au passage `*` cesse de
+traverser un `/`, ce dont dépendait `NEVER_WRITE` — et le même défaut faisait
+passer `"allow": ["src/*.ts"]` pour `src/deep/anything.ts`, une permission
+d'écriture plus large que ce qu'elle disait. La liste a été réécrite en ces termes
+et chaque entrée est fixée des deux côtés par un test._
 
 `request_file(path, why)` : **non fait, et je ne le ferais pas.** Une approbation
 automatique selon une règle (« même crate, fichier de test ») est une règle
