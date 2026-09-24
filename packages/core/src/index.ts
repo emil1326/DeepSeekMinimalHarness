@@ -140,3 +140,19 @@ export {
   type HarnessConfig,
 } from './config.js';
 export { delay, isAlive, killTree, resolveExecutable, spawnTool, UnsafeCommandError } from './process.js';
+export {
+  TIMING_BUCKETS,
+  TIMING_EDGES_MS,
+  TIMING_VERSION,
+  Recorder,
+  bucketOf,
+  byTotal,
+  emptyHistogram,
+  meanMs,
+  mergeStats,
+  percentile,
+  timing,
+  type TimingSnapshot,
+  type TimingSpan,
+  type TimingStat,
+} from './timing.js';
