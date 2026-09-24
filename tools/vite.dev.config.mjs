@@ -59,7 +59,7 @@ export default defineConfig({
     // arriving under that name connects over IPv4 and would miss a server
     // listening on IPv6 only. Naming the address removes the question.
     host: '127.0.0.1',
-    // A different port would not be the one `loginUrl` hands out.
+    // A different port would not be the one the browser is told to open.
     strictPort: true,
     // The other half of the check Vite does for itself. Everything Vite allows
     // without being told stays allowed; this only adds the configured name.
@@ -76,8 +76,6 @@ export default defineConfig({
       '/health': toDaemon(),
       '/stats': toDaemon(),
       '/daemon': toDaemon(),
-      // `/ui/ticket` and `/ui/session`: the one-time login, and the cookie it sets.
-      '/ui': toDaemon(),
     },
   },
 });

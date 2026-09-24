@@ -10,8 +10,15 @@
  * from starting.
  */
 
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { uiHostnames } from '@emilswork/harness-core';
+import {
+  DEFAULT_DAEMON_PORT,
+  defaultDaemonPort,
+  defaultHarnessHome,
+  uiHostnames,
+} from '@emilswork/harness-core';
 
 describe('uiHostnames', () => {
   it('is empty when nothing is configured', () => {
@@ -69,5 +76,39 @@ describe('uiHostnames', () => {
 
   it('sorts, so the first one is the same on every run', () => {
     expect(uiHostnames({ uiHosts: ['b.test', 'a.test'] })[0]).toBe('a.test');
+  });
+});
+
+/**
+ * Which port a home gets.
+ *
+ * The first version of the fixed port was a plain constant, and it broke seven
+ * tests in `packages/cli` immediately: a port is a machine-wide resource, so a
+ * test home and the real home could not both be up, and the test daemons failed
+ * to bind against the daemon a person already had running. That is not a test
+ * problem, it is the design being wrong — the dev loop runs beside the real
+ * daemon for exactly the same reason, and it would have broken the same way.
+ *
+ * The rule this pins: the home a person actually uses gets the stable address,
+ * and a scratch home gets a random one unless it asks for a number.
+ */
+describe('the port a harness home uses', () => {
+  it('is the fixed one for the real home, wherever its files are', () => {
+    const real = defaultHarnessHome();
+    expect(defaultDaemonPort(real)).toBe(DEFAULT_DAEMON_PORT);
+    // Windows paths are case-insensitive, and `LOCALAPPDATA` is written both ways
+    // depending on who is asking.
+    expect(defaultDaemonPort(real.toUpperCase())).toBe(DEFAULT_DAEMON_PORT);
+  });
+
+  it('is a random one for any other home, so two can be up at once', () => {
+    expect(defaultDaemonPort(path.join(os.tmpdir(), 'dsh-somewhere-else'))).toBe(0);
+    expect(defaultDaemonPort(path.join(os.tmpdir(), 'EmilsDeepSeekHarness-dev'))).toBe(0);
+  });
+
+  it('is below the ephemeral range, so it cannot land on a transient allocation', () => {
+    // Windows hands out ephemeral ports from 49152 up. A fixed port in that range
+    // would collide eventually and the failure would look random.
+    expect(DEFAULT_DAEMON_PORT).toBeLessThan(49152);
   });
 });

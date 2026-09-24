@@ -116,7 +116,7 @@ async function answerWithoutHelping(home, runId, question) {
   try {
     await fetch(`http://127.0.0.1:${record.port}/runs/${runId}/answers`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: `Bearer ${record.token}` },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ text, by: 'emil' }),
     });
     say('ask', `answered a question without helping: ${question.slice(0, 60)}`);

@@ -189,17 +189,17 @@ async function readRecord() {
   const { daemonFile } = await paths();
   try {
     const record = JSON.parse(fs.readFileSync(daemonFile, 'utf8'));
-    return typeof record?.port === 'number' && typeof record?.token === 'string' ? record : null;
+    return typeof record?.port === 'number' && typeof record?.pid === 'number' ? record : null;
   } catch {
     return null;
   }
 }
 
-async function healthy(port, token) {
-  // `/health` sits behind the token check like everything else, so this needs
-  // the bearer header; without it the daemon answers 401 and looks dead.
+async function healthy(port) {
+  // No credentials: the daemon answers its own machine, and the only callers it
+  // refuses are web pages. See `packages/daemon/src/guard.ts`.
   const answer = await fetchIn(600, `http://127.0.0.1:${port}/health`, {
-    headers: { accept: 'application/json', authorization: `Bearer ${token}` },
+    headers: { accept: 'application/json' },
   });
   return answer !== null && answer !== 'timeout' && answer.ok;
 }
@@ -286,13 +286,10 @@ function startWatchers() {
 
 async function stopDaemon() {
   const record = await readRecord();
-  if (record !== null && (await healthy(record.port, record.token))) {
-    await fetchIn(1500, `http://127.0.0.1:${record.port}/daemon/stop`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${record.token}` },
-    }).catch(() => null);
+  if (record !== null && (await healthy(record.port))) {
+    await fetchIn(1500, `http://127.0.0.1:${record.port}/daemon/stop`, { method: 'POST' }).catch(() => null);
     for (let waited = 0; waited < 3000; waited += 100) {
-      if (!(await healthy(record.port, record.token))) break;
+      if (!(await healthy(record.port))) break;
       await sleep(100);
     }
   }
@@ -305,7 +302,7 @@ async function stopDaemon() {
     }
     daemonChild = null;
   }
-  if (record !== null && (await healthy(record.port, record.token))) {
+  if (record !== null && (await healthy(record.port))) {
     // A daemon we did not start and that will not stop: kill it and be loud.
     say('daemon', `port ${record.port} still answers after a stop; killing pid ${record.pid}`);
     try {
@@ -328,7 +325,7 @@ async function startDaemon() {
 
   for (let waited = 0; waited < 20_000; waited += 100) {
     const record = await readRecord();
-    if (record !== null && record.pid === child.pid && (await healthy(record.port, record.token))) {
+    if (record !== null && record.pid === child.pid && (await healthy(record.port))) {
       say('dev', `daemon on 127.0.0.1:${record.port} (pid ${record.pid})`);
       return record;
     }
@@ -367,23 +364,18 @@ async function viteReady() {
   return false;
 }
 
-/** A one-time ticket, so the browser gets the session cookie and never the token. */
-async function loginUrl() {
-  const record = await readRecord();
-  if (record === null) return null;
-  const answer = await fetchIn(1500, `http://127.0.0.1:${record.port}/ui/ticket`, {
-    method: 'POST',
-    headers: { authorization: `Bearer ${record.token}` },
-  });
-  if (answer === null || answer === 'timeout' || !answer.ok) return null;
-  const body = await answer.json();
-  // At `browserOrigin` and not at `127.0.0.1`, because `/ui/session` answers with
-  // the session cookie and a cookie belongs to the name it was set from. Signing
-  // in at one name and browsing at another is two sessions, and the second one
-  // is empty.
-  return `${browserOrigin}/ui/session?ticket=${body.ticket}`;
-}
-
+/**
+ * Where the browser should go.
+ *
+ * There used to be a ticket in here and a `/ui/session` round trip, because the
+ * UI needed a session cookie and the token was not allowed in a URL. There is no
+ * cookie now — the daemon serves the page and the page talks to the daemon, so
+ * reaching the address *is* being the operator's browser. See
+ * `packages/daemon/src/guard.ts`.
+ *
+ * Vite serves this at `browserOrigin` and forwards the API to the daemon, which
+ * is what keeps HMR and the real daemon in one tab.
+ */
 function openBrowser(url) {
   const [command, args] =
     process.platform === 'win32'
@@ -559,14 +551,12 @@ async function main() {
 
   if (wantUi) {
     const ready = await viteReady();
-    const url = await loginUrl();
     say('dev', '');
     say('dev', `UI       ${browserOrigin}`);
     if (unresolved !== null) {
       say('dev', `         ${unresolved} is not in the hosts file, so it is not used yet`);
       say('dev', `         ${hostsInstruction(unresolved)}`);
     }
-    if (url !== null) say('dev', `sign in  ${url}`);
     // The home matters to this line: `dsh` without `DSH_HOME` looks in the real
     // home, so on a dev home the bare command would talk to a different daemon
     // or to none. Saying `npx dsh list` there would be a lie.
@@ -588,7 +578,7 @@ async function main() {
       );
     }
     say('dev', '');
-    if (wantOpen && ready && url !== null) openBrowser(url);
+    if (wantOpen && ready) openBrowser(browserOrigin);
     else if (!ready) say('dev', 'Vite did not come up; read its output above');
   }
 

@@ -1,21 +1,33 @@
 /**
- * The daemon: one per machine, bound to 127.0.0.1 on a random free port.
+ * The daemon: one per harness home, bound to 127.0.0.1 on a fixed port.
  *
- * It writes `{port, pid, token}` to `%LOCALAPPDATA%/EmilsDeepSeekHarness/daemon.json`,
+ * It writes `{port, pid, startedAt}` to `%LOCALAPPDATA%/EmilsDeepSeekHarness/daemon.json`,
  * readable by the user only. The CLI starts it on first use.
+ *
+ * "One per home" and not "one per machine" for one reason: `shutdownAll` kills
+ * every run when the daemon goes down, so iterating on the harness would mean
+ * killing whatever was in flight. The dev loop and this project's own runs each
+ * get their own home because of that, not because of a design preference — see
+ * `tools/dev.mjs`.
+ *
+ * No token, and no login. See `guard.ts`: a secret written to a file readable by
+ * anything running as this user cannot defend against those programs, and the
+ * one threat worth answering is a web page, which three request headers answer
+ * better and for free.
  */
 
 import fs from 'node:fs';
 import {
   DEFAULT_BASE_URL,
   daemonFile,
+  defaultDaemonPort,
   harnessHome,
   loadHarnessConfig,
   runsDbFile,
   uiHostnames,
   writePrivateJson,
 } from '@emilswork/harness-core';
-import { Auth, newToken } from './auth.js';
+import { Guard } from './guard.js';
 import { defaultUiDir, startServer } from './server.js';
 import { Store } from './store.js';
 import { Supervisor } from './supervisor.js';
@@ -31,10 +43,9 @@ async function main(): Promise<void> {
     process.stdout.write(`dsh: ${interrupted} run(s) left running by a crash are now interrupted\n`);
   }
 
-  const token = newToken();
   // `uiHostnames` is empty unless `config.json` names something, and the loopback
   // address and `localhost` are always allowed either way.
-  const auth = new Auth(0, token, uiHostnames(config));
+  const guard = new Guard(0, uiHostnames(config));
   const supervisor = new Supervisor({
     store,
     baseUrl: process.env.DSH_BASE_URL ?? config.deepseekBaseUrl ?? DEFAULT_BASE_URL,
@@ -60,7 +71,11 @@ async function main(): Promise<void> {
   const server = await startServer({
     store,
     supervisor,
-    auth,
+    guard,
+    // A fixed port for the real home so the URL is worth bookmarking, and a
+    // random one for any other, so a dev or test home can run beside it. See
+    // `defaultDaemonPort`.
+    port: config.port ?? defaultDaemonPort(),
     ...(config.prices ? { prices: config.prices } : {}),
     uiDir: defaultUiDir(),
     onStop: shutdown,
@@ -69,7 +84,6 @@ async function main(): Promise<void> {
   writePrivateJson(daemonFile(), {
     port: server.port,
     pid: process.pid,
-    token,
     startedAt: new Date().toISOString(),
   });
 

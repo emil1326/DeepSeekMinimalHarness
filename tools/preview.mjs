@@ -222,19 +222,18 @@ if (!fs.existsSync(daemonFile)) {
   console.error('the daemon never came up');
   process.exit(1);
 }
-const { port, token } = JSON.parse(fs.readFileSync(daemonFile, 'utf8'));
+const { port } = JSON.parse(fs.readFileSync(daemonFile, 'utf8'));
 
 const post = (route, body) =>
   fetch(`http://127.0.0.1:${port}${route}`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body ?? {}),
   }).then((response) => response.json());
 
 const created = await post('/runs', { taskPath: taskFile, detached: true });
 console.log(`\n  a run is going: ${created.id}`);
-const { ticket } = await post('/ui/ticket');
-console.log(`  open this:  http://127.0.0.1:${port}/ui/session?ticket=${ticket}\n`);
+console.log(`  open this:  http://127.0.0.1:${port}/\n`);
 console.log(`  (temp folder: ${home}${keep ? ', kept' : ''})`);
 console.log('  ctrl-c to stop\n');
 

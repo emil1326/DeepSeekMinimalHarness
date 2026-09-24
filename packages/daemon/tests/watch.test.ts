@@ -49,9 +49,7 @@ function watch(
   daemon: TestDaemon,
   runId: string,
 ): { socket: WebSocket; seen: Messages; opened: Promise<void> } {
-  const socket = new WebSocket(`ws://127.0.0.1:${daemon.port}/runs/${runId}/watch`, {
-    headers: { authorization: `Bearer ${daemon.token}` },
-  });
+  const socket = new WebSocket(`ws://127.0.0.1:${daemon.port}/runs/${runId}/watch`);
   const seen: Messages = { events: [], hellos: 0, status: null, closed: false };
   socket.on('message', (raw: Buffer) => {
     const message = JSON.parse(raw.toString('utf8')) as {
@@ -236,13 +234,11 @@ describe('watching a run', () => {
     expect(viewer.seen.events.some((event) => event.type === 'summary')).toBe(true);
   });
 
-  it('refuses a watch on a run that does not exist, and one with no token', async () => {
+  it('refuses a watch on a run that does not exist, and one from a foreign page', async () => {
     daemon = await startTestDaemon(ONE_EDIT);
 
     const missing = await new Promise<string>((resolve, reject) => {
-      const socket = new WebSocket(`ws://127.0.0.1:${daemon?.port ?? 0}/runs/no-such-run/watch`, {
-        headers: { authorization: `Bearer ${daemon?.token ?? ''}` },
-      });
+      const socket = new WebSocket(`ws://127.0.0.1:${daemon?.port ?? 0}/runs/no-such-run/watch`);
       socket.on('message', (raw: Buffer) => {
         const message = JSON.parse(raw.toString('utf8')) as { type: string; status?: string };
         if (message.type === 'bye') resolve(message.status ?? '');
@@ -252,8 +248,10 @@ describe('watching a run', () => {
     });
     expect(missing).toBe('failed');
 
-    const unauthenticated = await new Promise<number>((resolve, reject) => {
-      const socket = new WebSocket(`ws://127.0.0.1:${daemon?.port ?? 0}/runs/whatever/watch`);
+    const foreign = await new Promise<number>((resolve, reject) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${daemon?.port ?? 0}/runs/whatever/watch`, {
+        headers: { 'sec-fetch-site': 'cross-site' },
+      });
       socket.on('unexpected-response', (_request, response) => {
         socket.terminate();
         resolve(response.statusCode ?? 0);
@@ -265,6 +263,6 @@ describe('watching a run', () => {
       socket.on('error', reject);
       setTimeout(() => reject(new Error('no answer to the upgrade')), 5000);
     });
-    expect(unauthenticated).toBe(401);
+    expect(foreign).toBe(403);
   });
 });

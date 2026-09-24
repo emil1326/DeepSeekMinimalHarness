@@ -103,19 +103,20 @@ successfully, because a broken upgrade there fails quietly.
 
 The proxy is the one place allowed to speak for the daemon, and it does not
 weaken anything: a foreign `Origin` sent straight to the daemon is still refused
-(`403`), and through the proxy the session cookie is `SameSite=Strict`, so a
-cross-site page still gets a `401`.
+(`403`), and a page that is not the UI cannot get past the header checks at all.
 
-## Signing in
+## No signing in
 
-`npm run dev` prints a one-time URL:
+There is nothing to sign in to. The daemon serves the UI, the UI talks to the
+daemon, and the only callers refused are web pages that are not this one. So
+`npm run dev` just prints where to go:
 
 ```
-sign in  http://localhost:5173/ui/session?ticket=...
+UI       http://localhost:5173
 ```
 
-That is the normal login, just rewritten to the Vite origin — `localhost` or the
-name you gave it, below. The ticket is good once and for a minute.
+The daemon itself is on a fixed port — `41777` unless `config.json` says
+otherwise — which is what makes the address worth bookmarking.
 
 ## Calling the UI something else
 

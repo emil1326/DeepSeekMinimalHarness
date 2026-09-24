@@ -1,17 +1,29 @@
 # The daemon's API
 
-Plain JSON over HTTP on `127.0.0.1`, plus two WebSockets. Every request needs
-the token from `daemon.json` as `Authorization: Bearer <token>`, except the two
-static routes and the one-time UI session link.
+Plain JSON over HTTP on `127.0.0.1`, plus three WebSockets. No credentials:
+no token, no cookie, no login. The CLI sends nothing, and neither does the page.
 
 Three checks run before anything else on every request and every upgrade:
 
-- the `Host` header must be `127.0.0.1:<port>` or `localhost:<port>`
-- an `Origin`, if present, must be the daemon's own
-- the token must be in the `Authorization` header or the session cookie
+- the `Host` header must be `127.0.0.1:<port>`, `localhost:<port>`, or a name from
+  `uiHosts` in `config.json`
+- an `Origin`, if present, must be the daemon's own — and `null` counts as foreign
+- `Sec-Fetch-Site`, if present, must be `same-origin` or `none`
 
-A localhost server is reachable from any web page, so without the first two a
-random site could drive agents. Without the third, so could any other program.
+A request carrying none of them — the CLI, `curl`, the Vite dev proxy — is
+allowed through. Those are programs running as this user, and a secret cannot
+defend a resource from a caller that can read the secret: this one was written to
+`daemon.json` in plain text, readable by every process it could plausibly have
+been protecting against, and the API key at `~/.deepseek/api_key` is readable by
+the same callers anyway.
+
+The threat that is left, and the only one these checks answer, is a **web page**.
+A localhost server is reachable from any page the browser has open, so without
+them a random site could POST `/runs/:id/cancel` — a route that takes no body — or
+start a run that spends money and writes files. `Host` closes DNS rebinding,
+`Origin` closes a cross-origin `fetch` and every form POST, and `Sec-Fetch-Site`
+is the one a page cannot forge, because browsers set it and forbid JavaScript
+from writing it. See `packages/daemon/src/guard.ts`.
 
 ## HTTP
 
@@ -29,10 +41,8 @@ random site could drive agents. Without the third, so could any other program.
 | `GET`  | `/stats`                   |                           | `{ runs, models: ModelStats[] }`                 |
 | `GET`  | `/runs/:id/timings`        |                           | `{ runId, wallMs, at, entries[] }`               |
 | `GET`  | `/timings`                 |                           | `{ runs, wallMs, entries[], process[] }`         |
-| `POST` | `/ui/ticket`               |                           | `{ ticket }`, single use, 60 s                   |
-| `GET`  | `/ui/session?ticket=`      |                           | `302` with the session cookie, or `403`          |
 | `POST` | `/daemon/stop`             |                           | `{ ok }`, then it stops                          |
-| `GET`  | `/` and `/assets/*`        |                           | the built UI, no token                           |
+| `GET`  | `/` and `/assets/*`        |                           | the built UI                                     |
 
 `by` is `claude`, `emil` or `agent`, and only decides the label in the UI. An
 answer with no `id` goes to the question the run is currently waiting on.
@@ -91,13 +101,22 @@ is the denominator a share needs.
 
 ## WebSockets
 
-Both take the token the same way, either as a bearer header or as `?token=` for
-a client that cannot set headers.
+There are three. None takes credentials; all three pass the same checks over the
+upgrade request as the HTTP routes do, because a socket is not a lesser door —
+closing the last owner's connection is what cancels a run.
 
 **`WS /runs/:id/attach`** streams one run and owns it. The daemon pings every
 5 s and cancels the run after 15 s with no pong, so a half-open connection (a
 process killed hard, a closed terminal) still ends the agent inside the second.
 If more than one client attaches, the run ends when the last one goes.
+
+**`WS /runs/:id/watch`** is the same stream without the ownership. It sees every
+event and a `bye` at the end, and it can neither start a run nor cancel one. This
+is what `dsh watch` uses, so a second terminal can follow a run without being able
+to end it.
+
+**`WS /events`** is a nudge channel for the UI: a message per change, and the UI
+fetches what changed.
 
 | Message                             | Meaning                               |
 | ----------------------------------- | ------------------------------------- |

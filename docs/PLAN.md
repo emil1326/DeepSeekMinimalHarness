@@ -104,7 +104,7 @@ The key is **not** in the task file. The daemon reads it from `~/.deepseek/api_k
 ## The daemon
 
 - Binds **127.0.0.1 only**, on a random free port. Writes `{port, pid, token}` to `%LOCALAPPDATA%/EmilsDeepSeekHarness/daemon.json`, readable by the user only.
-- **Every request needs the token** (bearer header for the CLI, a cookie set through a one-time URL for the UI). Also check `Host` is `127.0.0.1:<port>` or `localhost:<port>` and refuse any `Origin` that isn't the UI's own. A localhost server is reachable from any web page, so without this a random website could drive agents.
+- **Any local program may drive it; only a web page may not.** Three request headers decide that: `Host` must be this daemon (which is what stops DNS rebinding), an `Origin` if present must be the UI's own, and `Sec-Fetch-Site` if present must not be `cross-site`. A localhost server is reachable from any page the browser has open, so without these a random website could drive agents — and a *secret* cannot fix that, because it has to be handed out on the same machine to callers that can read it. There is no token, no cookie and no login. The port is fixed so the URL is worth bookmarking.
 - Started automatically by the first CLI call if it isn't running. `dsh daemon stop|status`.
 - On startup, any run left `running` by a crash becomes `interrupted`.
 

@@ -39,7 +39,7 @@ export class ApiFailure extends Error {
 export function readDaemonRecord(): DaemonRecord | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(daemonFile(), 'utf8')) as DaemonRecord;
-    if (typeof parsed.port !== 'number' || typeof parsed.token !== 'string') return null;
+    if (typeof parsed.port !== 'number' || typeof parsed.pid !== 'number') return null;
     return parsed;
   } catch {
     return null;
@@ -62,7 +62,7 @@ export class DaemonClient {
     try {
       response = await fetch(`${this.base}${path}`, {
         method,
-        headers: { authorization: `Bearer ${this.record.token}`, 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json' },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(30_000),
       });
@@ -89,9 +89,7 @@ export class DaemonClient {
 
   /** A socket for a run's events. Attaching is what owns the run. */
   attach(runId: string): WebSocket {
-    return new WebSocket(`ws://127.0.0.1:${this.record.port}/runs/${runId}/attach`, {
-      headers: { authorization: `Bearer ${this.record.token}` },
-    });
+    return new WebSocket(`ws://127.0.0.1:${this.record.port}/runs/${runId}/attach`);
   }
 
   /**
@@ -105,15 +103,11 @@ export class DaemonClient {
    * and can never start or stop anything.
    */
   watch(runId: string): WebSocket {
-    return new WebSocket(`ws://127.0.0.1:${this.record.port}/runs/${runId}/watch`, {
-      headers: { authorization: `Bearer ${this.record.token}` },
-    });
+    return new WebSocket(`ws://127.0.0.1:${this.record.port}/runs/${runId}/watch`);
   }
 
   notices(): WebSocket {
-    return new WebSocket(`ws://127.0.0.1:${this.record.port}/events`, {
-      headers: { authorization: `Bearer ${this.record.token}` },
-    });
+    return new WebSocket(`ws://127.0.0.1:${this.record.port}/events`);
   }
 
   events(runId: string, after = 0): Promise<{ events: RunEvent[] }> {
@@ -163,7 +157,6 @@ async function responds(record: DaemonRecord): Promise<boolean> {
   if (record.pid !== 0 && !isAlive(record.pid)) return false;
   try {
     const response = await fetch(`http://127.0.0.1:${record.port}/health`, {
-      headers: { authorization: `Bearer ${record.token}` },
       signal: AbortSignal.timeout(1500),
     });
     return response.ok;

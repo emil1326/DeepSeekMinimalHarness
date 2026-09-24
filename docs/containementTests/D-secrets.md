@@ -46,24 +46,36 @@ harness does not control.
 
 ---
 
-### D3 — `daemon.json`, which holds the token
+### D3 — `daemon.json`
 
-**Try:** from inside a check, read `<harness home>/daemon.json`, then use that token against
-`127.0.0.1:<port>`.
+**Try:** from inside a check, read `<harness home>/daemon.json`, then use whatever it holds against
+the daemon.
+
+**Result: moot, and that is the point.** This used to hold the daemon token, so the finding was
+that a check which could read the home could drive the daemon — including cancelling its own run.
+The harness now answers local programs with no credential at all, so there is nothing here to
+steal and nothing to revoke. The file holds `{port, pid, startedAt}` and nothing else; the token,
+the session cookie and the one-time login ticket are all gone. See
+`packages/daemon/src/guard.ts` and `docs/api.md`.
 
 **Why it can land:** the file is exactly where the user's own tools expect it, and a check
-process runs _as that user_, with that user's environment and unrestricted filesystem
-access. The sandbox's own tools cannot see it. A check is not restricted the same way.
-Reaching it needs C1 or C2 first, which is why those two are the keystones of this document.
+process runs _as that user_, with that user's environment and unrestricted filesystem access.
+The sandbox's own tools cannot see it. A check is not restricted the same way. Reaching it needs
+C1 or C2 first, which is why those two are the keystones of this document.
 
-**What it gets you:** the daemon. Start a run with any task and any worktree — including one
-outside the sandbox in every sense. Read the configuration of every run, which includes the
-task text and the allow lists, so every other task's contents. Cancel other people's work
-mid-flight. The token does not expire, and there is no revocation to reach for.
+**What it gets you, now:** the port, which is the fixed default anyway — `41777`. Reading the file
+buys a check a number it could have guessed. That is a real improvement over a token that never
+expires and cannot be revoked, and it is worth being precise about why: a secret stored where the
+caller can read it is not a secret, it is an extra step.
 
-**Settle it by:** from a check, in a scratch home with a throwaway token, whether the
-harness home is reachable and the file is there. This is the highest-consequence probe
-here — do not point it at a real home.
+**It does not close C1 or C2.** A check that can reach the network or spawn a process can still
+talk to the daemon, because the daemon answers local programs by design. What stops that is the
+sandbox, not this file. The guard in `guard.ts` answers exactly one threat — a web page — and it
+is worth keeping that separate from process containment rather than hoping one covers the other.
+
+**Settle it by:** from a check, in a scratch home, whether the harness home is reachable and the
+file is there — and what it holds. This is still worth probing, but the consequence is now a port
+number rather than the daemon.
 
 ---
 

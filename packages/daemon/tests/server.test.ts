@@ -18,11 +18,44 @@ const ONE_EDIT = [
 ];
 
 describe('the daemon', () => {
-  it('refuses a request that carries no token', async () => {
+  it('answers a request with no credentials at all', async () => {
+    // There is no login. The CLI, `curl` and the page all just talk to it, which
+    // is the whole point: this is one person's own machine, and a password he has
+    // to type to look at his own runs is a password that buys nothing — it would
+    // have been written in `daemon.json`, readable by every process it could
+    // plausibly have been protecting against.
     daemon = await startTestDaemon(ONE_EDIT);
-    const response = await daemon.request('GET', '/runs', { auth: false });
-    expect(response.status).toBe(401);
-    expect(String(response.body.error)).toContain('token');
+    const response = await daemon.request('GET', '/runs', {});
+    expect(response.status).toBe(200);
+  });
+
+  it('refuses a request from a page, which is the one thing that does need refusing', async () => {
+    // A localhost server is reachable from any page the browser has open, so a
+    // site could otherwise POST `/runs/.../cancel` — a route that takes no body —
+    // or start a run that spends money and writes files.
+    daemon = await startTestDaemon(ONE_EDIT);
+    const crossSite = await daemon.request('GET', '/runs', {
+      headers: { origin: 'https://example.com', 'sec-fetch-site': 'cross-site' },
+    });
+    expect(crossSite.status).toBe(403);
+
+    // The same page with no Origin at all, which is what a form POST used to look
+    // like: `Sec-Fetch-Site` is set by the browser and cannot be written by
+    // JavaScript, so it is the header a page cannot lie about.
+    const headerOnly = await daemon.request('GET', '/runs', {
+      headers: { 'sec-fetch-site': 'cross-site' },
+    });
+    expect(headerOnly.status).toBe(403);
+  });
+
+  it('allows the page it served, which sends same-origin', async () => {
+    // The control for the above, and the reason it does not break the UI: the
+    // UI's own fetches are same-origin, so this is what they look like.
+    daemon = await startTestDaemon(ONE_EDIT);
+    const response = await daemon.request('GET', '/runs', {
+      headers: { origin: `http://127.0.0.1:${daemon.port}`, 'sec-fetch-site': 'same-origin' },
+    });
+    expect(response.status).toBe(200);
   });
 
   it('refuses an Origin that is not the UI', async () => {
@@ -31,13 +64,20 @@ describe('the daemon', () => {
     expect(response.status).toBe(403);
   });
 
+  it('fails loudly when its fixed port is taken, rather than moving', async () => {
+    // The fixed port is what makes the URL bookmarkable, so a silent fallback to
+    // another number would be the worst of both: a stable address almost always,
+    // and a mystery the one time it matters. The message names the two ways out.
+    daemon = await startTestDaemon(ONE_EDIT);
+    const taken = daemon.port;
+    await expect(startTestDaemon(ONE_EDIT, { port: taken })).rejects.toThrowError(/already in use/);
+    await expect(startTestDaemon(ONE_EDIT, { port: taken })).rejects.toThrowError(/config\.json/);
+  });
+
   it("refuses Origin: null, which is what somebody else's page sends", async () => {
     // A sandboxed iframe and a `file://` page both send the literal string
     // "null", which is the one value that means "a page, but not a page I can
-    // name" while looking like "no page at all". The token is still the wall
-    // here, since a SameSite=Strict cookie is not sent cross-site, so this is
-    // depth rather than the defence. It costs nothing to refuse: the CLI and
-    // curl send no Origin at all rather than a null one.
+    // name" while looking like "no page at all".
     daemon = await startTestDaemon(ONE_EDIT);
     const response = await daemon.request('GET', '/runs', { headers: { origin: 'null' } });
     expect(response.status).toBe(403);
@@ -99,12 +139,11 @@ describe('the daemon', () => {
     expect(wrongOrigin.status).toBe(403);
   });
 
-  it('refuses an upgrade from a foreign Origin, and one with no token', async () => {
+  it('refuses an upgrade from a foreign Origin, and one from a foreign page', async () => {
     daemon = await startTestDaemon(ONE_EDIT);
     const foreign = await new Promise<number>((resolve, reject) => {
       const client = new WebSocket(`ws://127.0.0.1:${daemon?.port ?? 0}/events`, {
         origin: 'https://example.com',
-        headers: { authorization: `Bearer ${daemon?.token ?? ''}` },
       });
       client.on('unexpected-response', (_request, response) => {
         client.terminate();
@@ -119,8 +158,12 @@ describe('the daemon', () => {
     });
     expect(foreign).toBe(403);
 
-    const unauthenticated = await new Promise<number>((resolve, reject) => {
-      const client = new WebSocket(`ws://127.0.0.1:${daemon?.port ?? 0}/events`);
+    // The same is true without an Origin, because a socket is not a lesser door:
+    // closing the last owner's connection is what cancels a run.
+    const crossSite = await new Promise<number>((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${daemon?.port ?? 0}/events`, {
+        headers: { 'sec-fetch-site': 'cross-site' },
+      });
       client.on('unexpected-response', (_request, response) => {
         client.terminate();
         resolve(response.statusCode ?? 0);
@@ -132,7 +175,7 @@ describe('the daemon', () => {
       client.on('error', reject);
       setTimeout(() => reject(new Error('no answer to the upgrade')), 5000);
     });
-    expect(unauthenticated).toBe(401);
+    expect(crossSite).toBe(403);
   });
 
   it('prints every problem in a bad task file at once, with the path of the field', async () => {

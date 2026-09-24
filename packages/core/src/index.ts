@@ -176,7 +176,10 @@ export {
 } from './workspace.js';
 export {
   DEFAULT_BASE_URL,
+  DEFAULT_DAEMON_PORT,
   daemonConfigFile,
+  defaultDaemonPort,
+  defaultHarnessHome,
   daemonFile,
   harnessHome,
   keyFilePath,

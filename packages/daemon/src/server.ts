@@ -15,7 +15,7 @@ import {
   type RunStatus,
 } from '@emilswork/harness-core';
 import { strayChanges } from '@emilswork/harness-worker';
-import type { Auth } from './auth.js';
+import type { Guard } from './guard.js';
 import type { Supervisor } from './supervisor.js';
 import { RUN_TAGS, summarise, type Store } from './store.js';
 import type {
@@ -33,6 +33,7 @@ import type {
   TimingsResponse,
 } from './protocol.js';
 import { TaskError } from '@emilswork/harness-core';
+import { daemonConfigFile } from '@emilswork/harness-core';
 
 const HEARTBEAT_MS = 5000;
 const DEAD_AFTER_MS = 15_000;
@@ -41,7 +42,15 @@ const MAX_BODY = 1_000_000;
 export interface ServerOptions {
   store: Store;
   supervisor: Supervisor;
-  auth: Auth;
+  guard: Guard;
+  /**
+   * The port to bind, or 0 to let the OS pick one.
+   *
+   * A fixed port is the default because the URL is a thing a person bookmarks:
+   * a page that moves every restart is a page nobody keeps open. 0 is kept for
+   * tests, which run many daemons at once and care about none of them.
+   */
+  port?: number;
   prices?: PriceTable;
   /** The built UI, served from the daemon so `dsh ui` is the only way in. */
   uiDir?: string;
@@ -55,13 +64,13 @@ export interface HarnessServer {
 }
 
 export async function startServer(options: ServerOptions): Promise<HarnessServer> {
-  const { store, supervisor, auth } = options;
+  const { store, supervisor, guard } = options;
   const runSubscribers = new Map<string, Set<WebSocket>>();
   const noticeSubscribers = new Set<WebSocket>();
   const heartbeats = new WeakMap<WebSocket, { lastPong: number; runId: string | null; owns: boolean }>();
 
   const listen = (port: number): Promise<http.Server> =>
-    new Promise((resolve) => {
+    new Promise((resolve, reject) => {
       // Timed per route *pattern*, not per path: `/runs/:id/events` and not
       // `/runs/run-1a2b/events`, because a name per run id would be one row per
       // run for ever and the table would answer nothing.
@@ -69,11 +78,26 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
         timing.measure(`daemon.http.${routeNameOf(request.url ?? '/')}`, () => handleHttp(request, response));
       });
       server.on('upgrade', handleUpgrade);
+      // A port that is taken has to be said out loud. The previous version asked
+      // the OS for port 0 and took whatever it was given, which cannot fail — and
+      // also cannot be bookmarked, which is why it changed. Falling back to a
+      // random port on a collision would be the worst of both: a stable URL
+      // almost always, and a mystery the one time it matters.
+      server.on('error', (error: NodeJS.ErrnoException) => {
+        reject(
+          error.code === 'EADDRINUSE'
+            ? new Error(
+                `port ${port} is already in use, so the daemon cannot start. Stop whatever holds it, ` +
+                  `or set "port" in ${daemonConfigFile()} to another number, or to 0 to take any free one`,
+              )
+            : error,
+        );
+      });
       server.listen(port, '127.0.0.1', () => resolve(server));
     });
 
-  const httpServer = await listen(0);
-  auth.setPort(portOf(httpServer));
+  const httpServer = await listen(options.port ?? 0);
+  guard.setPort(portOf(httpServer));
 
   const wss = new WebSocketServer({ noServer: true });
 
@@ -133,15 +157,11 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
       socket.write(`HTTP/1.1 ${code} ${message}\r\nConnection: close\r\n\r\n`);
       socket.destroy();
     };
-    if (!auth.checkHost(request.headers.host)) return refuse('403', 'Forbidden');
-    if (!auth.checkOrigin(request.headers.origin)) return refuse('403', 'Forbidden');
-
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? '127.0.0.1'}`);
-    const bearer =
-      auth.checkBearer(request.headers.authorization) || auth.checkCookie(request.headers.cookie);
-    const queryToken = url.searchParams.get('token');
-    const authorised = bearer || (queryToken !== null && auth.checkBearer(`Bearer ${queryToken}`));
-    if (!authorised) return refuse('401', 'Unauthorized');
+    // The same one check the HTTP side uses. A socket is not a lesser door: it
+    // is how a run is cancelled, because closing the last owner's connection is
+    // what cancels it.
+    if (guard.refuse(request.headers) !== null) return refuse('403', 'Forbidden');
 
     const attach = /^\/runs\/([^/]+)\/attach$/.exec(url.pathname);
     const watch = /^\/runs\/([^/]+)\/watch$/.exec(url.pathname);
@@ -217,36 +237,17 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
   function handleHttp(request: http.IncomingMessage, response: http.ServerResponse): void {
     const url = new URL(request.url ?? '/', `http://${request.headers.host ?? '127.0.0.1'}`);
 
-    if (!auth.checkHost(request.headers.host) || !auth.checkOrigin(request.headers.origin)) {
-      return send(response, 403, { error: 'this daemon only answers its own host and origin' });
-    }
-
-    // The UI logs in through a one-time ticket, so the token never rides in a URL.
-    if (request.method === 'GET' && url.pathname === '/ui/session') {
-      if (!auth.redeemTicket(url.searchParams.get('ticket'))) {
-        return send(response, 403, { error: 'that ticket is spent or unknown' });
-      }
-      response.writeHead(302, { 'set-cookie': auth.sessionCookie(), location: '/' });
-      response.end();
-      return;
-    }
-
-    const authed =
-      auth.checkBearer(request.headers.authorization) || auth.checkCookie(request.headers.cookie);
+    // One check for the whole API, where there used to be a bearer token, a
+    // session cookie and a one-time ticket. See `guard.ts` for what it refuses
+    // and why a secret was the wrong instrument for this.
+    const refusal = guard.refuse(request.headers);
+    if (refusal !== null) return send(response, 403, { error: refusal });
 
     if (request.method === 'GET' && url.pathname.startsWith('/assets')) {
       return serveStatic(response, url.pathname);
     }
     if (request.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
       return serveStatic(response, '/index.html');
-    }
-
-    if (!authed) {
-      return send(response, 401, { error: 'a bearer token or a session cookie is required' });
-    }
-
-    if (request.method === 'POST' && url.pathname === '/ui/ticket') {
-      return send(response, 200, { ticket: auth.issueTicket() });
     }
 
     if (request.method === 'GET' && url.pathname === '/health') {

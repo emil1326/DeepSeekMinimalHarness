@@ -156,9 +156,8 @@ hits.
 ## Deliberate deviations
 
 - **`node:http` rather than `fastify`.** The route table is small and the plan's
-  list of things to check by hand (Host, Origin, bearer, cookie, ticket) is
-  clearer written directly against the request than configured through a
-  framework.
+  list of things to check by hand (Host, Origin, Sec-Fetch-Site) is clearer
+  written directly against the request than configured through a framework.
 - **`better-sqlite3` rather than the built-in `node:sqlite`.** Node 22's is
   still flagged experimental and prints a warning on every start.
 - **Vite 8, Vitest 5, plugin-react 6.** The first pairing (Vite 6 with Vitest 2)

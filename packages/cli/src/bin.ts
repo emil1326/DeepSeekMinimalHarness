@@ -933,18 +933,19 @@ program
 
 program
   .command('ui')
-  .description('open the UI, logged in')
+  .description('open the UI')
   .action(() =>
     guard(async () => {
       const client = await DaemonClient.connect();
-      const { ticket } = await client.json<{ ticket: string }>('POST', '/ui/ticket');
-      // The name from `config.json` when there is one. It has to be the name the
-      // browser ends up on, because the session cookie is set for the host it
-      // was sent to: signing in at 127.0.0.1 and then browsing at another name
-      // is a second, empty session. `DaemonClient` still talks to the loopback
-      // address itself, which is the host the daemon always answers to.
+      // No ticket, no cookie, no session. The daemon serves the page and the page
+      // talks to the daemon, so a browser that can reach the address is already
+      // the operator's own browser — which is what the guard checks.
+      //
+      // The name from `config.json` when there is one, because that is the name a
+      // person will type tomorrow as well; `DaemonClient` keeps talking to the
+      // loopback address itself, which is the host the daemon always answers to.
       const [name] = uiHostnames(loadHarnessConfig());
-      const url = `http://${name ?? '127.0.0.1'}:${client.port}/ui/session?ticket=${ticket}`;
+      const url = `http://${name ?? '127.0.0.1'}:${client.port}/`;
       process.stdout.write(`${url}\n`);
       openBrowser(url);
     }),

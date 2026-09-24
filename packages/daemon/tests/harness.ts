@@ -4,14 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
-import {
-  Auth,
-  newToken,
-  startServer,
-  Store,
-  Supervisor,
-  type HarnessServer,
-} from '@emilswork/harness-daemon';
+import { Guard, startServer, Store, Supervisor, type HarnessServer } from '@emilswork/harness-daemon';
 import type { RunEvent } from '@emilswork/harness-core';
 import { startFakeDeepSeek, type FakeServer, type ScriptedTurn } from '../../core/tests/fake-server.js';
 import { createFixture, type Fixture } from '../../worker/tests/fixture.js';
@@ -25,7 +18,6 @@ export interface HttpResponse {
 
 export interface TestDaemon {
   port: number;
-  token: string;
   url: string;
   store: Store;
   supervisor: Supervisor;
@@ -34,7 +26,7 @@ export interface TestDaemon {
   request(
     method: string,
     route: string,
-    options?: { body?: unknown; headers?: Record<string, string>; auth?: boolean },
+    options?: { body?: unknown; headers?: Record<string, string> },
   ): Promise<HttpResponse>;
   attach(runId: string): WebSocket;
   collect(runId: string): Promise<RunEvent[]>;
@@ -43,7 +35,7 @@ export interface TestDaemon {
 
 export async function startTestDaemon(
   script: ScriptedTurn[],
-  options: { uiHosts?: string[] } = {},
+  options: { uiHosts?: string[]; port?: number } = {},
 ): Promise<TestDaemon> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-daemon-'));
   const keyFile = path.join(home, 'api_key');
@@ -53,15 +45,32 @@ export async function startTestDaemon(
   const fake = await startFakeDeepSeek(script);
   const fixture = createFixture();
   const store = new Store(path.join(home, 'runs.db'));
-  const token = newToken();
-  const auth = new Auth(0, token, options.uiHosts ?? []);
+  const guard = new Guard(0, options.uiHosts ?? []);
   const supervisor = new Supervisor({
     store,
     baseUrl: fake.url,
     workerScript: WORKER_SCRIPT,
     unattachedGraceMs: 30_000,
   });
-  const server: HarnessServer = await startServer({ store, supervisor, auth });
+  // Port 0 by default: several test daemons run at once and none of them cares
+  // where it lands. The production default is a fixed port, and `server.test.ts`
+  // covers what happens when it is taken.
+  //
+  // Cleaned up on the way out if the bind fails, because the test that expects a
+  // failure is exactly the one that would otherwise leak a fake API server, a
+  // SQLite handle and a temp directory — and a leaked listener is a handle that
+  // can keep the whole run from exiting.
+  let server: HarnessServer;
+  try {
+    server = await startServer({ store, supervisor, guard, port: options.port ?? 0 });
+  } catch (error) {
+    store.close();
+    await fake.close();
+    fixture.cleanup();
+    fs.rmSync(home, { recursive: true, force: true });
+    delete process.env.DSH_KEY_FILE;
+    throw error;
+  }
 
   const request: TestDaemon['request'] = (method, route, options = {}) =>
     new Promise<HttpResponse>((resolve, reject) => {
@@ -69,8 +78,9 @@ export async function startTestDaemon(
       const headers: Record<string, string> = {
         host: `127.0.0.1:${server.port}`,
         'content-type': 'application/json',
-        ...(options.auth === false ? {} : { authorization: `Bearer ${token}` }),
         ...(payload === null ? {} : { 'content-length': String(payload.length) }),
+        // Overridable so a test can send what a foreign page would: an Origin
+        // that is not ours, or `Sec-Fetch-Site: cross-site`.
         ...options.headers,
       };
       const call = http.request(
@@ -91,23 +101,17 @@ export async function startTestDaemon(
 
   return {
     port: server.port,
-    token,
     url: `http://127.0.0.1:${server.port}`,
     store,
     supervisor,
     fake,
     fixture,
     request,
-    attach: (runId) =>
-      new WebSocket(`ws://127.0.0.1:${server.port}/runs/${runId}/attach`, {
-        headers: { authorization: `Bearer ${token}` },
-      }),
+    attach: (runId) => new WebSocket(`ws://127.0.0.1:${server.port}/runs/${runId}/attach`),
     collect: (runId) =>
       new Promise<RunEvent[]>((resolve, reject) => {
         const events: RunEvent[] = [];
-        const socket = new WebSocket(`ws://127.0.0.1:${server.port}/runs/${runId}/attach`, {
-          headers: { authorization: `Bearer ${token}` },
-        });
+        const socket = new WebSocket(`ws://127.0.0.1:${server.port}/runs/${runId}/attach`);
         const timer = setTimeout(() => {
           socket.terminate();
           reject(new Error(`run ${runId} did not finish: ${JSON.stringify(events.slice(-3))}`));

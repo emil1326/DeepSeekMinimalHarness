@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { samePath } from './paths.js';
 import type { PriceTable } from './metrics.js';
 
 /** Where the key lives. Only the daemon and the worker ever read this. */
@@ -27,6 +28,11 @@ export function readApiKey(): string {
 
 export function harnessHome(): string {
   if (process.env.DSH_HOME) return path.resolve(process.env.DSH_HOME);
+  return defaultHarnessHome();
+}
+
+/** Where the harness lives when nothing overrides it. */
+export function defaultHarnessHome(): string {
   const local = process.env.LOCALAPPDATA;
   return local
     ? path.join(local, 'EmilsDeepSeekHarness')
@@ -45,11 +51,45 @@ export function daemonConfigFile(): string {
   return path.join(harnessHome(), 'config.json');
 }
 
+/**
+ * The daemon's address, written by the daemon and read by the CLI.
+ *
+ * No token. There was one, and it was the wrong instrument: it was written here
+ * in plain text, readable by any program running as this user, so it could not
+ * defend against the only callers a local secret could plausibly be for. The
+ * daemon now checks three request headers instead — see `guard.ts`.
+ */
 export interface DaemonRecord {
   port: number;
   pid: number;
-  token: string;
   startedAt: string;
+}
+
+/**
+ * The port the daemon binds when `config.json` does not say otherwise.
+ *
+ * Deliberately below 49152, which is where Windows starts handing out ephemeral
+ * ports: a fixed port inside that range would collide with a transient
+ * allocation sooner or later, and the failure would look random.
+ */
+export const DEFAULT_DAEMON_PORT = 41777;
+
+/**
+ * The port this home's daemon binds, before `config.json` is consulted.
+ *
+ * The real home gets the fixed one, so its URL can be bookmarked and survives a
+ * restart. Any **other** home gets a random port instead, and that is not a
+ * fallback but the point: a port is a machine-wide resource, so two homes holding
+ * the same number cannot both be up. The dev loop and the test suite each run a
+ * daemon beside the real one, and a fixed port everywhere would mean starting one
+ * of them failing with "already in use" — which is exactly what happened the
+ * first time this was written as a plain constant.
+ *
+ * A scratch home that wants a stable URL can still have one by naming a port in
+ * its own `config.json`.
+ */
+export function defaultDaemonPort(home = harnessHome()): number {
+  return samePath(home, defaultHarnessHome()) ? DEFAULT_DAEMON_PORT : 0;
 }
 
 export interface HarnessConfig {
@@ -78,6 +118,14 @@ export interface HarnessConfig {
    * program can do for you.
    */
   uiHosts?: string[];
+  /**
+   * The port the daemon binds.
+   *
+   * Defaults to `defaultDaemonPort()`: the fixed `DEFAULT_DAEMON_PORT` for the
+   * real home, and a random one for any other, so a scratch home cannot collide
+   * with it. Set `0` to ask the OS for any free port whatever the home is.
+   */
+  port?: number;
 }
 
 /**
