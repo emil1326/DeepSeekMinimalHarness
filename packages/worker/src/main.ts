@@ -11,14 +11,19 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_LIMITS,
   DeepSeekClient,
   Sandbox,
   SandboxRefusal,
+  checkPassed,
+  harnessHome,
   readApiKey,
   realPath,
+  timing,
+  writePrivateText,
   writeTranscript,
   type RunEventBody,
   type RunLimits,
@@ -33,9 +38,27 @@ function send(message: WorkerToDaemon): void {
   process.send?.(message);
 }
 
-/** The daemon stamps the sequence number and the run id; this adds the time. */
+/**
+ * The daemon stamps the sequence number and the run id; this adds the time.
+ *
+ * Timed, because this is the harness's own IPC and a tool result is a string of
+ * up to 8000 characters that is serialised, copied across a pipe and parsed on
+ * the other side on every single call. If a run's overhead is anywhere, it is
+ * here, and nothing else in the harness could show it.
+ */
 function emit(body: RunEventBody): void {
-  send({ type: 'event', body, at: new Date().toISOString() });
+  timing.measure('worker.emit', () => send({ type: 'event', body, at: new Date().toISOString() }));
+}
+
+/**
+ * The stopwatch's readings, handed to the daemon.
+ *
+ * Cumulative, so the daemon replaces this run's rows rather than adding to
+ * them. Called at every turn boundary and once more before the run says it is
+ * done, because the last flush is the one that would be lost to a kill.
+ */
+function flushTimings(): void {
+  send({ type: 'timings', snapshot: timing.snapshot() });
 }
 
 const controller = new AbortController();
@@ -100,6 +123,9 @@ function tellThenExit(status: RunStatus, summary: string | null, detail?: string
   if (exiting) return;
   exiting = true;
   if (detail !== undefined) emit({ type: 'error', message: detail });
+  // Before `done`, because the daemon may stop the worker the moment it sees
+  // one and the readings of a cancelled run are the interesting ones.
+  flushTimings();
   send({ type: 'done', status, summary });
   setTimeout(() => process.exit(0), 30);
 }
@@ -125,23 +151,30 @@ async function start(config: WorkerStart): Promise<void> {
       /* the worker entry above is the load-bearing one */
     }
 
-    sandbox = new Sandbox({
-      root,
-      allow: config.config.allow,
-      profile: config.config.resolvedProfile,
-      checkNames: config.config.checks,
-      // The project's own commands, which become tools, and the environment
-      // they run in. Both came from the workspace and were resolved once, when
-      // the task was read, so nothing here has to know what they mean.
-      commands: config.config.commands,
-      env: config.config.env,
-      soft: config.config.soft,
-    });
+    const built = timing.measure(
+      'worker.setup.sandbox',
+      () =>
+        new Sandbox({
+          root,
+          allow: config.config.allow,
+          profile: config.config.resolvedProfile,
+          checkNames: config.config.checks,
+          // The project's own commands, which become tools, and the environment
+          // they run in. Both came from the workspace and were resolved once, when
+          // the task was read, so nothing here has to know what they mean.
+          commands: config.config.commands,
+          env: config.config.env,
+          soft: config.config.soft,
+        }),
+    );
+    sandbox = built;
     running = sandbox;
 
     // Taken before the agent makes a single call, so the report at the end can
     // tell what this run did from what was already there. See `reportStray`.
-    const baseline = snapshotChanges(root);
+    const baseline = timing.measure('worker.setup.baseline', () => snapshotChanges(root));
+
+    await timing.measureAsync('worker.setup.workspace', () => runSetup(built, config));
 
     // The task's own limits, into the live object the loop reads.
     Object.assign(limits, config.config.limits);
@@ -184,6 +217,19 @@ async function start(config: WorkerStart): Promise<void> {
         // carried on from exactly where it got to, with its prefix intact and
         // therefore with the prompt cache still hitting.
         onTranscript: (messages) => writeTranscript(config.runId, messages),
+        // The readings, once per turn and once before the exit, so that a run
+        // stopped by a kill still reports the turns it managed.
+        flushTimings,
+        // So a run that asks a question nobody is watching does not spend its
+        // whole allowance waiting for an answer that is not coming.
+        onQuestion: (id, question) => {
+          const onAsk = config.config.onAsk;
+          if (onAsk === null || sandbox === undefined) return;
+          sandbox.notify(onAsk.run, `${question}\n`, {
+            DSH_RUN: config.runId,
+            DSH_QUESTION: id,
+          });
+        },
       },
       control,
     );
@@ -199,6 +245,59 @@ async function start(config: WorkerStart): Promise<void> {
 }
 
 /**
+ * The project's setup steps, run once per worktree rather than once per run.
+ *
+ * The case that prompted it: a project whose routing tests all failed for a
+ * missing DLL unless one crate had been built first, which is a `cargo build
+ * -p x` and not something a task file should have to know. Once per worktree
+ * because it is a property of the tree, not of the run, and the marker file is
+ * how that is remembered across runs and across restarts.
+ *
+ * A step that fails does not stop the run. It is announced, and the agent gets
+ * to work in a tree where something is missing, which is very often recoverable
+ * — and a harness that refused to start would be trading a likely success for a
+ * certain failure.
+ */
+async function runSetup(sandbox: Sandbox, config: WorkerStart): Promise<void> {
+  const steps = config.config.setup;
+  if (steps.length === 0) return;
+  const marker = setupMarker(config.config.worktree, steps);
+  if (fs.existsSync(marker)) return;
+
+  emit({ type: 'status', status: 'running', detail: `setup: ${steps.length} step(s)` });
+  for (const step of steps) {
+    const argv = step.run;
+    const output = await sandbox.run(argv, (step.timeoutSeconds ?? 300) * 1000);
+    if (!checkPassed(output)) {
+      emit({
+        type: 'error',
+        message: `setup step \`${argv.join(' ')}\` did not pass, so the worktree may not be ready:\n${output.slice(0, 2000)}`,
+      });
+    }
+  }
+  // Written only after every step has been attempted, so a setup that failed
+  // half way is retried by the next run rather than being remembered as done.
+  try {
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    writePrivateText(marker, `${new Date().toISOString()}\n`);
+  } catch {
+    /* best effort: a missing marker costs a repeated setup, not a lost run */
+  }
+}
+
+/**
+ * Where the record of "this worktree has been set up" lives.
+ *
+ * Keyed by the worktree *and* the steps, so editing the steps re-runs them, and
+ * so two worktrees of one project are set up independently. In the harness home
+ * rather than the worktree: it must not turn up in the run's own diff.
+ */
+function setupMarker(worktree: string, steps: unknown): string {
+  const key = createHash('sha256').update(worktree).update(JSON.stringify(steps)).digest('hex');
+  return path.join(harnessHome(), 'setup', `${key.slice(0, 16)}.done`);
+}
+
+/**
  * Anything changed since this run started, reported however it got changed.
  *
  * The baseline is the whole point of the split. Without it, a second run in a
@@ -207,7 +306,12 @@ async function start(config: WorkerStart): Promise<void> {
  * one file that this run really did touch on the wrong side of a line.
  */
 function reportStray(root: string, sandbox: Sandbox, baseline: Iterable<string>): void {
-  const stray = strayChanges(root, sandbox.allow, { soft: sandbox.soft, baseline });
+  // A `git status -uall` over the whole worktree, at the end of every run and
+  // after the model has stopped billing: it costs nothing but time, and this is
+  // the only place that time is visible.
+  const stray = timing.measure('worker.stray.report', () =>
+    strayChanges(root, sandbox.allow, { soft: sandbox.soft, baseline }),
+  );
   if (stray.failure !== null) {
     // Said out loud rather than passed over. "Could not tell" and "nothing
     // stray" are different answers, and reporting the second when the first is

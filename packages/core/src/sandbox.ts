@@ -124,6 +124,15 @@ export const CHECK_TIMEOUT_MS = 15 * 60 * 1000;
  */
 export const COMMAND_TIMEOUT_S = 120;
 
+/**
+ * How long a notification script gets.
+ *
+ * Short, and nothing waits on it either way: a `curl` or a `notify-send` that
+ * has not answered in this long is not going to, and leaving it running would
+ * mean a process per question accumulating against a run.
+ */
+export const NOTIFY_TIMEOUT_MS = 10_000;
+
 export class SandboxRefusal extends Error {
   constructor(message: string) {
     super(message);
@@ -717,16 +726,16 @@ export class Sandbox {
     for (const [key, value] of Object.entries(process.env)) {
       if (!SECRET_ENV.test(key)) env[key] = value;
     }
-    if (this.envOverride !== undefined) {
-      Object.assign(env, this.envOverride);
-    } else {
-      // A profile used on its own, with no workspace above it. `{parent}` is
-      // the only placeholder this ever had; the workspace layer adds the rest
-      // and resolves them before the sandbox sees them.
-      for (const [key, value] of Object.entries(this.profile.env ?? {})) {
-        env[key] = value.replace('{parent}', path.dirname(this.root));
-      }
+    // The profile's own environment first, then a workspace's resolved values
+    // over the top. Cumulative rather than either-or: a sandbox built straight
+    // from a profile, with no workspace above it, still has to get the profile's
+    // variables, and a workspace that overrides one variable must not lose the
+    // rest. `{parent}` and `{worktree}` are substituted here for that first case
+    // — when a workspace is involved, `task.ts` has already resolved them.
+    for (const [key, value] of Object.entries(this.profile.env ?? {})) {
+      env[key] = value.replace(/\{parent\}/g, path.dirname(this.root)).replace(/\{worktree\}/g, this.root);
     }
+    Object.assign(env, this.envOverride ?? {});
     buildEnv.end(Object.keys(env).length);
 
     // A PATH scan with a `statSync` per candidate on Windows, so this can be
@@ -793,6 +802,46 @@ export class Sandbox {
   killChecks(): void {
     for (const pid of this.active) killTree(pid);
     this.active.clear();
+  }
+
+  /**
+   * Tell somebody that the agent has asked a question.
+   *
+   * Fire and forget, and deliberately not a tool: this is the harness using a
+   * command the project declared, not the model choosing to run one. The point
+   * is that a run which stops to ask something nobody is watching must not wait
+   * an hour in silence — measured, a run that asked "may I edit this line?" and
+   * got no answer burned its whole allowance waiting.
+   *
+   * The question goes in on stdin, and `DSH_RUN` and `DSH_QUESTION` go in the
+   * environment, because those are the two places a notification script will
+   * look. A failure is swallowed on purpose: a notification that cannot be sent
+   * must not stop the run it is notifying about.
+   */
+  notify(argv: string[], payload: string, env: Record<string, string>): void {
+    if (argv.length === 0) return;
+    const childEnv: NodeJS.ProcessEnv = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (!SECRET_ENV.test(key)) childEnv[key] = value;
+    }
+    Object.assign(childEnv, this.envOverride ?? {}, env);
+    try {
+      const child = spawnTool([resolveExecutable(argv[0] ?? ''), ...argv.slice(1)], {
+        cwd: this.root,
+        env: childEnv,
+      });
+      const pid = child.pid ?? -1;
+      this.active.add(pid);
+      child.on('close', () => this.active.delete(pid));
+      child.on('error', () => this.active.delete(pid));
+      child.stdin?.end(payload);
+      // A notification that hangs is a leak, not an answer. Short, because
+      // nothing about the run waits on it either way.
+      const timer = setTimeout(() => killTree(pid), NOTIFY_TIMEOUT_MS);
+      timer.unref();
+    } catch {
+      /* a notification is best effort, and never a reason to lose a run */
+    }
   }
 
   record(entry: Record<string, unknown>): void {

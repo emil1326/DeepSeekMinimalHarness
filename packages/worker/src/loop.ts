@@ -15,6 +15,7 @@ import {
   limitUse,
   priceFor,
   taskMessage,
+  timing,
   toolNames,
   toolSpecs,
   totalsOf,
@@ -119,6 +120,27 @@ export interface LoopOptions {
    * filesystem and a test can watch it without one.
    */
   onTranscript?: (messages: ChatMessage[]) => void;
+  /**
+   * Called the moment the agent asks a question.
+   *
+   * Synchronous and best effort. It exists because of a real run that asked
+   * "may I edit a line of wire.rs?" and waited a full hour for nobody: whoever
+   * launched it had walked away, and the run had no way to say so. Nothing here
+   * can answer the question — the loop still blocks — but somebody who is told
+   * can run `dsh reply`.
+   */
+  onQuestion?: (id: string, question: string) => void;
+  /**
+   * Hand the stopwatch's readings over, cumulative.
+   *
+   * Called once per turn and once more before the run reports itself done. The
+   * per-turn call is what makes the readings survive a run that is killed
+   * rather than finished: a process tree kill takes the memory with it, and a
+   * run that is cancelled at turn thirty is exactly the run whose timings
+   * somebody wants. Handed out rather than sent from here, because this file
+   * knows nothing about IPC.
+   */
+  flushTimings?: () => void;
 }
 
 export interface LoopControl {
@@ -348,19 +370,24 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
     const thoughts = new TextBuffer((text) => emit({ type: 'thinking.delta', turn, text }));
     let outcome;
     try {
-      outcome = await client.stream({
-        model: config.model,
-        messages,
-        tools: specs,
-        signal: control.signal,
-        onText: (delta) => buffer.push(delta),
-        onReasoning: (delta) => thoughts.push(delta),
-        // A 429 or a 503 costs up to eight seconds of waiting before the next
-        // attempt, and until this existed nothing at all recorded it: the run
-        // simply sat there, and the stall was indistinguishable from a slow
-        // model. The client had the hook; nothing was listening.
-        onRetry: (info) => emit({ type: 'retry', turn, ...info }),
-      });
+      // One span for the call as a whole, next to the finer `core.deepseek.*`
+      // ones inside it. The difference between the two is the loop's own
+      // overhead around the call, and the count is the number of turns.
+      outcome = await timing.measureAsync(`worker.turn.model`, () =>
+        client.stream({
+          model: config.model,
+          messages,
+          tools: specs,
+          signal: control.signal,
+          onText: (delta) => buffer.push(delta),
+          onReasoning: (delta) => thoughts.push(delta),
+          // A 429 or a 503 costs up to eight seconds of waiting before the next
+          // attempt, and until this existed nothing at all recorded it: the run
+          // simply sat there, and the stall was indistinguishable from a slow
+          // model. The client had the hook; nothing was listening.
+          onRetry: (info) => emit({ type: 'retry', turn, ...info }),
+        }),
+      );
     } catch (error) {
       buffer.drain();
       thoughts.drain();
@@ -415,8 +442,17 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
       if (name === 'ask') {
         const question = typeof args.question === 'string' ? args.question : '(no question given)';
         emit({ type: 'question', id: call.id, question });
+        // Before the wait, not after: the whole value of the notification is
+        // that it arrives while somebody could still do something about it.
+        try {
+          options.onQuestion?.(call.id, question);
+        } catch {
+          /* a notification must never be a reason to lose a run */
+        }
         emit({ type: 'status', status: 'waiting', detail: question });
-        const answer = await control.waitForAnswer(call.id, limits.askSeconds * 1000, control.signal);
+        const answer = await timing.measureAsync('worker.ask.wait', () =>
+          control.waitForAnswer(call.id, limits.askSeconds * 1000, control.signal),
+        );
         if (answer === null) {
           if (control.signal.aborted) return { status: 'cancelled', summary };
           const detail = `nothing came back within ${limits.askSeconds} s of waiting for an answer`;
@@ -476,6 +512,10 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
     // one between the call and its result would make the run uncontinuable at
     // exactly the moment somebody wants to continue it.
     save();
+    // And the readings, at the same boundary. Cumulative, so the daemon replaces
+    // this run's rows rather than adding to them and a flush that arrives twice
+    // cannot double a figure.
+    options.flushTimings?.();
   }
 
   // The loop ran out by counting up to `turns`, which is the same thing as the
@@ -521,6 +561,24 @@ interface ToolOutcome {
  * command names had to be known to the harness.
  */
 async function runTool(
+  sandbox: Sandbox,
+  name: string,
+  args: Record<string, unknown>,
+  known: Set<string>,
+): Promise<ToolOutcome> {
+  // Named for the tool, and for the project's own commands by their own name,
+  // so the row a reader wants ("the test suite took 40 s") exists. A name the
+  // run does not offer is recorded as `unknown` rather than as itself: the name
+  // comes from the model, and a model that invents a hundred of them must not
+  // be able to invent a hundred rows.
+  return timing.measureAsync(
+    `worker.tool.${known.has(name) ? name : 'unknown'}`,
+    () => runToolCall(sandbox, name, args, known),
+    (outcome) => outcome.result.length,
+  );
+}
+
+async function runToolCall(
   sandbox: Sandbox,
   name: string,
   args: Record<string, unknown>,

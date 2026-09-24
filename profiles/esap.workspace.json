@@ -1,0 +1,92 @@
+{
+  "name": "esap",
+  "description": "Emil's Super App Planner. Copy this to dsh.workspace.json in the project and change what is untrue of yours.",
+
+  "model": "deepseek-flash",
+  "profiles": { "default": "profiles/esap.json" },
+  "defaultProfile": "default",
+
+  "env": {
+    "CARGO_TARGET_DIR": "{worktree}-target"
+  },
+
+  "rules": "esap.rules.md",
+
+  "soft": ["ui/*.spec.ts", "crates/*/tests/**"],
+
+  "askSeconds": 300,
+
+  "setup": [
+    {
+      "when": ["Cargo.toml"],
+      "run": ["cargo", "build", "-p", "emils-planner-avoid"],
+      "timeoutSeconds": 600
+    }
+  ],
+
+  "onAsk": {
+    "run": ["node", "notify.mjs"],
+    "timeoutSeconds": 15
+  },
+
+  "checks": {
+    "cargo_check": { "run": ["cargo", "check", "--workspace", "--all-targets"] }
+  },
+
+  "commands": {
+    "run_test": {
+      "description": "Run one Rust test target that this task owns. Not the whole suite: name a target from the list.",
+      "args": {
+        "target": {
+          "description": "the crate and test name, as in plain-core:comments",
+          "values": [
+            "emils-planner-core:comments",
+            "emils-planner-core:fields",
+            "emils-planner-avoid:routing",
+            "emils-planner-wire:registry"
+          ]
+        }
+      },
+      "run": ["cargo", "test", "-p", "{target}"],
+      "timeoutSeconds": 90,
+      "keep": "^(error|warning|failures|test result|---- )",
+      "executes": true
+    },
+
+    "ui_spec": {
+      "description": "Run one Playwright UI spec by name. It takes the project's machine lock, so it waits if another measurement is running.",
+      "args": {
+        "name": {
+          "description": "the spec file's name, without the extension",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        }
+      },
+      "run": ["cargo", "xtask", "ui", "{name}"],
+      "timeoutSeconds": 300,
+      "keep": "^(Error|expect|at |.*failed)",
+      "executes": true
+    },
+
+    "vitest": {
+      "description": "Run one vitest file that this task owns.",
+      "args": {
+        "file": {
+          "description": "a path under src/, as written for vitest",
+          "pattern": "^src/[A-Za-z0-9_./-]+\\.test\\.ts$"
+        }
+      },
+      "run": ["npx", "vitest", "run", "{file}"],
+      "timeoutSeconds": 120,
+      "keep": "^(FAIL|✓|×|Tests |AssertionError)",
+      "executes": true
+    },
+
+    "every_command": {
+      "description": "Run the registry test that checks every core command is reachable from a menu and on NOT_BUILT while the app does not run it. Needs ui_spec to have passed first.",
+      "run": ["cargo", "test", "-p", "emils-planner-core", "--test", "registry", "every_command"],
+      "timeoutSeconds": 90,
+      "keep": "^(error|test result|---- )",
+      "executes": true
+    }
+  }
+}
