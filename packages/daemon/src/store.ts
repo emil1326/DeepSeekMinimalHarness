@@ -156,6 +156,16 @@ function rowOf(row: TimingRow): TimingStat {
 export class Store {
   private readonly db: Db;
   private readonly prices: PriceTable | undefined;
+  /**
+   * What every run cost, kept between calls.
+   *
+   * It is derived by reading and parsing every `metrics` event in the database —
+   * 3,158 of them here — and it was recomputed on every `/runs`, every `/stats`,
+   * and every `/runs/:id`. That was **90 ms a call**, and since the UI asks several
+   * times a second, essentially all of the daemon's CPU. It changes when a call is
+   * recorded and at no other time, so it is thrown away there and nowhere else.
+   */
+  private costCache: Map<string, number> | null = null;
 
   constructor(file: string, prices?: PriceTable) {
     this.prices = prices;
@@ -300,6 +310,11 @@ export class Store {
   }
 
   private appendEventRow(runId: string, body: RunEventBody, at: string): RunEvent {
+    // A recorded call is the only thing that changes what a run cost, so it is the
+    // only thing that has to throw the cache away. Clearing it on every event
+    // instead would mean recomputing it on every event of a streaming run, which
+    // is the cost this exists to avoid.
+    if (body.type === 'metrics') this.costCache = null;
     const inserted = this.db
       .prepare('INSERT INTO events (run_id, at, type, payload_json) VALUES (?, ?, ?, ?)')
       .run(runId, at, body.type, JSON.stringify(body));
@@ -486,7 +501,10 @@ export class Store {
   getRun(runId: string): RunDetail | null {
     const row = this.row(runId);
     if (row === null) return null;
-    return toDetail(row, 0, this.runCosts().get(runId));
+    // This run's calls, not every run's. It used to scan the whole `metrics` table
+    // to price one run, which is 3,158 JSON parses to answer a request that the UI
+    // now makes several times a second.
+    return toDetail(row, 0, this.runCosts(runId).get(runId));
   }
 
   listRuns(owners: (runId: string) => number): RunSummary[] {
@@ -495,7 +513,9 @@ export class Store {
     // the view where a blank COST column next to `dsh stats`' dollars is most
     // obvious.
     const costs = this.runCosts();
-    return rows.map((row) => toDetail(row, owners(row.id), costs.get(row.id)));
+    return rows.map((row) =>
+      toSummary(row, owners(row.id), costs.get(row.id), JSON.parse(row.config_json) as ResolvedRunConfig),
+    );
   }
 
   /**
@@ -510,9 +530,16 @@ export class Store {
    * A recorded cost is never overwritten. It was worked out with the prices in
    * force at the time, which is what the run was actually billed at.
    */
-  private runCosts(): Map<string, number> {
+  private runCosts(only?: string): Map<string, number> {
+    // One run is a handful of calls and not worth a cache; the whole table is.
+    if (only !== undefined) return this.sumCosts(only);
+    if (this.costCache === null) this.costCache = this.sumCosts(undefined);
+    return this.costCache;
+  }
+
+  private sumCosts(only: string | undefined): Map<string, number> {
     const costs = new Map<string, number>();
-    for (const { model, call, runId } of this.allMetrics()) {
+    for (const { model, call, runId } of this.allMetrics(only)) {
       const cost = costOf(priceFor(model, startedAtOf(call), this.prices), {
         promptTokens: asNumber(call.promptTokens),
         cacheHitTokens: asNumber(call.cacheHitTokens),
@@ -531,10 +558,19 @@ export class Store {
    * string, and the old type said `number | null` throughout, which `model`
    * never satisfied. `summarise` treats anything it cannot recognise as absent.
    */
-  allMetrics(): { model: string; call: StoredCall; runId: string }[] {
-    const rows = this.db
-      .prepare("SELECT run_id, payload_json FROM events WHERE type = 'metrics' ORDER BY seq")
-      .all() as { run_id: string; payload_json: string }[];
+  allMetrics(runId?: string): { model: string; call: StoredCall; runId: string }[] {
+    // Narrowed to one run when that is all the caller needs. `/stats` wants the
+    // lot; pricing a single run does not, and the two used to take the same path.
+    const rows =
+      runId === undefined
+        ? (this.db
+            .prepare("SELECT run_id, payload_json FROM events WHERE type = 'metrics' ORDER BY seq")
+            .all() as { run_id: string; payload_json: string }[])
+        : (this.db
+            .prepare(
+              "SELECT run_id, payload_json FROM events WHERE type = 'metrics' AND run_id = ? ORDER BY seq",
+            )
+            .all(runId) as { run_id: string; payload_json: string }[]);
     return rows.map((row) => {
       const body = JSON.parse(row.payload_json) as { call: StoredCall };
       return { model: String(body.call.model ?? 'unknown'), call: body.call, runId: row.run_id };
@@ -694,6 +730,30 @@ function asNumber(value: number | string | null | undefined): number {
 
 function toDetail(row: RunRow, owners: number, cost: number | undefined): RunDetail {
   const config = JSON.parse(row.config_json) as ResolvedRunConfig;
+  return { ...toSummary(row, owners, cost, config), config, summary: row.summary };
+}
+
+/**
+ * The list's shape, which is the detail's without the two fields the list is not
+ * for.
+ *
+ * `config` is the whole resolved task — its text, its allow list, the profile it
+ * resolved against — and it is about 11 KB on this project's runs. `listRuns`
+ * returned a full detail per row, so `/runs` sent **695 KB** for 104 runs, and the
+ * UI refetched that on every nudge — several times a second — to redraw a table of
+ * names and turn counts. Nothing read the field: the UI's `RunSummary` has no such
+ * thing, and the CLI's `dsh list` reads columns off the summary. It was pure
+ * weight, and most of why the list felt heavy.
+ *
+ * `config` is passed in rather than parsed here so that `toDetail`, which needs it
+ * anyway, does not parse it twice.
+ */
+function toSummary(
+  row: RunRow,
+  owners: number,
+  cost: number | undefined,
+  config: ResolvedRunConfig,
+): RunSummary {
   const totals = parseTotals(row.totals_json);
   return {
     id: row.id,
@@ -716,8 +776,6 @@ function toDetail(row: RunRow, owners: number, cost: number | undefined): RunDet
     detail: row.detail,
     detached: row.detached === 1,
     owners,
-    config,
-    summary: row.summary,
   };
 }
 

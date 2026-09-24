@@ -243,6 +243,19 @@ export interface RunDetail extends RunSummary {
   summary: string | null;
 }
 
+/**
+ * What a run's own socket sends.
+ *
+ * `/runs/:id/attach` and `/runs/:id/watch` speak the same language and differ in
+ * one thing: whether the connection owns the run. A watcher sees every event and
+ * a `bye` at the end, and can neither start a run nor cancel one, which is what
+ * makes it safe for the UI to open one. Mirrors the daemon's `AttachMessage`.
+ */
+export type RunStreamMessage =
+  | { type: 'hello'; detail: RunDetail; events: RunEvent[] }
+  | { type: 'event'; event: RunEvent }
+  | { type: 'bye'; status: RunStatus };
+
 export interface DiffResponse {
   diff: string;
   stray: string[];

@@ -6,7 +6,18 @@ import { fold, type Block } from '../fold';
 import { seconds, speed, tokens } from '../format';
 import type { RunEvent } from '../types';
 
-export function Chat({ runId, events, live }: { runId: string; events: RunEvent[]; live: boolean }) {
+export function Chat({
+  runId,
+  events,
+  ready,
+  live,
+}: {
+  runId: string;
+  events: RunEvent[];
+  /** False until the first batch has been read, which is not the same as empty. */
+  ready: boolean;
+  live: boolean;
+}) {
   const blocks = useMemo(() => fold(events), [events]);
   const scroller = useRef<HTMLDivElement>(null);
   // A live run is followed; a finished one is read from the start.
@@ -28,7 +39,8 @@ export function Chat({ runId, events, live }: { runId: string; events: RunEvent[
   return (
     <div className="chat">
       <div className="log" ref={scroller} onScroll={onScroll}>
-        {blocks.length === 0 && <div className="empty">nothing has happened yet</div>}
+        {!ready && <div className="empty">loading…</div>}
+        {ready && blocks.length === 0 && <div className="empty">nothing has happened yet</div>}
         {blocks.map((block) => (
           <BlockView key={block.key} block={block} runId={runId} streaming={live && block.key === last} />
         ))}

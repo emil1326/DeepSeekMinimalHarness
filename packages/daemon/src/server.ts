@@ -115,8 +115,20 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
     }
   }, HEARTBEAT_MS);
 
-  function notify(): void {
-    const payload = JSON.stringify({ type: 'notice', runId: null });
+  /**
+   * A nudge to the UI: something changed, go and fetch it.
+   *
+   * `runId` is the run that changed, or null when it is not about one run — the
+   * handshake, and the list itself.
+   *
+   * It used to be null unconditionally, which made the UI's branch for a named run
+   * **dead code**: an open run was never told to refresh, and the only thing moving
+   * its conversation was a three-second poll. That is exactly why the chat looked
+   * like it updated once a turn — three seconds is about how long a turn takes, so
+   * the text arrived in chunks the size of a turn.
+   */
+  function notify(runId: string | null): void {
+    const payload = JSON.stringify({ type: 'notice', runId });
     for (const client of noticeSubscribers) {
       if (client.readyState === client.OPEN) client.send(payload);
     }
@@ -136,9 +148,9 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
         if (client.readyState === client.OPEN) client.send(bye);
       }
     }
-    notify();
+    notify(event.runId);
   };
-  supervisor.onRunChange = (): void => notify();
+  supervisor.onRunChange = (runId: string): void => notify(runId);
 
   function subscribersFor(runId: string): Set<WebSocket> {
     const existing = runSubscribers.get(runId);

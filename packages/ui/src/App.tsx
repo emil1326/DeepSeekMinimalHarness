@@ -49,13 +49,23 @@ export function App() {
   useEffect(
     () =>
       liveNotices((changed) => {
+        // The list, which is now cheap: 84 KB for 104 runs rather than 695 KB,
+        // because the daemon stopped sending every run's whole config with it.
         void queryClient.invalidateQueries({ queryKey: ['runs'] });
-        void queryClient.invalidateQueries({ queryKey: ['stats'] });
-        if (changed !== null) {
-          void queryClient.invalidateQueries({ queryKey: ['run', changed] });
-          void queryClient.invalidateQueries({ queryKey: ['events', changed] });
-          void queryClient.invalidateQueries({ queryKey: ['diff', changed] });
-        }
+        // The run that changed, so an open run's header keeps up with it.
+        //
+        // Not its events: those arrive over the run's own socket now, and
+        // refetching the whole log several times a second is what made the chat
+        // look like it updated once a turn. Not its diff either — that one runs
+        // git, and four a second would be four git processes a second, which is
+        // why it has an interval of its own and no nudge.
+        if (changed !== null) void queryClient.invalidateQueries({ queryKey: ['run', changed] });
+        // And deliberately not `['stats']`. That one aggregates every call in the
+        // history — 3,158 of them here, 77 ms a go — to produce numbers that move
+        // imperceptibly during a run: cumulative tokens, a mean speed, a total
+        // spend. Its own fifteen-second interval is already more often than it
+        // needs, and refreshing it on every event was the largest single cost in
+        // the daemon.
       }),
     [queryClient],
   );

@@ -178,6 +178,46 @@ describe('the daemon', () => {
     expect(crossSite).toBe(403);
   });
 
+  it('nudges the UI with the id of the run that changed', async () => {
+    // The bug this pins. The nudge always said `runId: null`, so the UI's branch
+    // for "this run changed" was dead code — an open run was never told to refresh
+    // and the only thing moving its conversation was a three-second poll. Three
+    // seconds is about how long a turn takes, which is why the chat looked like it
+    // updated once a turn rather than as the model wrote.
+    daemon = await startTestDaemon(ONE_EDIT);
+    const notices: (string | null)[] = [];
+    const client = new WebSocket(`ws://127.0.0.1:${daemon.port}/events`);
+    client.on('message', (raw: Buffer) => {
+      const parsed = JSON.parse(raw.toString('utf8')) as { type: string; runId: string | null };
+      if (parsed.type === 'notice') notices.push(parsed.runId);
+    });
+    await new Promise<void>((resolve, reject) => {
+      client.once('open', () => resolve());
+      client.once('error', reject);
+    });
+
+    // The handshake sends one with no run on it, which is still correct: it is
+    // about the list, not about any one run.
+    expect(notices).toEqual([null]);
+
+    const taskPath = daemon.fixture.taskPath('nudged', {});
+    const created = await daemon.request('POST', '/runs', { body: { taskPath } });
+    const runId = String(created.body.id);
+    const owner = daemon.attach(runId);
+    await new Promise<void>((resolve) => owner.once('open', () => resolve()));
+
+    const deadline = Date.now() + 20_000;
+    while (!notices.includes(runId) && Date.now() < deadline) await delay(50);
+
+    expect(notices).toContain(runId);
+    // And it names the run and not something else, which a `toContain` alone would
+    // not catch if the id were ever the wrong one.
+    expect(notices.filter((each) => each !== null).every((each) => each === runId)).toBe(true);
+
+    owner.close();
+    client.close();
+  });
+
   it('prints every problem in a bad task file at once, with the path of the field', async () => {
     daemon = await startTestDaemon(ONE_EDIT);
     const bad = path.join(daemon.fixture.base, 'bad.json');

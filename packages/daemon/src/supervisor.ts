@@ -161,7 +161,26 @@ export class Supervisor {
       this.append(runId, { type: 'error', message: `the worker failed: ${error.message}` }, now());
       this.finish(runId, 'failed', { detail: error.message });
     });
+    // The terminal verdict waits for `close`, not `exit`.
+    //
+    // `exit` fires when the process ends, and `fork`'s IPC channel is a pipe the
+    // parent may not have finished reading. So a worker's last `done` can still be
+    // in the buffer while the verdict is written over the top of it — which is the
+    // shape Claude reported: a worker that refused to start said why in an `error`
+    // event and sent `done` with `status: 'failed'`, and the run was recorded as
+    // "the worker stopped without finishing (code 0, signal none)", with the reason
+    // thrown away and no way to find it from the CLI.
+    //
+    // `close` fires once the child's stdio streams have closed, the IPC channel
+    // among them, so everything the worker wrote has been read by then. A worker
+    // that hung on to its own stderr could delay this, and nothing does: `spawnTool`
+    // never hands a check process an inherited pipe, so the worker's stderr closes
+    // with the worker.
+    let ended: { code: number | null; signal: NodeJS.Signals | null } = { code: null, signal: null };
     child.on('exit', (code, signal) => {
+      ended = { code, signal };
+    });
+    child.on('close', () => {
       const current = this.states.get(runId);
       if (current === undefined || current.child !== child) return;
       current.child = null;
@@ -169,7 +188,7 @@ export class Supervisor {
       if (detailNow !== null && isTerminal(detailNow.status)) return;
       const why = current.cancelled
         ? 'cancelled'
-        : `the worker stopped without finishing (code ${code ?? 'none'}, signal ${signal ?? 'none'})`;
+        : `the worker stopped without finishing (code ${ended.code ?? 'none'}, signal ${ended.signal ?? 'none'})`;
       if (!current.cancelled) {
         this.append(
           runId,

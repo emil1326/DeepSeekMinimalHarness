@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api';
 import { durationOf, shortPath, statusWord } from '../format';
+import { useLiveEvents } from '../live';
 import { isTerminal } from '../types';
 import { Chat } from './Chat';
 import { ConfigView } from './Config';
@@ -36,11 +37,10 @@ export function AgentPage({ runId, onBack }: { runId: string; onBack: () => void
   const queryClient = useQueryClient();
 
   const run = useQuery({ queryKey: ['run', runId], queryFn: () => api.run(runId), refetchInterval: 4000 });
-  const events = useQuery({
-    queryKey: ['events', runId],
-    queryFn: () => api.events(runId),
-    refetchInterval: 3000,
-  });
+  // Streamed, not polled. `live.ts` has what the poll was doing wrong; the short
+  // version is that it fetched the whole log every three seconds, and three seconds
+  // is about how long a turn takes, so the chat appeared to update by the turn.
+  const { events, ready } = useLiveEvents(runId);
   const diff = useQuery({
     queryKey: ['diff', runId],
     queryFn: () => api.diff(runId),
@@ -53,7 +53,7 @@ export function AgentPage({ runId, onBack }: { runId: string; onBack: () => void
   const detail = run.data;
   const live = !isTerminal(detail.status);
 
-  const metrics = (events.data ?? []).filter((event) => event.type === 'metrics');
+  const metrics = events.filter((event) => event.type === 'metrics');
   const lastCall = metrics.length === 0 ? null : metrics[metrics.length - 1].call;
 
   const cancel = async (): Promise<void> => {
@@ -153,7 +153,7 @@ export function AgentPage({ runId, onBack }: { runId: string; onBack: () => void
 
       {tab === 'timing' && <Timings runId={runId} />}
 
-      {tab === 'chat' && <Chat runId={runId} events={events.data ?? []} live={live} />}
+      {tab === 'chat' && <Chat runId={runId} events={events} ready={ready} live={live} />}
 
       {tab === 'config' && <ConfigView config={detail.config} />}
 

@@ -35,8 +35,17 @@ import { runAgentLoop, type LoopControl } from './loop.js';
 import { isGitWorktree, snapshotChanges, strayChanges } from './stray.js';
 import type { DaemonToWorker, WorkerStart, WorkerToDaemon } from './protocol.js';
 
-function send(message: WorkerToDaemon): void {
-  process.send?.(message);
+function send(message: WorkerToDaemon, landed?: (error: Error | null) => void): void {
+  // `process.send` is **undefined** once the channel to the daemon is gone, not a
+  // function that throws. So every `send` after a disconnect is a silent no-op,
+  // which is how a worker can run to the end of a run and say nothing about it.
+  if (process.send === undefined || !process.connected) {
+    landed?.(new Error('the channel to the daemon is gone'));
+    return;
+  }
+  // `undefined` for the handle and the options, because the callback is the only
+  // one of the three this needs and the signature puts it last.
+  process.send(message, undefined, undefined, landed);
 }
 
 /**
@@ -127,8 +136,19 @@ function tellThenExit(status: RunStatus, summary: string | null, detail?: string
   // Before `done`, because the daemon may stop the worker the moment it sees
   // one and the readings of a cancelled run are the interesting ones.
   flushTimings();
-  send({ type: 'done', status, summary });
-  setTimeout(() => process.exit(0), 30);
+
+  /** Out, once. The second caller is whichever of the two paths below loses. */
+  const leave = (code: number): void => process.exit(code);
+
+  // `process.exit` discards whatever is still queued on the IPC channel, and this
+  // used to say `done` and then exit 30 ms later — a delay that is usually enough
+  // and was never anything more than a guess. The callback fires when the write
+  // has actually landed, so there is nothing left to guess about.
+  send({ type: 'done', status, summary }, (error) => leave(error === null ? 0 : 1));
+
+  // Nothing waits for ever: a channel that never calls back would hang the worker,
+  // which is worse than a message that did not make it.
+  setTimeout(() => leave(0), 1000);
 }
 
 async function start(config: WorkerStart): Promise<void> {
