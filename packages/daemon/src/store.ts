@@ -49,6 +49,49 @@ interface RunRow {
   turns: number;
   detached: number;
   totals_json: string | null;
+  /** Whether the work landed. Null until somebody says so. See `Store.tag`. */
+  tag: string | null;
+  tag_note: string | null;
+  tagged_at: string | null;
+  tag_lines_added: number | null;
+  tag_lines_removed: number | null;
+}
+
+/** What an orchestrator says happened to a run's work, after its own gate. */
+export const RUN_TAGS = ['landed', 'fixed', 'dropped'] as const;
+export type RunTag = (typeof RUN_TAGS)[number];
+
+/** One row of "did any of this work", grouped by what the run was. */
+export interface OutcomeStats {
+  model: string;
+  /** The profile's file name, which is what a person calls the project's setup. */
+  profile: string;
+  runs: number;
+  finished: number;
+  stoppedAtLimit: number;
+  failed: number;
+  /** Tagged, by what the tag said. Untagged runs are in none of these. */
+  landed: number;
+  fixed: number;
+  dropped: number;
+  /** What every run in this row cost together, tagged or not. */
+  costUsd: number | null;
+  /**
+   * Lines added by the runs that landed **as they were**.
+   *
+   * Only `landed`, deliberately. A run tagged `fixed` needed a human to finish
+   * it, so its lines are not the harness's output, and counting them would make
+   * the figure flatter itself.
+   */
+  landedLinesAdded: number;
+  /**
+   * Cost per line that landed untouched. Null when nothing did.
+   *
+   * The only cost figure that says anything. Tokens and turns are inputs; this
+   * is what came out, and it is the number to compare two models, two prompts
+   * or two budgets with.
+   */
+  costPerLandedLine: number | null;
 }
 
 interface EventRow {
@@ -160,6 +203,41 @@ export class Store {
         PRIMARY KEY (run_id, name)
       );
     `);
+    this.migrate();
+  }
+
+  /**
+   * Columns added after the first runs were written.
+   *
+   * `runs` has no migration mechanism and this is it, written once rather than
+   * per run: a column that is not there is added, and nothing else happens. It
+   * has to work that way because `runs.db` is somebody's history — dropping and
+   * recreating the table would take every run with it, and there is no other copy
+   * of the truth.
+   *
+   * `PRAGMA table_info` rather than `user_version`, because a database written
+   * before this existed has version 0 and so does a new one, and there is no way
+   * to tell them apart from the version alone.
+   */
+  private migrate(): void {
+    const columns = new Set(
+      (this.db.pragma('table_info(runs)') as { name: string }[]).map((column) => column.name),
+    );
+    // Whether the work landed. The one thing `dsh stats` could not say, and the
+    // only measure of whether any of this is worth doing: 60% of runs stopping
+    // at a limit and 60% of runs producing nothing worth keeping call for
+    // opposite fixes, and the status column cannot tell them apart.
+    const added: [string, string][] = [
+      ['tag', 'TEXT'],
+      ['tag_note', 'TEXT'],
+      ['tagged_at', 'TEXT'],
+      ['tag_lines_added', 'INTEGER'],
+      ['tag_lines_removed', 'INTEGER'],
+    ];
+    for (const [name, type] of added) {
+      if (columns.has(name)) continue;
+      this.db.exec(`ALTER TABLE runs ADD COLUMN ${name} ${type}`);
+    }
   }
 
   close(): void {
@@ -468,6 +546,114 @@ export class Store {
     return row.n;
   }
 
+  /**
+   * Say what happened to a run's work, after somebody's own gate.
+   *
+   * The lines are recorded here rather than computed at read time, and that is
+   * deliberate: they are a fact about the run, taken from its own write calls,
+   * and a run tagged in March has to keep saying the same thing in June.
+   * `dsh tag` sends them; anything that omits them stores null rather than zero,
+   * because "no lines" and "nobody counted" are different and only one of them
+   * should drag an average down.
+   */
+  tag(
+    runId: string,
+    tag: RunTag,
+    options: { note?: string; lines?: { added: number; removed: number } } = {},
+  ): void {
+    const result = this.db
+      .prepare(
+        `UPDATE runs SET tag = ?, tag_note = ?, tagged_at = ?,
+           tag_lines_added = ?, tag_lines_removed = ? WHERE id = ?`,
+      )
+      .run(
+        tag,
+        options.note ?? null,
+        new Date().toISOString(),
+        options.lines?.added ?? null,
+        options.lines?.removed ?? null,
+        runId,
+      );
+    if (result.changes === 0) throw new Error(`no run called ${runId}`);
+  }
+
+  /**
+   * Every run's outcome, grouped by model and profile.
+   *
+   * Grouped by both because they answer different questions and either alone is
+   * misleading: the same model against two projects, or two models against one.
+   * The profile is a file name, which is what a person calls the project's setup
+   * — `esap.json` rather than `/home/.../profiles/esap.json`.
+   */
+  outcomes(): OutcomeStats[] {
+    const rows = this.db
+      .prepare(
+        `SELECT config_json, status, tag, tag_lines_added, totals_json
+           FROM runs ORDER BY created_at`,
+      )
+      .all() as {
+      config_json: string;
+      status: string;
+      tag: string | null;
+      tag_lines_added: number | null;
+      totals_json: string | null;
+    }[];
+
+    const groups = new Map<string, OutcomeStats>();
+    for (const row of rows) {
+      let config: { model?: unknown; profile?: unknown } = {};
+      try {
+        config = JSON.parse(row.config_json) as typeof config;
+      } catch {
+        /* a row that will not parse is still a run, grouped as unknown */
+      }
+      const model = typeof config.model === 'string' ? config.model : 'unknown';
+      const profile = typeof config.profile === 'string' ? path.basename(config.profile) : 'unknown';
+      const key = `${model}\u0000${profile}`;
+      const group = groups.get(key) ?? {
+        model,
+        profile,
+        runs: 0,
+        finished: 0,
+        stoppedAtLimit: 0,
+        failed: 0,
+        landed: 0,
+        fixed: 0,
+        dropped: 0,
+        costUsd: null,
+        landedLinesAdded: 0,
+        costPerLandedLine: null,
+      };
+
+      group.runs += 1;
+      if (row.status === 'finished') group.finished += 1;
+      else if (row.status === 'stopped_at_limit') group.stoppedAtLimit += 1;
+      else if (row.status === 'failed' || row.status === 'interrupted') group.failed += 1;
+
+      if (row.tag === 'landed' || row.tag === 'fixed' || row.tag === 'dropped') group[row.tag] += 1;
+      if (row.tag === 'landed' && typeof row.tag_lines_added === 'number') {
+        group.landedLinesAdded += row.tag_lines_added;
+      }
+
+      const totals = parseTotals(row.totals_json);
+      if (totals.costUsd !== null) group.costUsd = (group.costUsd ?? 0) + totals.costUsd;
+      groups.set(key, group);
+    }
+
+    return [...groups.values()]
+      .map((group) => ({
+        ...group,
+        costUsd: group.costUsd === null ? null : round(group.costUsd, 6),
+        // The whole point of the table. Null rather than zero when nothing
+        // landed: zero would read as free, and free is a claim.
+        costPerLandedLine:
+          group.costUsd === null || group.landedLinesAdded === 0
+            ? null
+            : round(group.costUsd / group.landedLinesAdded, 6),
+      }))
+      .sort((a, b) => a.model.localeCompare(b.model) || a.profile.localeCompare(b.profile));
+  }
+
   private row(runId: string): RunRow | null {
     const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(runId) as RunRow | undefined;
     return row ?? null;
@@ -517,6 +703,9 @@ function toDetail(row: RunRow, owners: number, cost: number | undefined): RunDet
     worktree: config.worktree,
     turns: row.turns,
     totals: totals.costUsd !== null || cost === undefined ? totals : { ...totals, costUsd: round(cost, 6) },
+    tag: row.tag === null ? null : (row.tag as RunTag),
+    tagNote: row.tag_note,
+    taggedAt: row.tagged_at,
     // Merged over the defaults, because a task file written before a limit
     // existed has no value for it and the row is read by a report that has to
     // quote a real number.

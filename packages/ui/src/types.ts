@@ -227,6 +227,15 @@ export interface RunSummary {
    * Absent means the daemon was not asked, which is not the same as free.
    */
   priced?: boolean;
+  /**
+   * What happened to this run's work, as told by whoever gated it.
+   *
+   * Null until somebody says, which is not the same as `dropped`: a run nobody
+   * has judged has not been judged. `dsh tag` sets it.
+   */
+  tag: 'landed' | 'fixed' | 'dropped' | null;
+  tagNote: string | null;
+  taggedAt: string | null;
 }
 
 export interface RunDetail extends RunSummary {
@@ -300,6 +309,26 @@ export interface RunReport {
   stoppedAt: { which: string; used: number; budget: number; ratio: number } | null;
   claim: string | null;
   claimSupported: boolean | null;
+  /**
+   * The files the agent said it changed, when it said so at all.
+   *
+   * Null is "it listed none", which is not the same as an empty list and is said
+   * differently in the panel.
+   */
+  claimed: string[] | null;
+  /**
+   * Claimed files that nothing in this run accounts for.
+   *
+   * A run wrote "ui/add.spec.ts rewritten" when the file had not changed, and the
+   * only way anybody found out was reading the diff by hand. A file can also
+   * change with no write call behind it — a check the run ran can regenerate
+   * something — so this says what was checked rather than accusing.
+   */
+  claimGaps: string[];
+  /** Files that changed and were not claimed, which is being terse rather than dishonest. */
+  unclaimed: string[];
+  /** Lines added and removed, from the run's own write calls. */
+  lines: { added: number; removed: number };
   checks: CheckOutcome[];
   allowed: string[];
   /** Files the run's own write tools touched, from its event log. */

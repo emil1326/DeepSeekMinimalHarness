@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 export { Auth, SESSION_COOKIE, newToken } from './auth.js';
 export { startServer, defaultUiDir, type HarnessServer, type ServerOptions } from './server.js';
-export { Store, summarise } from './store.js';
+export { RUN_TAGS, Store, summarise, type OutcomeStats, type RunTag } from './store.js';
 export { Supervisor, newRunId, type SupervisorOptions } from './supervisor.js';
 export * from './protocol.js';
 

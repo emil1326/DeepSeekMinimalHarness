@@ -21,6 +21,7 @@ import {
   limitUse,
   loadHarnessConfig,
   loadRunConfig,
+  samePath,
   toolCatalogue,
   uiHostnames,
   type FailureCause,
@@ -29,15 +30,19 @@ import {
   type RunStatus,
   type ToolContext,
 } from '@emilswork/harness-core';
+import { createWorktree, patchFor, resetWorktree, worktreePathFor } from './worktree.js';
 import type {
   AttachMessage,
   DiffResponse,
+  OutcomeStats,
   RunDetail,
   RunSummary,
+  RunTag,
   RunTimings,
   StatsResponse,
   TimingsResponse,
 } from '@emilswork/harness-daemon';
+import { RUN_TAGS } from '@emilswork/harness-daemon';
 import { ApiFailure, DaemonClient, DaemonUnreachable, exitCodeFor, readDaemonRecord } from './client.js';
 import { Renderer, colour as withColour, indent, pad, statusWord, useColor } from './render.js';
 import { timingsFootnotes, timingsTable, type TimingSort } from './timings.js';
@@ -415,6 +420,25 @@ program
         line('  stray', 'none');
       }
 
+      // The agent's own list, against what the run can account for. A run that
+      // wrote "ui/add.spec.ts rewritten" when the file had not changed was only
+      // ever found by reading the diff by hand, which is what this is for.
+      if (report.claimed !== null) {
+        process.stdout.write(`\n${paint('bold', 'what it said it changed')}\n`);
+        line(
+          '  claimed',
+          report.claimed.length === 0
+            ? paint('yellow', 'it listed no files')
+            : `${report.claimed.join(', ')}  (+${report.lines.added} −${report.lines.removed} lines)`,
+        );
+        if (report.claimGaps.length > 0) {
+          line('  ', paint('red', `NOTHING ACCOUNTS FOR: ${report.claimGaps.join(', ')} changing`));
+        }
+        if (report.unclaimed.length > 0) {
+          line('  terse', `also changed, without listing: ${report.unclaimed.join(', ')}`);
+        }
+      }
+
       if (report.questions.length > 0) {
         process.stdout.write(`\n${paint('bold', 'questions')}\n`);
         for (const question of report.questions) {
@@ -591,6 +615,146 @@ program
   );
 
 program
+  .command('patch')
+  .argument('<run>')
+  .option('--out <file>', 'write it here instead of to stdout')
+  .description("the run's changes as a patch, ready for `git apply --3way`")
+  .action((run: string, options: { out?: string }) =>
+    guard(async () => {
+      const client = await DaemonClient.connect();
+      const detail = await client.run(run);
+      const { report } = await client.report(run);
+      // The run's own file list, not the worktree's: a worktree can hold somebody
+      // else's work, and a patch that swept it up would be worse than none.
+      const { patch, files, notes } = patchFor(detail.worktree, report.changed);
+      if (files.length === 0) {
+        process.stdout.write(
+          `nothing to patch for ${run}: ${
+            report.changed.length === 0
+              ? 'it changed no file'
+              : 'none of the files it changed can be diffed now'
+          }\n`,
+        );
+      }
+      if (options.out === undefined) {
+        process.stdout.write(patch);
+      } else {
+        fs.writeFileSync(options.out, patch, 'utf8');
+        process.stdout.write(`${options.out}: ${files.length} file(s)\n`);
+        if (notes.length > 0) process.stdout.write(`${indent(notes.join('\n'), '  ')}\n`);
+        process.stdout.write(`\napply it with:  git apply --3way ${options.out}\n`);
+      }
+    }),
+  );
+
+program
+  .command('worktree')
+  .description('make and reset the worktrees agents run in')
+  .addCommand(
+    new Command('new')
+      .argument('<name>', 'the worktree, made beside the repository')
+      .option('--repo <path>', 'the repository it belongs to', process.cwd())
+      .option('--from <ref>', 'the commit or branch to start from', 'HEAD')
+      .action((name: string, options: { repo: string; from: string }) =>
+        guard(async () => {
+          const made = createWorktree({ repo: options.repo, name, from: options.from });
+          process.stdout.write(`${made.path}\n`);
+          if (made.notes.length > 0) process.stdout.write(`${indent(made.notes.join('\n'), '  ')}\n`);
+        }),
+      ),
+  )
+  .addCommand(
+    new Command('reset')
+      .argument('<name>', 'the worktree, by name or by path')
+      .argument('<ref>', 'the commit to put it back to')
+      .option('--repo <path>', 'the repository it belongs to', process.cwd())
+      .action((name: string, ref: string, options: { repo: string }) =>
+        guard(async () => {
+          const target = worktreePathFor(options.repo, name);
+          if (!fs.existsSync(target)) {
+            process.stderr.write(`dsh: no worktree at ${target}\n`);
+            process.exitCode = 4;
+            return;
+          }
+
+          // A run in there would have its work deleted under it, mid-turn. The
+          // check is skipped rather than failed when no daemon answers: a run's
+          // lifetime is tied to the daemon, so no daemon means no live runs.
+          const live = await runsIn(target);
+          if (live.length > 0) {
+            process.stderr.write(
+              `dsh: ${live.join(', ')} ${live.length === 1 ? 'is' : 'are'} running in ${target}.\n` +
+                `  Resetting now would delete work out from under it. Cancel first, or wait.\n`,
+            );
+            process.exitCode = 1;
+            return;
+          }
+
+          const result = resetWorktree({ repo: options.repo, target, ref });
+          process.stdout.write(`${result.path} is back at ${ref}\n`);
+          if (result.notes.length > 0) process.stdout.write(`${indent(result.notes.join('\n'), '  ')}\n`);
+          process.stdout.write('  ignored files, such as node_modules and target, were left alone\n');
+        }),
+      ),
+  );
+
+/**
+ * The runs still going in a worktree.
+ *
+ * An empty list when the daemon cannot be reached, which is the safe answer and
+ * not a guess: a run's lifetime is tied to the daemon that owns it, so nothing
+ * is running when nothing is listening.
+ */
+async function runsIn(worktree: string): Promise<string[]> {
+  try {
+    const client = await DaemonClient.connect();
+    const { runs } = await client.runs();
+    return runs
+      .filter((run) => !isTerminal(run.status) && samePath(run.worktree, worktree))
+      .map((run) => run.id);
+  } catch {
+    return [];
+  }
+}
+
+program
+  .command('tag')
+  .argument('<run>')
+  .argument('<outcome>', 'landed, fixed or dropped')
+  .option('--note <text>', 'why, in your own words')
+  .description("say what happened to a run's work, after your own gate")
+  .action((run: string, outcome: string, options: { note?: string }) =>
+    guard(async () => {
+      if (!isTag(outcome)) {
+        process.stderr.write(`dsh: outcome must be one of ${RUN_TAGS.join(', ')}, not ${outcome}\n`);
+        process.exitCode = 4;
+        return;
+      }
+      const client = await DaemonClient.connect();
+      const answer = await client.json<{ ok: boolean; lines: { added: number; removed: number } }>(
+        'POST',
+        `/runs/${run}/tag`,
+        { tag: outcome, ...(options.note === undefined ? {} : { note: options.note }) },
+      );
+      // The line count is the run's own, taken from what it wrote, so it says
+      // the same thing in six months as it does now.
+      process.stdout.write(
+        `${run} is ${outcome} (+${answer.lines.added} −${answer.lines.removed} lines, from the run's own edits)\n`,
+      );
+      if (outcome !== 'landed') {
+        process.stdout.write(
+          `Those lines do not count towards $ per line in \`dsh stats\`: only work that landed\n` +
+            `untouched does, or the figure would flatter itself.\n`,
+        );
+      }
+    }),
+  );
+
+function isTag(value: string): value is RunTag {
+  return (RUN_TAGS as readonly string[]).includes(value);
+}
+
+program
   .command('stats')
   .description('speed and cost per model, from every run so far')
   .action(() =>
@@ -632,8 +796,53 @@ program
       process.stdout.write(
         `\nfrom ${stats.runs} run(s). Prices come from config.json in the harness home.\n`,
       );
+      process.stdout.write(outcomesTable(stats.outcomes));
     }),
   );
+
+/**
+ * Whether the work landed, grouped by model and profile.
+ *
+ * The half of `stats` that decides anything. Speed and cost are inputs; this is
+ * what came out. A model that is fast and cheap and produces nothing worth
+ * keeping is worse than a slow one that does, and the status column alone cannot
+ * tell them apart: a run stopped at a limit and a run stopped at a limit whose
+ * half-finished work was kept look identical there.
+ */
+function outcomesTable(outcomes: OutcomeStats[]): string {
+  if (outcomes.length === 0) return '';
+  const tagged = outcomes.some((row) => row.landed + row.fixed + row.dropped > 0);
+  const lines = [
+    '\ndid the work land\n',
+    `${pad('MODEL', 20)}${pad('PROFILE', 22)}${pad('RUNS', 6)}${pad('FIN', 5)}${pad('LIMIT', 6)}${pad('FAIL', 6)}${pad('LANDED', 8)}${pad('FIXED', 7)}${pad('DROPPED', 9)}${pad('LINES', 8)}${pad('$ PER LINE', 11)}\n`,
+  ];
+  for (const row of outcomes) {
+    lines.push(
+      `${pad(row.model, 20)}${pad(row.profile, 22)}${pad(String(row.runs), 6)}${pad(String(row.finished), 5)}${pad(String(row.stoppedAtLimit), 6)}${pad(String(row.failed), 6)}${pad(tagged ? String(row.landed) : '-', 8)}${pad(tagged ? String(row.fixed) : '-', 7)}${pad(tagged ? String(row.dropped) : '-', 9)}${pad(String(row.landedLinesAdded), 8)}${pad(row.costPerLandedLine === null ? '-' : `$${row.costPerLandedLine.toFixed(4)}`, 11)}\n`,
+    );
+  }
+  let foot =
+    '\nFIN, LIMIT and FAIL are how the runs ended. LANDED, FIXED and DROPPED are what\n' +
+    'happened to the work afterwards, which only you can say:\n\n' +
+    '  dsh tag <run> landed            it went in as it was\n' +
+    '  dsh tag <run> fixed --note "…"  it went in after you corrected it\n' +
+    '  dsh tag <run> dropped           thrown away\n';
+  if (!tagged) {
+    foot +=
+      '\nNothing is tagged yet, so the outcome columns are blank and $ PER LINE cannot be\n' +
+      'worked out. Three commands on three runs is enough to make it mean something.\n';
+  } else {
+    foot +=
+      '\nLINES counts only what landed untouched, and $ PER LINE is the whole cost of the\n' +
+      'group over it. A run tagged `fixed` needed you to finish it, so its lines are not\n' +
+      'counted — that is the one figure here that flatters itself if you let it.\n';
+  }
+  // The table and the footnotes, in that order. Returning only the footnotes was
+  // a real bug, and a quiet one: the header and every row were built and thrown
+  // away, so `dsh stats` printed a paragraph explaining columns that were not
+  // there.
+  return `${lines.join('')}${foot}`;
+}
 
 program
   .command('timings')

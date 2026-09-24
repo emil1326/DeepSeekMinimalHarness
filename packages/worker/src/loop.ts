@@ -251,6 +251,8 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
   const startedAt = clock();
   let totals: RunTotals = emptyTotals();
   let summary: string | null = null;
+  /** Files the agent claimed it changed, when it said so at all. */
+  let claimed: string[] | null = null;
   /** Limits already announced, so each is warned about once and not every turn. */
   const warned = new Set<CumulativeLimit>();
 
@@ -439,13 +441,14 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
 
       if (name === 'finish') {
         summary = typeof args.summary === 'string' ? args.summary : '';
+        claimed = stringList(args.changed);
         pushToolResult(messages, call, 'ok');
         // Saved before returning, because this is a return inside the turn loop:
         // the end-of-turn save below never runs, and without this the last
         // transcript on disk is one exchange out of date.
         save();
         emit({ type: 'tool.result', turn, id: call.id, name, ok: true, result: 'ok' });
-        emit({ type: 'summary', text: summary });
+        emit({ type: 'summary', text: summary, ...(claimed === null ? {} : { changed: claimed }) });
         return { status: 'finished', summary };
       }
 
@@ -551,6 +554,21 @@ function parseArgs(call: ToolCall): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/**
+ * A list of strings from a tool argument, or null when it is not one.
+ *
+ * Null rather than an empty array, because "the agent listed no files" and "the
+ * agent did not list files" are different claims and the report says different
+ * things about them. A model that writes a single string instead of an array
+ * gets the one-element list it clearly meant.
+ */
+function stringList(value: unknown): string[] | null {
+  if (typeof value === 'string') return value.trim() === '' ? null : [value.trim()];
+  if (!Array.isArray(value)) return null;
+  const kept = value.filter((each): each is string => typeof each === 'string' && each.trim() !== '');
+  return kept.length === 0 ? null : kept.map((each) => each.trim());
 }
 
 function pushToolResult(messages: ChatMessage[], call: ToolCall, content: string): void {

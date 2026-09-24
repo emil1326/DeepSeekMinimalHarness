@@ -283,6 +283,21 @@ describe('what the report counts as verification', () => {
 });
 
 describe('the files a run changed', () => {
+  /** A write, as the loop records it: the call, and the result that says it worked. */
+  function write(path: string, turn = 1, ok = true): RunEvent[] {
+    return [
+      event({ type: 'tool.call', turn, id: `w-${turn}-${path}`, name: 'replace_in_file', args: { path } }),
+      event({
+        type: 'tool.result',
+        turn,
+        id: `w-${turn}-${path}`,
+        name: 'replace_in_file',
+        ok,
+        result: ok ? 'replaced' : 'refused: the old text does not occur',
+      }),
+    ];
+  }
+
   it('are the ones it wrote, from its own record', () => {
     // Measured live: a report built after the worktree had been reset said
     // "nothing changed" and an empty file list, because it asked git what was
@@ -300,11 +315,27 @@ describe('the files a run changed', () => {
             args: { path: 'src/a.ts' },
           }),
           event({
+            type: 'tool.result',
+            turn: 1,
+            id: 'w1',
+            name: 'replace_in_file',
+            ok: true,
+            result: 'replaced',
+          }),
+          event({
             type: 'tool.call',
             turn: 2,
             id: 'w2',
             name: 'create_file',
             args: { path: 'src/b.ts' },
+          }),
+          event({
+            type: 'tool.result',
+            turn: 2,
+            id: 'w2',
+            name: 'create_file',
+            ok: true,
+            result: 'created',
           }),
         ],
       }),
@@ -312,6 +343,17 @@ describe('the files a run changed', () => {
     expect(report.changed).toEqual(['src/a.ts', 'src/b.ts']);
     // And what git sees now is kept beside it, not mixed in.
     expect(report.onDisk).toEqual([]);
+  });
+
+  it('leave out a write that did not work, because it changed nothing', () => {
+    // A `replace_in_file` whose old text did not match changes nothing, and a run
+    // whose only attempt on a file was refused used to be reported as having
+    // changed it. The refusal is in the log and so is the fact that nothing
+    // happened, which is the whole reason the result is recorded.
+    const report = buildReport(
+      input({ changed: [], events: [...write('src/a.ts', 1, true), ...write('src/b.ts', 2, false)] }),
+    );
+    expect(report.changed).toEqual(['src/a.ts']);
   });
 
   it('falls back to git when the log has no writes in it', () => {
@@ -322,10 +364,130 @@ describe('the files a run changed', () => {
   });
 
   it('names a file once however many times it was edited', () => {
-    const write = (turn: number): RunEvent =>
-      event({ type: 'tool.call', turn, id: `w${turn}`, name: 'replace_in_file', args: { path: 'src/a.ts' } });
-    const report = buildReport(input({ changed: [], events: [write(1), write(2), write(3)] }));
+    const report = buildReport(
+      input({ changed: [], events: [...write('src/a.ts', 1), ...write('src/a.ts', 2)] }),
+    );
     expect(report.changed).toEqual(['src/a.ts']);
+  });
+
+  it('counts the lines, from the text the run was given', () => {
+    // The number that makes a cost meaningful. Derived from the write calls
+    // rather than from git, for the same reason the file list is: it has to
+    // survive the worktree being committed or reset.
+    const report = buildReport(
+      input({
+        changed: [],
+        events: [
+          event({
+            type: 'tool.call',
+            turn: 1,
+            id: 'w1',
+            name: 'replace_in_file',
+            args: { path: 'src/a.ts', old: 'one\ntwo', new: 'one\ntwo\nthree' },
+          }),
+          event({
+            type: 'tool.result',
+            turn: 1,
+            id: 'w1',
+            name: 'replace_in_file',
+            ok: true,
+            result: 'replaced',
+          }),
+        ],
+      }),
+    );
+    expect(report.lines).toEqual({ added: 3, removed: 2 });
+  });
+});
+
+describe('what the agent says it changed', () => {
+  /** A `finish`, as the loop records it, with the list the agent gave. */
+  function finished(changed: string[] | undefined, summary = 'done'): RunEvent[] {
+    return [
+      event({
+        type: 'tool.call',
+        turn: 1,
+        id: 'f',
+        name: 'finish',
+        args: changed === undefined ? { summary } : { summary, changed },
+      }),
+      event({ type: 'tool.result', turn: 1, id: 'f', name: 'finish', ok: true, result: 'ok' }),
+      event({ type: 'summary', text: summary, ...(changed === undefined ? {} : { changed }) }),
+    ];
+  }
+
+  /** A write, as the loop records it. */
+  function write(path: string): RunEvent[] {
+    return [
+      event({ type: 'tool.call', turn: 1, id: `w-${path}`, name: 'replace_in_file', args: { path } }),
+      event({
+        type: 'tool.result',
+        turn: 1,
+        id: `w-${path}`,
+        name: 'replace_in_file',
+        ok: true,
+        result: 'replaced',
+      }),
+    ];
+  }
+
+  it('is null when the agent listed nothing, which is not the same as an empty list', () => {
+    const report = buildReport(input({ events: finished(undefined) }));
+    expect(report.claimed).toBeNull();
+    expect(report.claimGaps).toEqual([]);
+    expect(report.unclaimed).toEqual([]);
+  });
+
+  it('accepts a claim its own record backs up', () => {
+    const report = buildReport(input({ events: [...write('src/a.ts'), ...finished(['src/a.ts'])] }));
+    expect(report.claimed).toEqual(['src/a.ts']);
+    expect(report.claimGaps).toEqual([]);
+    expect(report.unclaimed).toEqual([]);
+  });
+
+  it('flags a file it says it changed that nothing accounts for', () => {
+    // The finding that made this exist: a run wrote "`ui/add.spec.ts` rewritten"
+    // in its summary when the file had not changed, and the only way anybody
+    // found out was reading the diff by hand at the gate.
+    const report = buildReport(
+      input({ changed: [], events: [...write('src/a.ts'), ...finished(['src/a.ts', 'ui/add.spec.ts'])] }),
+    );
+    expect(report.claimGaps).toEqual(['ui/add.spec.ts']);
+    expect(report.headline).toContain('nothing in this run accounts for');
+    expect(report.headline).toContain('ui/add.spec.ts');
+  });
+
+  it('does not flag a file a check regenerated, which is not a lie', () => {
+    // A real run reported a stray change the agent never made because a docs
+    // generator it ran rewrote the file. Claiming that file is honest, and the
+    // worktree says so, so it is accounted for.
+    const report = buildReport(
+      input({ changed: ['docs/plans/9b-P1.md'], events: finished(['docs/plans/9b-P1.md']) }),
+    );
+    expect(report.claimGaps).toEqual([]);
+    expect(report.headline).not.toContain('accounts for');
+  });
+
+  it('ignores the leading ./ and the separators, so a claim matches the write', () => {
+    // The paths come from a model writing JSON and from this repo's own
+    // normaliser, which spell the same file two ways.
+    const report = buildReport(
+      input({ changed: [], events: [...write('src/a.ts'), ...finished(['./src\\a.ts'])] }),
+    );
+    expect(report.claimGaps).toEqual([]);
+  });
+
+  it('notes files it changed without claiming them, quietly', () => {
+    // The benign direction: a run that mentions two of the three files it
+    // touched is being terse, not dishonest, so this is not a headline.
+    const report = buildReport(
+      input({
+        changed: [],
+        events: [...write('src/a.ts'), ...write('src/b.ts'), ...finished(['src/a.ts'])],
+      }),
+    );
+    expect(report.unclaimed).toEqual(['src/b.ts']);
+    expect(report.headline).not.toContain('accounts for');
   });
 });
 

@@ -98,7 +98,15 @@ export type RunEventBody =
   | { type: 'answer'; id: string; answer: string; by: Speaker }
   | { type: 'message'; by: Speaker; text: string }
   | { type: 'metrics'; turn: number; call: CallMetrics; totals: RunTotals }
-  | { type: 'summary'; text: string }
+  /**
+   * What the agent said it did, at the end.
+   *
+   * `changed` is the part worth having. Measured: a run wrote "ui/add.spec.ts
+   * rewritten" in its summary when the file had not changed, and the only way
+   * anybody found out was reading the diff by hand afterwards. A list can be
+   * compared against what the run actually wrote; prose cannot.
+   */
+  | { type: 'summary'; text: string; changed?: string[] }
   /**
    * A model call was refused with something worth trying again, and is waiting.
    *

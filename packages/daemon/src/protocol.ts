@@ -7,6 +7,7 @@ import type {
   Speaker,
   TimingStat,
 } from '@emilswork/harness-core';
+import type { OutcomeStats, RunTag } from './store.js';
 
 export interface RunSummary {
   id: string;
@@ -41,6 +42,17 @@ export interface RunSummary {
    * and genuinely does not know. Absent means "not asked", not "free".
    */
   priced?: boolean;
+  /**
+   * What happened to this run's work, as told by whoever ran the gate on it.
+   *
+   * Null until somebody says. `dsh tag` sets it, and it is the only thing that
+   * answers "did any of this land" — a run that finished and a run that finished
+   * and was thrown away look identical without it.
+   */
+  tag: RunTag | null;
+  /** Why, in the tagger's own words. */
+  tagNote: string | null;
+  taggedAt: string | null;
 }
 
 export interface RunDetail extends RunSummary {
@@ -129,6 +141,20 @@ export interface ModelStats {
 export interface StatsResponse {
   runs: number;
   models: ModelStats[];
+  /**
+   * Whether the work landed, grouped by model and profile.
+   *
+   * The other half of `stats`, and the half that decides anything: speed and
+   * cost are inputs, and this is what came out. A model that is fast and cheap
+   * and produces nothing worth keeping is worse than a slow one that does.
+   */
+  outcomes: OutcomeStats[];
+}
+
+/** `POST /runs/:id/tag`. */
+export interface TagBody {
+  tag: RunTag;
+  note?: string;
 }
 
 /**

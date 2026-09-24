@@ -645,6 +645,42 @@ table.runs td.num {
   color: var(--text-muted);
 }
 
+/* --- what happened to the work, once somebody judged it ------------------ */
+
+/* A mark of its own next to the status, because the status cannot answer this:
+   a run stopped at a limit whose half-finished work was kept, and one whose work
+   was thrown away, are the same row without it. Only drawn when there is a tag —
+   a run nobody has gated has not been judged, and a grey "dropped" would be
+   inventing an answer. */
+.tag-pill {
+  font-size: var(--t-label);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 0 var(--s1);
+  border-radius: var(--radius-sm);
+  border: 1px solid currentColor;
+  white-space: nowrap;
+  flex: none;
+}
+
+.tag-pill[data-tag='landed'] {
+  color: var(--success);
+}
+
+/* Amber, not red: it needed a person, which is a fact about the work and not a
+   failure of the run. */
+.tag-pill[data-tag='fixed'] {
+  color: var(--warning);
+}
+
+.tag-pill[data-tag='dropped'] {
+  color: var(--text-faint);
+}
+
+table.runs .tag-pill {
+  margin-left: var(--s2);
+}
+
 @keyframes breathe {
   0%,
   100% {

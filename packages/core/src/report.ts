@@ -21,6 +21,7 @@
 import { checkOutcome, type CheckOutcome } from './checks.js';
 import type { RunEvent, RunStatus, RunTotals } from './events.js';
 import { elapsedSeconds, formatLimit, limitUse, type LimitUse } from './limits.js';
+import { relNorm } from './paths.js';
 import type { RunLimits } from './task.js';
 
 /** The last result of each check the run ran. */
@@ -68,6 +69,40 @@ export interface RunReport {
    * and the last thing a check said was that it was not.
    */
   claimSupported: boolean | null;
+  /**
+   * The files the agent said it changed, when it said so at all.
+   *
+   * Null is "it listed none", which is different from an empty list and is said
+   * differently below.
+   */
+  claimed: string[] | null;
+  /**
+   * Claimed files that nothing in this run accounts for.
+   *
+   * The finding that made this exist: a run wrote "`ui/add.spec.ts` rewritten"
+   * in its summary when the file had not changed at all, and the only way
+   * anybody found out was reading the diff by hand at the gate. A file can also
+   * change without a write call — a check that regenerates something did it in a
+   * real run — so the wording is "nothing in this run accounts for it" and the
+   * evidence checked is named on the report.
+   */
+  claimGaps: string[];
+  /**
+   * Files that changed and were not claimed.
+   *
+   * The benign direction — a run that mentions six of the eight files it touched
+   * is being terse, not dishonest — so it is a note rather than a headline.
+   */
+  unclaimed: string[];
+  /**
+   * Lines added and removed, from the run's own write calls.
+   *
+   * Derived from what the run wrote rather than from git, for the same reason
+   * `changed` is: it has to survive the worktree being committed or reset. It is
+   * what makes `dsh stats` able to say what a run cost per line that landed,
+   * which is the only cost figure that means anything.
+   */
+  lines: { added: number; removed: number };
   checks: CheckResult[];
   /** Files the run was allowed to change, for reference. */
   allowed: string[];
@@ -135,6 +170,16 @@ export interface ReportInput {
   totals: RunTotals;
   summary: string | null;
   events: RunEvent[];
+  /**
+   * Files git sees a change in, read when the report was built.
+   *
+   * Two jobs. It is the fallback file list for a run whose log holds no writes,
+   * and it is half of the claimed-versus-actual comparison: a file can change
+   * with no write call behind it, because a check the run ran can regenerate
+   * something. A real run reported a stray change the agent never made for
+   * exactly that reason, so a claim that only the worktree backs up is honest
+   * and the report must not call it a lie.
+   */
   changed: string[];
   stray: string[];
   /** Files on the soft list that changed. See `RunReport.offPlan`. */
@@ -155,37 +200,63 @@ export function limitName(which: string): string {
 }
 
 /**
- * The headline, plus the fact that the run went past a budget anyway.
+ * The headline, plus two things a `finished` run can still be hiding.
  *
- * A run can be `finished` and over budget at the same time, and it is not rare:
- * a call's cost is only known once it has been paid for, so the last turn of a
- * run with a small dollar budget can carry it well past the ceiling and then
- * call `finish` in the same turn. Measured live: a run told it had a tenth of a
- * cent left spent four times that on one long answer and reported itself as
- * finished, which is the one word a reader skims.
+ * **Over budget anyway.** A call's cost is only known once it has been paid for,
+ * so the last turn of a run with a small dollar budget can carry it well past
+ * the ceiling and call `finish` in the same turn. Measured live: a run told it
+ * had a tenth of a cent left spent four times that on one long answer and
+ * reported itself as finished, which is the one word a reader skims. Strictly
+ * past, not merely at: reaching a limit exactly is the normal happy path, and
+ * saying a run went over would be crying wolf on every run that finishes on its
+ * last turn.
  *
- * Strictly past, not merely at. Reaching a limit exactly is the *normal* happy
- * path — a four-turn run that finishes on its fourth turn has used all four
- * turns — and saying that a run went over would be crying wolf on every single
- * run that finishes on its last turn.
+ * **Files it says it changed, that nothing accounts for.** Measured: a run wrote
+ * "`ui/add.spec.ts` rewritten" in its summary when the file had not changed, and
+ * the only way anybody found out was reading the diff by hand at the gate. The
+ * wording is careful — a file can change with no write call behind it, because a
+ * check the run ran can regenerate something, and a real run did exactly that —
+ * so it says what was checked rather than accusing.
  */
-function withOverspend(status: RunStatus, text: string, used: LimitUse[]): string {
+function withOverspend(status: RunStatus, text: string, used: LimitUse[], claimGaps: string[]): string {
   if (status !== 'finished') return text;
+  const clauses: string[] = [];
+
   const over = used.filter((use) => use.used > use.budget);
-  if (over.length === 0) return text;
-  const them = over
-    .map(
-      (use) =>
-        `${limitName(use.which)} budget (${formatLimit(use.which, use.used)} of ${formatLimit(use.which, use.budget)})`,
-    )
-    .join(' and ');
-  return `${text} It went past its ${them} on the way, so judge the claim below in that light.`;
+  if (over.length > 0) {
+    const them = over
+      .map(
+        (use) =>
+          `${limitName(use.which)} budget (${formatLimit(use.which, use.used)} of ${formatLimit(use.which, use.budget)})`,
+      )
+      .join(' and ');
+    clauses.push(`It went past its ${them} on the way`);
+  }
+
+  if (claimGaps.length > 0) {
+    clauses.push(
+      `It says it changed ${claimGaps.join(', ')}, and nothing in this run accounts for ` +
+        `${claimGaps.length === 1 ? 'that file' : 'those files'} changing: no write that succeeded, ` +
+        `and no change in the worktree now`,
+    );
+  }
+
+  if (clauses.length === 0) return text;
+  return `${text} ${clauses.join('. ')}. Judge the claim below in that light.`;
 }
 
 export function buildReport(input: ReportInput): RunReport {
   const checks = lastCheckOutcomes(input.events, input.commands ?? []);
   const questions = askedQuestions(input.events);
-  const written = writtenPaths(input.events);
+  const writes = writesOf(input.events);
+  const written = [...writes.keys()].sort();
+  const claimed = claimedFiles(input.events);
+  const finished = claimed !== null;
+  // Everything this run has an explanation for: a write it made, or a change
+  // visible in the worktree that was not already there when it started.
+  const accounted = new Set([...written, ...input.changed]);
+  const claimGaps = finished ? (claimed as string[]).filter((file) => !accounted.has(relNorm(file))) : [];
+  const unclaimed = finished ? written.filter((file) => !(claimed as string[]).includes(file)) : [];
   const warnings = input.events.filter((event) => event.type === 'warning').length;
   const warnedAbout = [
     ...new Set(
@@ -223,7 +294,7 @@ export function buildReport(input: ReportInput): RunReport {
     id: input.id,
     name: input.name,
     status: input.status,
-    headline: withOverspend(input.status, headline(input, checks, failed, stopped), used),
+    headline: withOverspend(input.status, headline(input, checks, failed, stopped), used, claimGaps),
     task: input.task,
     model: input.model,
     turns: input.turns,
@@ -235,6 +306,10 @@ export function buildReport(input: ReportInput): RunReport {
     stoppedAt: stopped === undefined ? null : stoppedAt,
     claim,
     claimSupported: claim === null ? null : failed.length === 0,
+    claimed,
+    claimGaps,
+    unclaimed,
+    lines: lineCounts(writes),
     checks,
     allowed: input.allowed,
     changed: written.length > 0 ? written : input.changed,
@@ -343,7 +418,7 @@ function lastCheckOutcomes(events: RunEvent[], commandNames: string[]): CheckRes
 }
 
 /**
- * The files the run's own write tools touched, from its event log.
+ * The files the run's own write tools changed, with how much of each.
  *
  * Read from the events rather than from git, and that is the point. A report
  * built later asked git what had changed, so a worktree that had been reset or
@@ -352,18 +427,76 @@ function lastCheckOutcomes(events: RunEvent[], commandNames: string[]): CheckRes
  * finished run whose two edits had since been reverted reported "nothing
  * changed" and an empty file list.
  *
+ * Only writes that **succeeded**. A `replace_in_file` whose old text did not
+ * match changed nothing, and a run whose only attempt on a file was refused used
+ * to be reported as having changed it.
+ *
  * Falls back to git only when the log has no writes in it, so a run that wrote
  * something in a way not modelled here is still described rather than empty.
  */
-function writtenPaths(events: RunEvent[]): string[] {
-  const written = new Set<string>();
+function writesOf(events: RunEvent[]): Map<string, { added: number; removed: number }> {
+  const attempts = new Map<string, { path: string; added: number; removed: number }>();
   for (const event of events) {
     if (event.type !== 'tool.call') continue;
     if (event.name !== 'replace_in_file' && event.name !== 'create_file') continue;
-    const args = event.args as { path?: unknown } | null;
-    if (typeof args?.path === 'string') written.add(args.path);
+    const args = event.args as { path?: unknown; old?: unknown; new?: unknown; content?: unknown } | null;
+    if (typeof args?.path !== 'string') continue;
+    attempts.set(event.id, { path: relNorm(args.path), ...changedLines(event.name, args) });
   }
-  return [...written].sort();
+
+  const done = new Map<string, { added: number; removed: number }>();
+  for (const event of events) {
+    if (event.type !== 'tool.result') continue;
+    const attempt = attempts.get(event.id);
+    // `ok` is false for a refusal and for a failed match, and neither changed a
+    // byte on disk.
+    if (attempt === undefined || !event.ok) continue;
+    const already = done.get(attempt.path);
+    done.set(attempt.path, {
+      added: (already?.added ?? 0) + attempt.added,
+      removed: (already?.removed ?? 0) + attempt.removed,
+    });
+  }
+  return done;
+}
+
+/** How many lines one write added and removed, from the text it was given. */
+function changedLines(
+  tool: string,
+  args: { old?: unknown; new?: unknown; content?: unknown },
+): { added: number; removed: number } {
+  const count = (value: unknown): number =>
+    typeof value === 'string' && value !== '' ? value.split('\n').length : 0;
+  if (tool === 'create_file') return { added: count(args.content), removed: 0 };
+  return { added: count(args.new), removed: count(args.old) };
+}
+
+function lineCounts(writes: Map<string, { added: number; removed: number }>): {
+  added: number;
+  removed: number;
+} {
+  let added = 0;
+  let removed = 0;
+  for (const entry of writes.values()) {
+    added += entry.added;
+    removed += entry.removed;
+  }
+  return { added, removed };
+}
+
+/**
+ * The files the agent listed in `finish`, or null when it listed none.
+ *
+ * The last summary event wins, because there is one `finish` and a later one
+ * would be the agent correcting itself.
+ */
+function claimedFiles(events: RunEvent[]): string[] | null {
+  const summaries = events.filter((event) => event.type === 'summary');
+  const last = summaries[summaries.length - 1];
+  if (last === undefined || last.type !== 'summary') return null;
+  const changed = last.changed;
+  if (changed === undefined || changed.length === 0) return null;
+  return [...new Set(changed.map((file) => relNorm(file)))].sort();
 }
 
 function askedQuestions(events: RunEvent[]): { question: string; answer: string | null }[] {

@@ -212,6 +212,32 @@ dsh list | show <run> | logs <run> | diff <run> | stats
 dsh timings [run]                            where the time actually went
 ```
 
+And the four that are about the run rather than about watching it:
+
+```
+dsh report <run>                 what happened, for somebody who did not watch
+dsh patch <run> [--out f.patch]  the run's changes as a patch for git apply --3way
+dsh tag <run> landed|fixed|dropped --note "…"
+                                 what happened to the work, after your own gate
+dsh worktree new <name> --from <ref>    a worktree to run in, node_modules linked
+dsh worktree reset <name> <ref>         put it back, refusing if a run is going
+```
+
+`dsh tag` is the one that changes what you can decide. `dsh stats` prints how
+runs ended, and beside it what happened to the work afterwards, per model and per
+project, with a cost per line that landed untouched:
+
+```
+MODEL               PROFILE        RUNS  FIN  LIMIT FAIL  LANDED FIXED DROPPED  LINES   $ PER LINE
+deepseek-flash      esap.json        19    9      8    0       1     1       1     10      $0.0006
+```
+
+Only `landed` counts towards the cost per line. A run tagged `fixed` needed you
+to finish it, so its lines are not this thing's output, and counting them would
+make the one figure that matters flatter itself. An untagged run shows `-` rather
+than `0`: nobody has judged it, which is not the same as it having produced
+nothing.
+
 That's built for how Claude works: it runs `dsh run` in the background, reads the
 output, answers questions with a second command, and kills the job, which cancels
 the agent properly.

@@ -12,13 +12,23 @@ export interface ToolContext {
 export interface ToolDefinition {
   name: string;
   description: string;
-  properties: Record<string, string>;
+  /**
+   * Arguments, by name.
+   *
+   * A string, or an object for anything JSON-shaped. `items` is what makes an
+   * array argument possible: the OpenAI-shaped schema wants
+   * `{ type: 'array', items: { type: 'string' } }`, and a bare `'array'` is a
+   * type the API rejects.
+   */
+  properties: Record<string, string | { type: string; items?: { type: string }; description?: string }>;
   required: string[];
 }
 
 function toSpec(definition: ToolDefinition): ToolSpec {
-  const properties: Record<string, { type: string }> = {};
-  for (const [name, type] of Object.entries(definition.properties)) properties[name] = { type };
+  const properties: Record<string, { type: string; description?: string; items?: { type: string } }> = {};
+  for (const [name, type] of Object.entries(definition.properties)) {
+    properties[name] = typeof type === 'string' ? { type } : type;
+  }
   return {
     type: 'function',
     function: {
@@ -91,8 +101,18 @@ export function toolDefinitions(context: ToolContext): ToolDefinition[] {
     },
     {
       name: 'finish',
-      description: 'Stop, with a short summary of what changed and anything not done.',
-      properties: { summary: 'string' },
+      description:
+        'Stop, with a short summary of what changed and anything not done, and ' +
+        'the list of files you changed. The list is checked against what this run actually wrote, so ' +
+        'claiming a file you did not change is worse than leaving it out.',
+      properties: {
+        summary: 'string',
+        // A list rather than prose. Measured: a run wrote "ui/add.spec.ts
+        // rewritten" in its summary when the file had not changed, and the only
+        // way anybody found out was reading the diff by hand afterwards. Prose
+        // cannot be compared against anything.
+        changed: { type: 'array', items: { type: 'string' } },
+      },
       required: ['summary'],
     },
     // The project's own commands, last, after the tools the harness guarantees.
@@ -150,7 +170,10 @@ export function toolCatalogue(context: ToolContext): CatalogueEntry[] {
     name: definition.name,
     description: definition.description,
     args: Object.entries(definition.properties)
-      .map(([name, type]) => `${name}: ${type}${definition.required.includes(name) ? '' : '?'}`)
+      .map(([name, type]) => {
+        const kind = typeof type === 'string' ? type : `${type.type} of ${type.items?.type ?? '?'}`;
+        return `${name}: ${kind}${definition.required.includes(name) ? '' : '?'}`;
+      })
       .join(', '),
   }));
 }

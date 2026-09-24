@@ -4,8 +4,14 @@ Réponse à `IMPROVEMENTS_CLAUDE_1.md`, point par point. Pour chacun : ce qui a 
 fait, ou pourquoi non. Écrit après avoir lu le code plutôt que de mémoire, et
 après avoir lancé les mécanismes contre la vraie API DeepSeek.
 
-Trois points sur quatorze ne sont pas faits. Ils sont marqués **non fait** avec
-la raison, et pas adoucis.
+**Onze points sur quatorze sont finis.** Les trois autres : le point 4 (les
+**globs** dans `allow` et `soft`), le point 9 _(skippé par Emil)_, et les parties
+que je refuse explicitement — `unattended` (point 3), `request_file` (point 4) et
+le classifieur comme barrière de sécurité (point 1). Chaque refus dit pourquoi.
+
+Deux choses sont **faites mais pas vues en live**, et ce n'est pas la même chose
+que faites : le code de sortie 6 sur un solde épuisé, et les commandes Rust du
+profil esap. Elles sont listées à la fin.
 
 ---
 
@@ -194,30 +200,82 @@ Refuser de démarrer échangerait un succès probable contre un échec certain.
 
 ---
 
-## 6. Un résumé qui ne peut pas mentir — **partiellement**
+## 6. Un résumé qui ne peut pas mentir — **fait**
+
+`finish` prend maintenant une liste, pas seulement de la prose :
+
+```json
+{ "summary": "…", "changed": ["ui/add.spec.ts", "src/field.rs"] }
+```
+
+L'outil est décrit de façon à ce que la liste soit naturelle à donner, et le
+rapport la confronte à ce que le run a réellement fait.
 
 Fait :
 
-- le rapport liste les fichiers d'après les **écritures du run lui-même** tirées
-  de son journal d'événements, plus d'après git au moment de la lecture. Trouvé
-  en lisant un vrai rapport : un run dont les deux éditions avaient été annulées
-  depuis se décrivait comme n'ayant « rien changé », alors que son journal
-  contenait les deux écritures depuis le début ;
+- **les fichiers d'après les écritures du run**, pas d'après git au moment de la
+  lecture. Trouvé en lisant un vrai rapport : un run dont les deux éditions
+  avaient été annulées depuis se décrivait comme n'ayant « rien changé », alors
+  que son journal contenait les deux écritures depuis le début ;
+- **une écriture qui a échoué ne compte pas.** Un `replace_in_file` dont le
+  texte n'a pas été trouvé n'a rien changé, et un run dont la seule tentative sur
+  un fichier avait été refusée était rapporté comme l'ayant modifié ;
 - `onDisk` est gardé **à côté**, et le rapport (CLI et UI) dit quand les deux
-  divergent — c'est le seul cas où un lecteur a besoin de savoir lequel il
-  regarde ;
-- `dsh report --json` existe déjà et donne statut, fichiers, dernier résultat de
-  chaque check, tours, tokens, résumé.
+  divergent ;
+- **`claimGaps`** : un fichier annoncé pour lequel rien dans le run ne rend
+  compte du changement — aucune écriture réussie, aucun changement visible dans
+  le worktree. Le titre le dit.
 
-Vérifié en live : `changed  src/one.ts, src/two.ts` vient maintenant du journal,
-pas de git.
+Le mot « mensonge » n'est pas employé, et c'est délibéré : un fichier peut
+changer **sans appel d'écriture**, parce qu'un check que le run a lancé peut le
+régénérer. Un vrai run avait exactement ce cas (`docs/plans/9b-P1.md`, réécrit
+par un générateur de docs que l'agent avait lancé), donc annoncer ce fichier est
+honnête et le rapport ne doit pas l'appeler un mensonge. Il dit ce qui a été
+vérifié, pas ce qu'il en conclut.
 
-Non fait : **comparer les chemins cités dans le texte du résumé avec le diff**.
-Ton approche est fragile — « j'ai lu `src/a.ts` » n'est pas une prétention de
-modification, et le rapport crierait au mensonge sur une lecture. La bonne
-version est que `finish` prenne un `changed: string[]` optionnel et que le
-harness le confronte à la réalité : lisible par machine, aucune heuristique sur
-de la prose. Ce n'est pas fait.
+Vérifié en live, les deux sens :
+
+- un run qui annonce honnêtement `src/one.ts, src/two.ts` → `claimed (+8 −4
+lines)`, aucune alerte ;
+- un run à qui on demande de lister « tous les fichiers que tu as regardés »
+  annonce `src/two.ts` qu'il a lu sans le modifier → `NOTHING ACCOUNTS FOR:
+src/two.ts changing`, et le titre le mentionne.
+
+Le sens bénin — des fichiers changés et non annoncés — est une note discrète et
+pas un titre : un run qui mentionne deux fichiers sur trois est concis, pas
+malhonnête.
+
+## 11. Mesurer le vrai taux de réussite — **fait**
+
+`dsh tag <run> landed|fixed|dropped [--note "..."]`, et `dsh stats` a une
+seconde table :
+
+```
+MODEL               PROFILE            RUNS  FIN  LIMIT FAIL  LANDED FIXED DROPPED LINES  $ PER LINE
+deepseek-flash      esap.json            19    9      8    0       1     1       1    10     $0.0006
+```
+
+Le regroupement est par **modèle et profil**, parce que les deux répondent à des
+questions différentes et qu'un seul des deux trompe : le même modèle sur deux
+projets, ou deux modèles sur un projet.
+
+**Les lignes ne sont pas comptées au moment de la lecture.** `dsh tag` envoie le
+nombre de lignes ajoutées et retirées, calculé d'après les écritures du run — une
+étiquette posée en mars doit dire la même chose en juin. C'est aussi ce qui rend
+la métrique calculable pour les runs déjà en base : leurs événements sont là.
+
+**Seuls les `landed` comptent dans le coût par ligne.** Un run étiqueté `fixed` a
+eu besoin de toi pour finir, donc ses lignes ne sont pas la production du
+harness ; les compter ferait que le seul chiffre qui compte s'auto-flatte.
+
+Une ligne sans aucune étiquette est `-` et non `0` : un run que personne n'a jugé
+n'a pas été jugé, et `dropped` serait inventer une réponse.
+
+Le détail qui aurait pu tout casser : les colonnes sont ajoutées à une table qui
+contenait déjà 22 runs. La migration lit `PRAGMA table_info(runs)` et ajoute ce
+qui manque — pas `user_version`, parce qu'une base écrite avant ceci a la version
+0 comme une base neuve, et rien ne les distingue. Vérifié en live : 22 runs
+intacts, 5 colonnes ajoutées.
 
 ---
 
@@ -331,18 +389,42 @@ arrive, `--json` sur `dsh run` montrera `"cause":"provider_balance"`.
 
 ---
 
-## 13. Des outils de worktree — **NON FAIT**
+## 13. Des outils de worktree — **fait**
 
-`dsh worktree new|reset`, `dsh patch`. Rien n'a été fait.
+- **`dsh worktree new <nom> --repo <path> --from <ref>`** : un worktree à côté du
+  dépôt (`F:/vsCode/esap-ds-1` à côté de `F:/vsCode/esap`, la convention déjà en
+  usage), plus une jonction vers `node_modules`. Une jonction et non une
+  installation : minutes et gigaoctets pour un arbre identique dans tous. `setup`
+  n'est **pas** lancé ici — c'est le worker qui le fait une fois par worktree, et
+  le faire à deux endroits serait deux implémentations d'une même chose.
+- **`dsh worktree reset <nom> <ref>`** : `reset --hard` puis `clean -fd`, et pas
+  `-x`, donc `node_modules` et `target` survivent — les supprimer rendrait un
+  reset aussi lent qu'un nouveau worktree. Il **refuse** si un run tourne dans
+  cet arbre.
+- **`dsh patch <run> [--out <fichier>]`** : le diff des fichiers **que le run a
+  écrits**, prêt pour `git apply --3way`.
 
-Ce qui existe déjà et qui fait une partie du travail : `setup` dans le
-workspace (§5) couvre le build d'installation, et `dsh diff <run>` donne le diff
-du worktree, que `git diff` sait déjà transformer en patch.
+Le patch vient de git et non du journal, et c'est la bonne décision : les appels
+`replace_in_file` portent l'ancien et le nouveau texte, donc un patch serait
+reconstructible — et faux dès que quelque chose d'autre touche le fichier (un
+formateur que le run a lancé, une seconde édition qui recouvre la première, un
+check qui régénère). Git est l'autorité sur la façon de dire ça en patch.
 
-Le point qui aurait le plus de valeur est `dsh patch <run>` qui donne un binaire
-prêt pour `git apply --3way`. Mais avec `changed` maintenant tiré du journal du
-run (§6), le patch est reconstructible : ce sont les fichiers que le run a
-écrits. À faire dans cet ordre.
+Ce que git ne peut pas voir, c'est un fichier **créé** par le run : un fichier non
+suivi est invisible pour `git diff`. L'astuce `git add -N` le rendrait visible et
+mute l'index de l'arbre de quelqu'un d'autre, donc ce diff est écrit à la main.
+C'est exactement le genre de chose qui a l'air juste et ne l'est pas, donc elle
+est **prouvée en l'appliquant** : les tests génèrent un patch pour une édition,
+un fichier nouveau, et un fichier sans saut de ligne final, et vérifient que
+`git apply --3way` produit le même fichier.
+
+Un détail qui n'est pas cosmétique : les fins de ligne. Le diff d'un fichier
+nouveau suit `core.autocrlf` au lieu de normaliser en dur, parce qu'un patch qui
+normalise toujours produit un fichier qui diffère de celui que le run a écrit.
+
+Vérifié en live : patch d'un vrai run appliqué dans un worktree neuf au même
+commit → `IDENTICAL` sur les deux fichiers. Et le garde du reset : un run en
+`waiting` a fait échouer la commande, exactement comme voulu.
 
 ---
 
@@ -387,14 +469,23 @@ commencé, elle continue avec les anciennes et rien ne le dit.
 
 ---
 
-## Les trois qui restent, dans l'ordre où je les ferais
+## Ce qui reste, dans l'ordre où je le ferais
 
-1. **Le point 11** — sans lui, vous ne savez pas si un changement aide.
-2. **Le point 6**, la comparaison résumé/diff — `finish` prend un `changed`, le
-   rapport confronte. Débloque aussi le point 13.
-3. **Les globs** dans `allow` et `soft` ensemble (§4).
+1. **Les globs** dans `allow` et `soft` ensemble (§4). Le travail est de résoudre
+   la liste en fichiers concrets à la construction, pas le matching.
+2. **Un contrôle par cas pour chaque garde du §14** — la règle du dépôt est
+   « casse la chose, regarde le test rougir ». Les gardes existent, les contrôles
+   sont inégaux.
+3. **L'isolation OS des tests**, si tu veux que l'agent puisse lancer des tests
+   qu'un attaquant aurait écrits. Aujourd'hui la liste fermée est ce qui protège,
+   et elle protège bien contre le dégât accidentel et pas du tout contre
+   l'exfiltration.
 
-Et **un projet hors du harness pour l'isolation OS des tests**, si tu veux que
-l'agent puisse lancer des tests qu'un attaquant aurait écrits. Aujourd'hui la
-liste fermée est ce qui protège, et elle protège bien contre le dégât accidentel
-et pas du tout contre l'exfiltration.
+Et deux choses faites mais **pas vues en live**, à ne pas confondre avec
+« faites » :
+
+- **le code de sortie 6 sur solde épuisé** — implémenté et testé, jamais
+  déclenché contre la vraie API. Les phrases d'indice viennent de la doc, pas
+  d'une réponse observée.
+- **`cargo fmt -- {allowed}`** — je n'ai pas vérifié sur Rust si c'est équivalent
+  à `rustfmt <fichiers>`, ni l'un ni l'autre n'étant exécutable ici.

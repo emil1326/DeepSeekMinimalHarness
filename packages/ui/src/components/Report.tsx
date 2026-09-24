@@ -164,6 +164,39 @@ export function Report({ runId, live, taskPath }: { runId: string; live: boolean
           )
         )}
 
+        {/* The agent's own list, and what the run can account for. A run that
+            wrote "ui/add.spec.ts rewritten" when the file had not changed was
+            only ever found by reading the diff by hand. */}
+        {data.claimed !== null && (
+          <>
+            <h3>what it said it changed</h3>
+            <p>
+              {data.claimed.length === 0 ? (
+                <span className="quiet">it listed no files</span>
+              ) : (
+                <span>
+                  {data.claimed.join(', ')}{' '}
+                  <span className="quiet">
+                    (+{data.lines.added} −{data.lines.removed} lines, from the writes themselves)
+                  </span>
+                </span>
+              )}
+            </p>
+            {data.claimGaps.length > 0 && (
+              <p className="report-loud">
+                Nothing in this run accounts for {data.claimGaps.join(', ')} changing: no write that
+                succeeded, and no change in the worktree now.
+              </p>
+            )}
+            {data.unclaimed.length > 0 && (
+              <p className="quiet">
+                It also changed {data.unclaimed.join(', ')} without listing{' '}
+                {data.unclaimed.length === 1 ? 'it' : 'them'}.
+              </p>
+            )}
+          </>
+        )}
+
         {data.questions.length > 0 && (
           <>
             <h3>questions</h3>

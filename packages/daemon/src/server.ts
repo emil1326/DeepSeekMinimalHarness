@@ -17,7 +17,7 @@ import {
 import { strayChanges } from '@emilswork/harness-worker';
 import type { Auth } from './auth.js';
 import type { Supervisor } from './supervisor.js';
-import { summarise, type Store } from './store.js';
+import { RUN_TAGS, summarise, type Store } from './store.js';
 import type {
   AnswerBody,
   ApiErrorBody,
@@ -29,6 +29,7 @@ import type {
   RunSummary,
   RunTimings,
   StatsResponse,
+  TagBody,
   TimingsResponse,
 } from './protocol.js';
 import { TaskError } from '@emilswork/harness-core';
@@ -275,6 +276,7 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
       const stats: StatsResponse = {
         runs: store.countRuns(),
         models: summarise(store.allMetrics(), options.prices),
+        outcomes: store.outcomes(),
       };
       return send(response, 200, stats);
     }
@@ -401,6 +403,49 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
       if (store.getRun(runId) === null) return send(response, 404, { error: `no run called ${runId}` });
       supervisor.cancel(runId, 'cancelled from the CLI');
       return send(response, 200, { ok: true });
+    }
+
+    const tagRoute = /^\/runs\/([^/]+)\/tag$/.exec(url.pathname);
+    if (request.method === 'POST' && tagRoute?.[1] !== undefined) {
+      return void readJson<TagBody>(request)
+        .then((body) => {
+          const runId = tagRoute[1] as string;
+          if (!RUN_TAGS.includes(body.tag)) {
+            return send(response, 400, { error: `tag must be one of: ${RUN_TAGS.join(', ')}` });
+          }
+          if (store.getRun(runId) === null) return send(response, 404, { error: `no run called ${runId}` });
+          // The lines come from the run's own write calls, through the same
+          // report the reader sees, so the figure tagged here is the one on the
+          // report and not a second count that could disagree with it.
+          const detail = store.getRun(runId);
+          const report = buildReport({
+            id: runId,
+            name: detail?.name ?? runId,
+            status: detail?.status ?? 'finished',
+            model: detail?.model ?? '',
+            task: '',
+            allowed: [],
+            commands: Object.keys(detail?.config.commands ?? {}),
+            limits: detail?.limits ?? ({} as RunLimits),
+            turns: detail?.turns ?? 0,
+            totals: detail?.totals ?? ({} as never),
+            summary: null,
+            events: store.eventsAfter(runId, 0, 100_000),
+            changed: [],
+            stray: [],
+            strayFailure: null,
+          });
+          try {
+            store.tag(runId, body.tag, {
+              ...(body.note === undefined ? {} : { note: body.note }),
+              lines: report.lines,
+            });
+          } catch (error) {
+            return send(response, 404, { error: (error as Error).message });
+          }
+          return send(response, 200, { ok: true, tag: body.tag, lines: report.lines });
+        })
+        .catch((error: Error) => send(response, 400, { error: error.message }));
     }
 
     const limitsRoute = /^\/runs\/([^/]+)\/limits$/.exec(url.pathname);

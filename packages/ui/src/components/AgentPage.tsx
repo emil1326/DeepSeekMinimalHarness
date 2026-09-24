@@ -9,7 +9,7 @@ import { DiffView } from './Diff';
 import { Limits } from './Limits';
 import { MetricsStrip } from './Metrics';
 import { Report } from './Report';
-import { StatusPill } from './Status';
+import { StatusPill, TagPill } from './Status';
 import { Timings } from './Timings';
 
 type Tab = 'chat' | 'report' | 'config' | 'diff' | 'timing';
@@ -70,6 +70,7 @@ export function AgentPage({ runId, onBack }: { runId: string; onBack: () => void
           </button>
           <h1>{detail.name}</h1>
           <StatusPill status={detail.status} detail={detail.detail} />
+          <TagPill tag={detail.tag} note={detail.tagNote} />
           <span className="push" />
           {live && (
             <button

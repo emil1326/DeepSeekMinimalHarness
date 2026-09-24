@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { api } from '../api';
 import { durationOf, money, shortPath, speed, tokens } from '../format';
 import { isTerminal, type RunSummary } from '../types';
-import { StatusPill } from './Status';
+import { StatusPill, TagPill } from './Status';
 import { AllTimings } from './Timings';
 
 export function AgentsList({ onOpen }: { onOpen: (runId: string) => void }) {
@@ -121,6 +121,10 @@ function Row({
           the page and tells you nothing at a glance. */}
       <td className="name">
         <span className="title">{run.name}</span>
+        {/* Beside the name rather than in a column of its own: most runs are
+            untagged, and a column that is empty most of the time is a column
+            that steals its width from the ones that are not. */}
+        <TagPill tag={run.tag} note={run.tagNote} />
         <span className="under mono" title={run.worktree}>
           {run.model} · {shortPath(run.worktree)}
         </span>
