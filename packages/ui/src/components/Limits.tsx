@@ -146,8 +146,12 @@ export function Limits({
  * The ring is the fraction and the text is the amount, so neither has to do the
  * other's job. It turns amber at four fifths — the same threshold the agent is
  * warned at, so the page and the agent agree about when a run is in trouble —
- * and red once the budget is gone rather than wrapping back round to empty,
- * which is the one thing an overflowing progress bar gets wrong.
+ * and red once a budget has actually been gone past.
+ *
+ * Past, not merely at. Using a budget exactly is the normal happy path: a
+ * four-turn run that finishes on its fourth turn has used all four of its turns,
+ * and a red ring on it would be an alarm about nothing — which is how a person
+ * learns to ignore the colour. Only a limit that was exceeded is a mistake.
  */
 function Ring({
   which,
@@ -161,7 +165,7 @@ function Ring({
   budget: number;
 }) {
   const ratio = budget > 0 ? used / budget : 1;
-  const tone = ratio >= 1 ? 'over' : ratio >= 0.8 ? 'near' : 'ok';
+  const tone = ratio > 1 ? 'over' : ratio >= 0.8 ? 'near' : 'ok';
 
   const size = 60;
   const stroke = 3.5;

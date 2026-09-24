@@ -23,7 +23,9 @@ import { Supervisor } from './supervisor.js';
 async function main(): Promise<void> {
   fs.mkdirSync(harnessHome(), { recursive: true });
   const config = loadHarnessConfig();
-  const store = new Store(runsDbFile());
+  // The price table goes to the store as well, so a run recorded before the
+  // harness knew any prices still shows what its calls cost rather than a dash.
+  const store = new Store(runsDbFile(), config.prices);
   const interrupted = store.markRunningAsInterrupted();
   if (interrupted > 0) {
     process.stdout.write(`dsh: ${interrupted} run(s) left running by a crash are now interrupted\n`);

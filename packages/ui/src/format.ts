@@ -26,6 +26,16 @@ export function money(value: number | null | undefined): string {
 }
 
 /**
+ * A limit's name as a person writes it.
+ *
+ * `costUsd` is a field name, and "the harness warned the agent about costUsd"
+ * is what the chat reads otherwise.
+ */
+export function limitName(which: string): string {
+  return which === 'costUsd' ? 'cost' : which;
+}
+
+/**
  * A limit's numbers in its own unit, short enough to sit inside a ring.
  *
  * `turns` is a count, tokens get their `k` and `M`, a wall clock is minutes once

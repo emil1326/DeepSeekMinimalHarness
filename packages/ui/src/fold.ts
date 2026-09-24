@@ -1,4 +1,4 @@
-import { tokens } from './format';
+import { compactLimit, limitName, tokens } from './format';
 import type { CallMetrics, RunEvent, Speaker } from './types';
 
 /**
@@ -167,14 +167,15 @@ export function fold(events: RunEvent[]): Block[] {
         break;
       case 'limit':
         openText = null;
-        // Both numbers, always. "6.0M tokens used" is not something a reader can
-        // act on; the question they have is how much room was left, and that
-        // needs the budget beside the total.
+        // Both numbers, always, in the limit's own unit. "6.0M tokens used" is
+        // not something a reader can act on; the question they have is how much
+        // room was left, and that needs the budget beside the total. Rounded to
+        // a whole number, a dollar budget reads as zero of zero.
         blocks.push({
           kind: 'note',
           key,
           tone: 'warn',
-          text: `stopped at the ${event.which} limit: ${tokens(event.used)} of ${tokens(event.budget)} — ${event.detail}`,
+          text: `stopped at the ${limitName(event.which)} limit: ${compactLimit(event.which, event.used)} of ${compactLimit(event.which, event.budget)} — ${event.detail}`,
         });
         break;
       case 'warning':
@@ -186,7 +187,7 @@ export function fold(events: RunEvent[]): Block[] {
           kind: 'note',
           key,
           tone: 'warn',
-          text: `the harness warned the agent: ${tokens(event.used)} of ${tokens(event.budget)} ${event.which} used`,
+          text: `the harness warned the agent about ${limitName(event.which)}: ${compactLimit(event.which, event.used)} of ${compactLimit(event.which, event.budget)} used`,
         });
         break;
       case 'stray':

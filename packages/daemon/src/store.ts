@@ -8,6 +8,7 @@ import {
   isTerminal,
   metricsVersionOf,
   priceFor,
+  round,
   type PriceTable,
   type ResolvedRunConfig,
   type RunEvent,
@@ -61,8 +62,10 @@ interface EventRow {
  */
 export class Store {
   private readonly db: Db;
+  private readonly prices: PriceTable | undefined;
 
-  constructor(file: string) {
+  constructor(file: string, prices?: PriceTable) {
+    this.prices = prices;
     fs.mkdirSync(path.dirname(file), { recursive: true });
     this.db = new Database(file);
     this.db.pragma('journal_mode = WAL');
@@ -237,12 +240,41 @@ export class Store {
   getRun(runId: string): RunDetail | null {
     const row = this.row(runId);
     if (row === null) return null;
-    return toDetail(row, 0);
+    return toDetail(row, 0, this.runCosts().get(runId));
   }
 
   listRuns(owners: (runId: string) => number): RunSummary[] {
     const rows = this.db.prepare('SELECT * FROM runs ORDER BY created_at DESC').all() as RunRow[];
-    return rows.map((row) => toDetail(row, owners(row.id)));
+    // One map for the whole list rather than one query per row: the run list is
+    // the view where a blank COST column next to `dsh stats`' dollars is most
+    // obvious.
+    const costs = this.runCosts();
+    return rows.map((row) => toDetail(row, owners(row.id), costs.get(row.id)));
+  }
+
+  /**
+   * What each run cost, from the prices in force now.
+   *
+   * Recomputed from the run's own recorded calls when its stored totals carry no
+   * cost, rather than left blank. A run recorded before the harness knew any
+   * prices has `costUsd: null` in its row for ever, because nothing rewrites
+   * history — but the calls are all there, so the amount is knowable, and `stats`
+   * has been reporting dollars for those same calls all along.
+   *
+   * A recorded cost is never overwritten. It was worked out with the prices in
+   * force at the time, which is what the run was actually billed at.
+   */
+  private runCosts(): Map<string, number> {
+    const costs = new Map<string, number>();
+    for (const { model, call, runId } of this.allMetrics()) {
+      const cost = costOf(priceFor(model, startedAtOf(call), this.prices), {
+        promptTokens: asNumber(call.promptTokens),
+        cacheHitTokens: asNumber(call.cacheHitTokens),
+        completionTokens: asNumber(call.completionTokens),
+      });
+      if (cost !== null) costs.set(runId, (costs.get(runId) ?? 0) + cost);
+    }
+    return costs;
   }
 
   /**
@@ -285,8 +317,30 @@ function parseTotals(json: string | null): RunTotals {
   }
 }
 
-function toDetail(row: RunRow, owners: number): RunDetail {
+/**
+ * A stored call's `startedAt`, or an empty string if it has none.
+ *
+ * `priceFor` reads an unreadable moment as peak, which is the estimate that is
+ * too high rather than too low.
+ */
+function startedAtOf(call: StoredCall): string {
+  return typeof call.startedAt === 'string' ? call.startedAt : '';
+}
+
+/**
+ * A number from a stored row, or zero.
+ *
+ * A stored row is JSON from an older build, so a field can be missing or the
+ * wrong shape, and one bad row must not turn a whole column into a NaN or a
+ * string.
+ */
+function asNumber(value: number | string | null | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function toDetail(row: RunRow, owners: number, cost: number | undefined): RunDetail {
   const config = JSON.parse(row.config_json) as ResolvedRunConfig;
+  const totals = parseTotals(row.totals_json);
   return {
     id: row.id,
     name: row.name,
@@ -294,7 +348,7 @@ function toDetail(row: RunRow, owners: number): RunDetail {
     model: config.model,
     worktree: config.worktree,
     turns: row.turns,
-    totals: parseTotals(row.totals_json),
+    totals: totals.costUsd !== null || cost === undefined ? totals : { ...totals, costUsd: round(cost, 6) },
     // Merged over the defaults, because a task file written before a limit
     // existed has no value for it and the row is read by a report that has to
     // quote a real number.
@@ -332,11 +386,6 @@ export function summarise(
   prices: PriceTable | undefined,
 ): ModelStats[] {
   const byModel = new Map<string, Accumulator>();
-  // Anything that is not a number counts as nothing. A stored row is JSON from
-  // an older build, so a field can be missing or the wrong shape, and one bad
-  // row must not turn a whole column into a NaN or a string.
-  const number = (value: number | string | null | undefined): number =>
-    typeof value === 'number' && Number.isFinite(value) ? value : 0;
 
   for (const { model, call } of metrics) {
     // Grouped by model *and* method. A run recorded before the decode figure was
@@ -363,12 +412,12 @@ export function summarise(
       costUsd: null,
     };
     current.calls += 1;
-    current.promptTokens += number(call.promptTokens);
-    current.cacheHitTokens += number(call.cacheHitTokens);
-    current.completionTokens += number(call.completionTokens);
+    current.promptTokens += asNumber(call.promptTokens);
+    current.cacheHitTokens += asNumber(call.cacheHitTokens);
+    current.completionTokens += asNumber(call.completionTokens);
     // Runs recorded before the reasoning channel was read have no field for it,
     // so this reads zero rather than turning the total into a NaN.
-    current.reasoningTokens += number(call.reasoningTokens);
+    current.reasoningTokens += asNumber(call.reasoningTokens);
     if (typeof call.timeToFirstTokenMs === 'number') {
       current.ttftSum += call.timeToFirstTokenMs;
       current.ttftCount += 1;
@@ -384,10 +433,10 @@ export function summarise(
     // Priced at the moment the call was made, by the same rule the worker bills
     // by, so a total here adds up to what the runs themselves were told they had
     // spent rather than to a second, differently-computed figure.
-    const cost = costOf(priceFor(model, typeof call.startedAt === 'string' ? call.startedAt : '', prices), {
-      promptTokens: number(call.promptTokens),
-      cacheHitTokens: number(call.cacheHitTokens),
-      completionTokens: number(call.completionTokens),
+    const cost = costOf(priceFor(model, startedAtOf(call), prices), {
+      promptTokens: asNumber(call.promptTokens),
+      cacheHitTokens: asNumber(call.cacheHitTokens),
+      completionTokens: asNumber(call.completionTokens),
     });
     if (cost !== null) current.costUsd = (current.costUsd ?? 0) + cost;
     byModel.set(key, current);
