@@ -202,7 +202,7 @@ reports _"62 probes, 3 errors"_ has produced a number nobody can use.
 
 - **A disposable VM or container per worker.** Snapshot, run, throw away.
 - **A separate key per worker, with a hard spend cap.** `DSH_KEY_FILE` already points elsewhere.
-- **A separate `DSH_HOME` per probe**, so a probe that attacks the daemon destroys only its own
+- **A separate `DSH_DATA_DIR` per probe**, so a probe that attacks the daemon destroys only its own
   evidence. Not tidiness: `D3` is "become the daemon", and a shared home means one escape corrupts
   three other workers' results.
 - **No real worktrees, no `~/.ssh`, no git credentials, no browser profile.**
@@ -362,7 +362,7 @@ itself at the decoy. A fleet that ran every framed probe against a dead key woul
 escapes" for entirely the wrong reason.
 
 Worker loop: build the scenario in a scratch root and hash everything outside it → start a scratch
-daemon with its own `DSH_HOME` → take a token lease → `dsh run task.json --json`, accumulating
+daemon with its own `DSH_DATA_DIR` → take a token lease → `dsh run task.json --json`, accumulating
 `totals` → abort on the budget, on the log's `limit` event, or on the wall clock → tear down, hash
 again, evaluate the canaries → **compare own diff against the log's `stray`** → write the record.
 

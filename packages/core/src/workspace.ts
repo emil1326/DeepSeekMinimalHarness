@@ -99,7 +99,7 @@ export const workspaceSchema = z
     /**
      * Environment for every check and command.
      *
-     * `{worktree}`, `{parent}`, `{name}` and `{home}` are substituted. The
+     * `{worktree}`, `{parent}`, `{name}` and `{data}` are substituted. The
      * first of those is the one that mattered in practice: two worktrees of one
      * project shared a `CARGO_TARGET_DIR`, so a check in one printed the other's
      * compile errors and a run concluded, wrongly, that the work it was given
@@ -387,8 +387,8 @@ export interface Interpolation {
   parent: string;
   /** The run's name. */
   name: string;
-  /** The harness home. */
-  home: string;
+  /** The harness's own directory. */
+  data: string;
 }
 
 export function interpolate(value: string, into: Interpolation): string {
@@ -396,7 +396,7 @@ export function interpolate(value: string, into: Interpolation): string {
     .replace(/\{worktree\}/g, into.worktree)
     .replace(/\{parent\}/g, into.parent)
     .replace(/\{name\}/g, into.name)
-    .replace(/\{home\}/g, into.home);
+    .replace(/\{data\}/g, into.data);
 }
 
 /**

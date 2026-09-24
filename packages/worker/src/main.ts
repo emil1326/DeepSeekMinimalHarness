@@ -20,7 +20,7 @@ import {
   SandboxRefusal,
   checkPassed,
   describeCause,
-  harnessHome,
+  dataDir,
   readApiKey,
   realPath,
   timing,
@@ -300,12 +300,12 @@ async function runSetup(sandbox: Sandbox, config: WorkerStart): Promise<void> {
  * Where the record of "this worktree has been set up" lives.
  *
  * Keyed by the worktree *and* the steps, so editing the steps re-runs them, and
- * so two worktrees of one project are set up independently. In the harness home
- * rather than the worktree: it must not turn up in the run's own diff.
+ * so two worktrees of one project are set up independently. In the harness's own
+ * directory rather than the worktree: it must not turn up in the run's own diff.
  */
 function setupMarker(worktree: string, steps: unknown): string {
   const key = createHash('sha256').update(worktree).update(JSON.stringify(steps)).digest('hex');
-  return path.join(harnessHome(), 'setup', `${key.slice(0, 16)}.done`);
+  return path.join(dataDir(), 'setup', `${key.slice(0, 16)}.done`);
 }
 
 /**

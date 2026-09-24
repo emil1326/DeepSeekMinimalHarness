@@ -44,7 +44,7 @@ async function waitFor(check: () => boolean, timeoutMs: number, everyMs = 50): P
   return check();
 }
 
-/** A daemon on its own harness home, pointed at a fake DeepSeek. */
+/** A daemon of its own, in a scratch data directory, pointed at a fake DeepSeek. */
 async function bench(script: ScriptedTurn[]): Promise<Bench> {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-cli-'));
   const keyFile = path.join(home, 'api_key');
@@ -99,7 +99,7 @@ async function bench(script: ScriptedTurn[]): Promise<Bench> {
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    DSH_HOME: home,
+    DSH_DATA_DIR: home,
     DSH_KEY_FILE: keyFile,
     DSH_BASE_URL: fake.url,
     DSH_DAEMON_TIMEOUT_MS: '10000',
@@ -229,7 +229,7 @@ describe('the dsh command', () => {
     const wall = path.join(blocked, 'a-file');
     fs.writeFileSync(wall, 'not a directory');
     const child = spawn(process.execPath, [CLI, 'list'], {
-      env: { ...process.env, DSH_HOME: path.join(wall, 'home'), DSH_DAEMON_TIMEOUT_MS: '2000' },
+      env: { ...process.env, DSH_DATA_DIR: path.join(wall, 'home'), DSH_DAEMON_TIMEOUT_MS: '2000' },
       windowsHide: true,
     });
     let output = '';

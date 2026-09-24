@@ -812,7 +812,7 @@ program
         );
       }
       process.stdout.write(
-        `\nfrom ${stats.runs} run(s). Prices come from config.json in the harness home.\n`,
+        `\nfrom ${stats.runs} run(s). Prices come from config.json in the harness's own directory.\n`,
       );
       process.stdout.write(outcomesTable(stats.outcomes));
     }),

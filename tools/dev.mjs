@@ -2,21 +2,17 @@
 /**
  * The dev loop, one command.
  *
- *     npm run dev                    # everything, watching, its own home
+ *     npm run dev                    # everything, watching
  *     npm run dev -- --no-open       # do not open a browser
  *     npm run dev -- --no-ui         # daemon and workers only, no Vite
- *     npm run dev -- --real-home     # take over the real daemon
- *     npm run dev -- --home X        # some other harness home entirely
  *
- * It runs against its own harness home by default, a `-dev` directory next to
- * the real one, so it has its own `runs.db`, its own `daemon.json` and its own
- * daemon on its own port. Nothing in flight is disturbed, which matters now
- * that the harness is used for real work: this used to stop the real daemon and
- * take its place, and that killed whatever run was going.
+ * It runs against the same daemon and the same database as `dsh`. One install,
+ * one history — there is nothing to choose between and no `DSH_HOME` to set.
  *
- * `--real-home` is the opt-in for the other behaviour, when what you want is
- * `dsh` in another terminal talking to the code you just saved. Starting it does
- * interrupt whatever was running, which is why it is no longer the default.
+ * **Restarting the daemon kills whatever was running**, because a run's worker is
+ * a child of the daemon. That is stated up front rather than worked around: the
+ * loop used to take a `-dev` directory of its own to avoid it, which traded a
+ * clear consequence for a second database that quietly held half the runs.
  *
  * What it runs:
  *   - `tsc --watch` per server package, so a save lands in `dist/` in a few
@@ -87,22 +83,8 @@ const DEBOUNCE_MS = 400;
 const argv = new Set(process.argv.slice(2));
 const wantUi = !argv.has('--no-ui');
 const wantOpen = !argv.has('--no-open') && wantUi;
-/** `--real-home` gives up the scratch home and takes over the real daemon. */
-const wantRealHome = argv.has('--real-home');
-
-/** `--home X`, or null. Applied by `chooseHome` below, after the first build. */
-function givenHome() {
-  const at = process.argv.indexOf('--home');
-  if (at === -1) return null;
-  const dir = process.argv[at + 1];
-  if (dir === undefined) throw new Error('--home needs a directory');
-  return path.resolve(dir);
-}
-const explicitHome = givenHome();
-/** Said out loud at the end, and used to print a `dsh` line that is actually true. */
-let homeLabel = 'the real one';
-/** The real home, remembered so a new dev home can be told what to copy from it. */
-let realHomePath = '';
+/** The harness's own directory, read from core after the first build. */
+let dataDirLabel = '';
 
 const children = new Set();
 let daemonChild = null;
@@ -160,54 +142,22 @@ async function fetchIn(ms, url, init) {
 /** Read from the built core, so the two never drift apart. */
 async function paths() {
   const module = await import(pathToFileURL(path.join(ROOT, 'packages', 'core', 'dist', 'config.js')).href);
-  return { daemonFile: module.daemonFile(), harnessHome: module.harnessHome() };
+  return { daemonFile: module.daemonFile(), dataDir: module.dataDir() };
 }
 
 /**
- * Which harness home this loop runs against, decided after the first build.
+ * The directory this loop runs against, decided after the first build.
  *
- * After the build because the rule for the real home lives in core and reading
- * it means importing `dist/`, which does not exist yet on a fresh clone. That
- * import is deliberately still the source of the path: a second copy of the rule
- * here would be a second place for it to be wrong.
- */
-async function chooseHome() {
-  // Read before anything is written here, because `harnessHome()` in core reads
-  // `DSH_HOME` itself and would otherwise answer with what we just set.
-  const { harnessHome } = await paths();
-  realHomePath = harnessHome;
-  if (explicitHome !== null) {
-    process.env.DSH_HOME = explicitHome;
-  } else if (!wantRealHome) {
-    process.env.DSH_HOME = `${realHomePath}-dev`;
-  }
-  // Whatever was decided, including a `DSH_HOME` inherited from the shell.
-  homeLabel = process.env.DSH_HOME ?? 'the real one';
-  ensureOwnPort();
-}
-
-/**
- * A port for this home, written into its own `config.json`.
+ * After the build because the path lives in core and reading it means importing
+ * `dist/`, which does not exist yet on a fresh clone. That import is deliberately
+ * still the source of the path: a second copy of the rule here would be a second
+ * place for it to be wrong.
  *
- * The daemon binds `config.port`, or a fixed default when the file is silent.
- * This loop runs *beside* the real daemon — that is the whole reason it has its
- * own home, because restarting a daemon kills its runs — so it has to name a
- * different port, and naming it in the file is the only way that needs no special
- * case in the daemon. `0` takes any free one, which is fine here: the browser only
- * ever sees Vite's port, and the proxy is told this one.
+ * There is one directory, so this only needs to say which one it is.
  */
-function ensureOwnPort() {
-  if (process.env.DSH_HOME === undefined) return;
-  const file = path.join(process.env.DSH_HOME, 'config.json');
-  let config = {};
-  try {
-    config = JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    /* absent or not JSON yet; it gets written below either way */
-  }
-  if (typeof config.port === 'number') return;
-  fs.mkdirSync(process.env.DSH_HOME, { recursive: true });
-  fs.writeFileSync(file, `${JSON.stringify({ ...config, port: 0 }, null, 2)}\n`, 'utf8');
+async function chooseDataDir() {
+  const { dataDir } = await paths();
+  dataDirLabel = dataDir;
 }
 
 async function readRecord() {
@@ -546,7 +496,7 @@ async function main() {
   say('dev', 'building once, so the daemon has something to run');
   buildOnce();
 
-  await chooseHome();
+  await chooseDataDir();
   startWatchers();
   daemonPort = (await startDaemon()).port;
   // Taken now, so the watchers' first pass, which rewrites the same bytes, is
@@ -582,26 +532,12 @@ async function main() {
       say('dev', `         ${unresolved} is not in the hosts file, so it is not used yet`);
       say('dev', `         ${hostsInstruction(unresolved)}`);
     }
-    // The home matters to this line: `dsh` without `DSH_HOME` looks in the real
-    // home, so on a dev home the bare command would talk to a different daemon
-    // or to none. Saying `npx dsh list` there would be a lie.
-    say(
-      'dev',
-      process.env.DSH_HOME === undefined
-        ? `CLI      npx dsh list   (this daemon, this code)`
-        : `CLI      $env:DSH_HOME='${homeLabel}'; npx dsh list`,
-    );
-    say('dev', `home     ${homeLabel}`);
-    // A home with no `config.json` has no UI name and no prices, which shows up
-    // as the UI answering to localhost and every cost reading as a dash. Saying
-    // so here is cheaper than working out why later.
-    if (process.env.DSH_HOME !== undefined && !fs.existsSync(path.join(homeLabel, 'config.json'))) {
-      say('dev', `         no config.json there: no UI name, no prices`);
-      say(
-        'dev',
-        `         for both, copy one over:  Copy-Item ${path.join(realHomePath, 'config.json')} ${path.join(homeLabel, 'config.json')}`,
-      );
-    }
+    // One directory, so the bare command is the right one. It used to need
+    // `DSH_HOME=` to talk to the loop's daemon rather than another one, which
+    // meant the line that told you what to type was the line that was easiest to
+    // get wrong.
+    say('dev', `CLI      npx dsh list   (this daemon, this code)`);
+    say('dev', `data     ${dataDirLabel}`);
     say('dev', '');
     if (wantOpen && ready) openBrowser(browserOrigin);
     else if (!ready) say('dev', 'Vite did not come up; read its output above');

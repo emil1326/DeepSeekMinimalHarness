@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { DeclaredCommand } from './commands.js';
 import { commandOverrideSchema, mergeCommands } from './commands.js';
-import { harnessHome } from './config.js';
+import { dataDir } from './config.js';
 import { profileProblems, profileSchema, type Profile } from './profile.js';
 import {
   WorkspaceError,
@@ -367,8 +367,8 @@ export function loadRunConfig(taskPath: string): ResolvedRunConfig {
   }
   if (problems.length > 0) throw new TaskError(problems);
 
-  const home = harnessHome();
-  const into = { worktree, parent: path.dirname(worktree), name: task.name, home };
+  const home = dataDir();
+  const into = { worktree, parent: path.dirname(worktree), name: task.name, data: home };
   // The workspace's environment first so a profile can override one variable
   // without restating the rest.
   const env: Record<string, string> = {};

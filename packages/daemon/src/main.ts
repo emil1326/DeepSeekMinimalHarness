@@ -1,14 +1,12 @@
 /**
- * The daemon: one per harness home, bound to 127.0.0.1 on a fixed port.
+ * The daemon. One per machine, bound to 127.0.0.1 on a fixed port.
  *
  * It writes `{port, pid, startedAt}` to `%LOCALAPPDATA%/EmilsDeepSeekHarness/daemon.json`,
  * readable by the user only. The CLI starts it on first use.
  *
- * "One per home" and not "one per machine" for one reason: `shutdownAll` kills
- * every run when the daemon goes down, so iterating on the harness would mean
- * killing whatever was in flight. The dev loop and this project's own runs each
- * get their own home because of that, not because of a design preference — see
- * `tools/dev.mjs`.
+ * One directory and one database, not one of each per caller. There used to be
+ * "homes" and a `DSH_HOME` to pick between them, which meant the answer to "which
+ * runs exist" depended on an environment variable.
  *
  * No token, and no login. See `guard.ts`: a secret written to a file readable by
  * anything running as this user cannot defend against those programs, and the
@@ -21,7 +19,7 @@ import {
   DEFAULT_BASE_URL,
   DEFAULT_DAEMON_PORT,
   daemonFile,
-  harnessHome,
+  dataDir,
   loadHarnessConfig,
   runsDbFile,
   uiHostnames,
@@ -33,7 +31,7 @@ import { Store } from './store.js';
 import { Supervisor } from './supervisor.js';
 
 async function main(): Promise<void> {
-  fs.mkdirSync(harnessHome(), { recursive: true });
+  fs.mkdirSync(dataDir(), { recursive: true });
   const config = loadHarnessConfig();
   // The price table goes to the store as well, so a run recorded before the
   // harness knew any prices still shows what its calls cost rather than a dash.

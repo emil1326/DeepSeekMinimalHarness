@@ -25,8 +25,24 @@ export function readApiKey(): string {
   return key;
 }
 
-export function harnessHome(): string {
-  if (process.env.DSH_HOME) return path.resolve(process.env.DSH_HOME);
+/**
+ * The harness's own directory: the database, `config.json`, the daemon record,
+ * the transcripts, the setup markers. One directory, one machine.
+ *
+ * There is no second one. There used to be "homes" — a `-dev` one for the dev
+ * loop, one per agent, `--home X` on top of them and a `DSH_HOME` to choose — and
+ * every one of those made the answer to "which runs exist" depend on an
+ * environment variable, and made the daemon behave differently depending on the
+ * directory it had been launched from. A port is a fact about the machine; so is
+ * the history.
+ *
+ * `DSH_DATA_DIR` overrides it for exactly one caller: the test suite, which must
+ * not write into the real database. It is not a feature, the docs do not mention
+ * it, and no code path reads it a second time.
+ */
+export function dataDir(): string {
+  const override = process.env.DSH_DATA_DIR;
+  if (override !== undefined && override !== '') return path.resolve(override);
   const local = process.env.LOCALAPPDATA;
   return local
     ? path.join(local, 'EmilsDeepSeekHarness')
@@ -34,15 +50,15 @@ export function harnessHome(): string {
 }
 
 export function daemonFile(): string {
-  return path.join(harnessHome(), 'daemon.json');
+  return path.join(dataDir(), 'daemon.json');
 }
 
 export function runsDbFile(): string {
-  return path.join(harnessHome(), 'runs.db');
+  return path.join(dataDir(), 'runs.db');
 }
 
 export function daemonConfigFile(): string {
-  return path.join(harnessHome(), 'config.json');
+  return path.join(dataDir(), 'config.json');
 }
 
 /**

@@ -80,7 +80,7 @@ both beat the 14 seconds of running `npm run build:server` by hand. How it works
 and what it gets wrong is in `docs/dev.md`.
 
 If `http://localhost:5173` is not how you want to type it, `uiHosts` in the
-harness home's `config.json` puts it on a name of your own, `EmilsHarnessUI`
+harness's own `config.json` puts it on a name of your own, `EmilsHarnessUI`
 say. Two steps, and the first one needs an administrator.
 
 Point the name at this machine, in an elevated shell:

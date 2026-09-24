@@ -179,7 +179,7 @@ export {
   DEFAULT_DAEMON_PORT,
   daemonConfigFile,
   daemonFile,
-  harnessHome,
+  dataDir,
   keyFilePath,
   loadHarnessConfig,
   readApiKey,

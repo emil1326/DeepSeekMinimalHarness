@@ -26,13 +26,13 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { harnessHome } from './config.js';
+import { dataDir } from './config.js';
 import type { ChatMessage } from './deepseek.js';
 import { timing } from './timing.js';
 
 /** Where a run's conversation is kept. */
 export function transcriptsDir(): string {
-  return path.join(harnessHome(), 'transcripts');
+  return path.join(dataDir(), 'transcripts');
 }
 
 export function transcriptFile(runId: string): string {

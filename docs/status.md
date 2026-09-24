@@ -137,8 +137,11 @@ hits.
   still streaming.
 - **The metrics event carries its turn number**, so the UI folds each call's
   numbers into that turn instead of printing a line per turn.
-- **`DSH_SMOKE`, `DSH_HOME`, `DSH_KEY_FILE` and `DSH_BASE_URL`** exist so tests
-  and the preview can run without touching the real key or the real harness home.
+- **`DSH_SMOKE`, `DSH_DATA_DIR`, `DSH_KEY_FILE` and `DSH_BASE_URL`** exist so
+  tests and the preview can run without touching the real key or the real
+  database. `DSH_DATA_DIR` is the only one that changes where the harness keeps
+  its files, and it exists for the test suite: there is one install and one
+  history, and no supported way to have a second.
 - **`tools/preview.mjs`** is not in the plan. It was worth having: it gave a
   scripted six-turn run to look at while doing the UI.
 - **`tools/smoke.mjs`** is not in the plan either. It is the one thing that

@@ -15,28 +15,16 @@ npm run dev -- --real-home  take over the real daemon instead
 npm run dev -- --home X     some other harness home entirely
 ```
 
-It runs against its **own** harness home by default: a `-dev` directory next to
-whatever `harnessHome()` answers, so on Windows
-`%LOCALAPPDATA%\EmilsDeepSeekHarness-dev`. Its own `runs.db`, its own
-`daemon.json`, its own daemon. Nothing you have running is touched, which matters
-because a run's worker is a child of the daemon: **starting the loop against the
-real home interrupts any run that was going.**
+It runs against the same daemon and the same database as `dsh`. One install, one
+history — nothing to choose between and no environment variable to set. The line it
+prints at the end is `npx dsh list`, and that is literally the command: there is no
+second daemon for it to find by mistake.
 
-That used to be the default. It was the right call while the harness was being
-built and the wrong one once it was being used, so it is now opt-in.
-
-`--real-home` is the opt-in. Use it when what you want is `npx dsh list` in
-another terminal finding this daemon through the same `daemon.json` and running
-the code you just saved. `--home X` overrides both.
-
-**How it stays off the real daemon's port.** The daemon binds `config.port`, or
-the fixed default when the file is silent — one rule, no cases. So the loop writes
-`"port": 0` into _its_ home's `config.json` on startup, if that file does not
-already name one. Taking any free port is enough here, because the browser only
-ever sees Vite's port and the proxy is handed the daemon's.
-
-A fresh home also has no UI name and no prices, so the loop says so on startup and
-prints the one-line copy that fixes it.
+**Restarting the daemon kills whatever was running**, because a run's worker is a
+child of the daemon. The loop states that rather than working around it. It used to
+take a `-dev` directory of its own to avoid it, and that traded a clear consequence
+for a second database that quietly held half the runs — which is how 67 runs came
+to be missing from the history until they were merged back.
 
 ## What it does
 
@@ -148,7 +136,7 @@ Only the IPv4 line, on purpose. The daemon and Vite both bind `127.0.0.1`, so an
 other name in a typical hosts file has both lines, which makes this one the easy
 trap.
 
-**Then name it in `config.json`**, in the harness home
+**Then name it in `config.json`**, in the harness's own directory
 (`%LOCALAPPDATA%\EmilsDeepSeekHarness\config.json`):
 
 ```json

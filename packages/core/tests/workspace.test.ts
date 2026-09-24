@@ -223,19 +223,25 @@ describe('substituting into an environment value', () => {
         worktree: 'F:/a/b',
         parent: 'F:/a',
         name: 'n',
-        home: 'H',
+        data: 'D',
       }),
     ).toBe('F:/a/b-target');
   });
 
   it('still does what {parent} always did', () => {
-    expect(interpolate('{parent}/t', { worktree: 'F:/a/b', parent: 'F:/a', name: 'n', home: 'H' })).toBe(
+    expect(interpolate('{parent}/t', { worktree: 'F:/a/b', parent: 'F:/a', name: 'n', data: 'D' })).toBe(
       'F:/a/t',
     );
   });
 
+  it('substitutes the harness’s own directory, for a file outside the worktree', () => {
+    expect(interpolate('{data}/cache', { worktree: 'F:/a/b', parent: 'F:/a', name: 'n', data: 'D:/x' })).toBe(
+      'D:/x/cache',
+    );
+  });
+
   it('leaves a value with no placeholders exactly as it was', () => {
-    const into = { worktree: 'w', parent: 'p', name: 'n', home: 'h' };
+    const into = { worktree: 'w', parent: 'p', name: 'n', data: 'd' };
     expect(interpolate('RUST_LOG=debug', into)).toBe('RUST_LOG=debug');
   });
 });

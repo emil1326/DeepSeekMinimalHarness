@@ -101,9 +101,9 @@ describe('the daemon port', () => {
     // The point of the whole rule: the file says how it behaves. Written through
     // a real home so this goes through the same read the daemon does.
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-port-'));
-    const before = process.env.DSH_HOME;
+    const before = process.env.DSH_DATA_DIR;
     try {
-      process.env.DSH_HOME = home;
+      process.env.DSH_DATA_DIR = home;
       // Nothing there yet, so it is seeded and answers with no port — which is
       // what makes the daemon fall back to the default.
       expect(loadHarnessConfig().port).toBeUndefined();
@@ -115,8 +115,8 @@ describe('the daemon port', () => {
       fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ prices: {}, port: 0 }));
       expect(loadHarnessConfig().port).toBe(0);
     } finally {
-      if (before === undefined) delete process.env.DSH_HOME;
-      else process.env.DSH_HOME = before;
+      if (before === undefined) delete process.env.DSH_DATA_DIR;
+      else process.env.DSH_DATA_DIR = before;
       fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
