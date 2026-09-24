@@ -6,9 +6,13 @@ import {
   costOf,
   emptyTotals,
   isTerminal,
+  mergeStats,
   metricsVersionOf,
   priceFor,
   round,
+  TIMING_BUCKETS,
+  byTotal,
+  timing,
   type PriceTable,
   type ResolvedRunConfig,
   type RunEvent,
@@ -16,6 +20,8 @@ import {
   type RunLimits,
   type RunStatus,
   type RunTotals,
+  type TimingSnapshot,
+  type TimingStat,
 } from '@emilswork/harness-core';
 import type { ModelStats, RunDetail, RunSummary } from './protocol.js';
 
@@ -51,6 +57,50 @@ interface EventRow {
   at: string;
   type: string;
   payload_json: string;
+}
+
+interface TimingRow {
+  run_id: string;
+  name: string;
+  count: number;
+  total_ms: number;
+  min_ms: number;
+  max_ms: number;
+  bytes: number;
+  histogram_json: string;
+  at: string;
+}
+
+/**
+ * A stored readings row as a stat.
+ *
+ * Forgiving on purpose, the same way `StoredCall` is: these rows were written by
+ * whichever build was running at the time, and a row with a shorter ladder in it
+ * than this build has must not read as a run that was fast. The histogram is
+ * padded with zeroes or truncated to the current number of buckets, so merging
+ * stays a straight addition.
+ */
+function rowOf(row: TimingRow): TimingStat {
+  let histogram: number[] = new Array<number>(TIMING_BUCKETS).fill(0);
+  try {
+    const parsed = JSON.parse(row.histogram_json) as unknown;
+    if (Array.isArray(parsed)) {
+      histogram = new Array<number>(TIMING_BUCKETS)
+        .fill(0)
+        .map((_, index) => (Number(parsed[index]) || 0) as number);
+    }
+  } catch {
+    /* an unreadable ladder reads as "somewhere at or below the maximum" */
+  }
+  return {
+    name: row.name,
+    count: row.count,
+    totalMs: row.total_ms,
+    minMs: row.min_ms,
+    maxMs: row.max_ms,
+    bytes: row.bytes,
+    histogram,
+  };
 }
 
 /**
@@ -92,6 +142,23 @@ export class Store {
         payload_json TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS events_by_run ON events(run_id, seq);
+      -- One row per (run, name), replaced wholesale on every flush rather than
+      -- appended to. The figures a worker sends are cumulative for its whole
+      -- life, so a second flush that arrived as a second row would double every
+      -- count, and a run watched live would appear to get slower the longer it
+      -- ran.
+      CREATE TABLE IF NOT EXISTS run_timings (
+        run_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        count INTEGER NOT NULL,
+        total_ms REAL NOT NULL,
+        min_ms REAL NOT NULL,
+        max_ms REAL NOT NULL,
+        bytes INTEGER NOT NULL,
+        histogram_json TEXT NOT NULL,
+        at TEXT NOT NULL,
+        PRIMARY KEY (run_id, name)
+      );
     `);
   }
 
@@ -148,26 +215,127 @@ export class Store {
   }
 
   appendEvent(runId: string, body: RunEventBody, at: string): RunEvent {
+    // Every event, with the payload serialised into the row: a tool result is up
+    // to 8000 characters and this is where it becomes a string and a WAL write.
+    // Timed because nothing else in the harness would ever have shown it.
+    return timing.measure('daemon.store.appendEvent', () => this.appendEventRow(runId, body, at));
+  }
+
+  private appendEventRow(runId: string, body: RunEventBody, at: string): RunEvent {
     const inserted = this.db
       .prepare('INSERT INTO events (run_id, at, type, payload_json) VALUES (?, ?, ?, ?)')
       .run(runId, at, body.type, JSON.stringify(body));
     return { seq: Number(inserted.lastInsertRowid), runId, at, ...body } as RunEvent;
   }
 
+  /**
+   * This run's readings, replacing whatever was there.
+   *
+   * A delete and an insert in one transaction rather than an upsert per name,
+   * because a name that was measured and then was not (a tool that stopped being
+   * called, a span behind a flag) has to disappear rather than linger with a
+   * stale count. Both halves are cheap: dozens of rows, once per turn.
+   */
+  saveTimings(runId: string, snapshot: TimingSnapshot): void {
+    timing.measure('daemon.store.saveTimings', () => {
+      const insert = this.db.prepare(
+        `INSERT INTO run_timings (run_id, name, count, total_ms, min_ms, max_ms, bytes, histogram_json, at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      const replace = this.db.transaction((rows: TimingStat[]) => {
+        this.db.prepare('DELETE FROM run_timings WHERE run_id = ?').run(runId);
+        for (const row of rows) {
+          insert.run(
+            runId,
+            row.name,
+            row.count,
+            row.totalMs,
+            row.minMs === Number.POSITIVE_INFINITY ? 0 : row.minMs,
+            row.maxMs,
+            row.bytes,
+            JSON.stringify(row.histogram),
+            snapshot.at,
+          );
+        }
+      });
+      replace(snapshot.entries);
+    });
+  }
+
+  /** One run's readings, longest total first. `at` is null when there are none. */
+  runTimings(runId: string): { entries: TimingStat[]; at: string | null } {
+    return timing.measure('daemon.store.runTimings', () => {
+      const rows = this.db.prepare('SELECT * FROM run_timings WHERE run_id = ?').all(runId) as TimingRow[];
+      return {
+        entries: byTotal(rows.map(rowOf)),
+        at: rows[0]?.at ?? null,
+      };
+    });
+  }
+
+  /**
+   * Every run's readings, added together per name.
+   *
+   * The histogram is what makes this exact rather than an average of averages: a
+   * global p95 comes out of the summed buckets, so one run with a 400 ms
+   * outlier is visible in the global tail rather than averaged away by twenty
+   * runs that were fast.
+   */
+  allTimings(): TimingStat[] {
+    return timing.measure('daemon.store.allTimings', () => {
+      const rows = this.db.prepare('SELECT * FROM run_timings').all() as TimingRow[];
+      return byTotal(mergeStats(rows.map(rowOf)));
+    });
+  }
+
+  /**
+   * How many runs have readings, and how long they all took, in milliseconds.
+   *
+   * The wall clock is the denominator a share of a run's time needs: "12 ms in
+   * `compact`" says nothing until it can be read against the 90 seconds the run
+   * spent doing anything at all. A run still going is counted up to now.
+   */
+  timingTotals(now = Date.now()): { runs: number; wallMs: number } {
+    const distinct = this.db.prepare('SELECT count(DISTINCT run_id) AS runs FROM run_timings').get() as {
+      runs: number;
+    };
+    const spans = this.db.prepare('SELECT started_at, ended_at, created_at FROM runs').all() as {
+      started_at: string | null;
+      ended_at: string | null;
+      created_at: string;
+    }[];
+    let wallMs = 0;
+    for (const span of spans) {
+      const from = Date.parse(span.started_at ?? span.created_at);
+      const to = span.ended_at === null ? now : Date.parse(span.ended_at);
+      if (Number.isFinite(from) && Number.isFinite(to) && to > from) wallMs += to - from;
+    }
+    return { runs: distinct.runs, wallMs };
+  }
+
   eventsAfter(runId: string, after: number, limit = 5000): RunEvent[] {
-    const rows = this.db
-      .prepare(
-        'SELECT seq, run_id, at, type, payload_json FROM events WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?',
-      )
-      .all(runId, after, limit) as EventRow[];
-    return rows.map(
-      (row) =>
-        ({
-          seq: row.seq,
-          runId: row.run_id,
-          at: row.at,
-          ...(JSON.parse(row.payload_json) as RunEventBody),
-        }) as RunEvent,
+    // A read of up to 5000 rows and one `JSON.parse` per row. It is what the
+    // chat view, `dsh logs` and `dsh report` all read through, and a report asks
+    // for every event a run ever wrote, so this is metres of JSON on a long run.
+    return timing.measure(
+      'daemon.store.eventsAfter',
+      () => {
+        const rows = this.db
+          .prepare(
+            'SELECT seq, run_id, at, type, payload_json FROM events WHERE run_id = ? AND seq > ? ORDER BY seq LIMIT ?',
+          )
+          .all(runId, after, limit) as EventRow[];
+        return rows.map(
+          (row) =>
+            ({
+              seq: row.seq,
+              runId: row.run_id,
+              at: row.at,
+              ...(JSON.parse(row.payload_json) as RunEventBody),
+            }) as RunEvent,
+        );
+      },
+      (events) => events.length,
     );
   }
 

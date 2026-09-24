@@ -222,6 +222,14 @@ export class Supervisor {
       return;
     }
 
+    if (raw.type === 'timings') {
+      // Replace, never add: the worker's readings are cumulative for its whole
+      // life, and this arrives once a turn. See `Store.saveTimings`.
+      this.store.saveTimings(runId, raw.snapshot);
+      this.onRunChange?.(runId);
+      return;
+    }
+
     if (raw.type === 'done') {
       this.finish(runId, raw.status, raw.summary === null ? {} : { summary: raw.summary });
       return;

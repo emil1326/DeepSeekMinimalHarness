@@ -23,6 +23,7 @@ import {
   loadRunConfig,
   toolCatalogue,
   uiHostnames,
+  type FailureCause,
   type ResolvedRunConfig,
   type RunEvent,
   type RunStatus,
@@ -33,10 +34,13 @@ import type {
   DiffResponse,
   RunDetail,
   RunSummary,
+  RunTimings,
   StatsResponse,
+  TimingsResponse,
 } from '@emilswork/harness-daemon';
 import { ApiFailure, DaemonClient, DaemonUnreachable, exitCodeFor, readDaemonRecord } from './client.js';
 import { Renderer, colour as withColour, indent, pad, statusWord, useColor } from './render.js';
+import { timingsFootnotes, timingsTable, type TimingSort } from './timings.js';
 
 const program = new Command();
 program
@@ -612,6 +616,75 @@ program
   );
 
 program
+  .command('timings')
+  .argument('[run]', 'one run, or nothing for every run together')
+  .option('--json', 'print the figures as JSON')
+  .option('--all', 'every name, not just the slowest 25')
+  .option('--sort <by>', 'total, max, p95, mean or count', 'total')
+  .description('where the time went inside the harness, rather than inside the model')
+  .action((run: string | undefined, options: { json?: boolean; all?: boolean; sort?: string }) =>
+    guard(async () => {
+      const client = await DaemonClient.connect();
+      const top = options.all === true ? 100_000 : 25;
+      const wanted = (['total', 'max', 'p95', 'mean', 'count'] as const).find(
+        (each) => each === options.sort,
+      );
+      if (options.sort !== undefined && wanted === undefined) {
+        process.stderr.write(`dsh: --sort takes total, max, p95, mean or count\n`);
+        process.exitCode = 4;
+        return;
+      }
+      const sort: TimingSort = wanted ?? 'total';
+
+      if (run !== undefined) {
+        const body = await client.json<RunTimings>('GET', `/runs/${run}/timings`);
+        if (options.json === true) {
+          process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+          return;
+        }
+        if (body.entries.length === 0) {
+          process.stdout.write(
+            `no readings for ${run}: no turn of it finished, or it ran on a build from before\n` +
+              `the stopwatch, which records nothing for a run that never got that far.\n`,
+          );
+          return;
+        }
+        process.stdout.write(`${timingsTable(body.entries, { wallMs: body.wallMs, top, sort })}\n`);
+        process.stdout.write(
+          `\n${run} took ${seconds(body.wallMs)} in all, most of it waiting for the model.\n` +
+            `Last flushed ${body.at ?? 'never'}.\n\n`,
+        );
+        process.stdout.write(timingsFootnotes());
+        return;
+      }
+
+      const body = await client.json<TimingsResponse>('GET', '/timings');
+      if (options.json === true) {
+        process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+        return;
+      }
+      if (body.entries.length === 0) {
+        process.stdout.write('no readings recorded yet\n');
+        return;
+      }
+      process.stdout.write(`${timingsTable(body.entries, { wallMs: body.wallMs, top, sort })}\n`);
+      process.stdout.write(
+        `\nadded up over ${body.runs} run(s), which took ${seconds(body.wallMs)} between them.\n\n`,
+      );
+      process.stdout.write(timingsFootnotes());
+      if (body.process.length > 0) {
+        // The daemon's own readings, kept apart from the runs' because a daemon
+        // outlives hundreds of them and adding its uptime to a run's runtime
+        // would make both meaningless.
+        process.stdout.write(
+          `\nthe daemon itself, since it started (not part of the total above):\n\n` +
+            `${timingsTable(body.process, { wallMs: 0, top, sort })}`,
+        );
+      }
+    }),
+  );
+
+program
   .command('ui')
   .description('open the UI, logged in')
   .action(() =>
@@ -694,26 +767,42 @@ function stream(client: DaemonClient, runId: string, json: boolean): Promise<num
     const socket = client.attach(runId);
     const renderer = new Renderer((text) => process.stdout.write(text), { json, color: useColor() });
     let lastStatus: RunStatus | null = null;
+    /**
+     * Why the run failed, when the harness said.
+     *
+     * Read off the terminal `status` event, which is where it belongs: a
+     * launcher watching the stream already sees that event, and a cause that
+     * arrived in a separate event it had to know to look for would be a cause it
+     * would not look for.
+     */
+    let lastCause: FailureCause | undefined;
     let settled = false;
     let asked = false;
+
+    const codeOf = (status: RunStatus): number => exitCodeFor(status, lastCause);
 
     const settle = (status: RunStatus): void => {
       if (settled) return;
       settled = true;
       process.removeListener('SIGINT', onSigint);
       if (json)
-        process.stdout.write(`${JSON.stringify({ type: 'exit', status, code: exitCodeFor(status) })}\n`);
+        process.stdout.write(
+          `${JSON.stringify({ type: 'exit', status, code: codeOf(status), ...(lastCause === undefined ? {} : { cause: lastCause }) })}\n`,
+        );
       // The socket is what owned the run; leaving it open would both keep the
       // process alive and look like somebody is still watching.
       socket.removeAllListeners();
       socket.close();
       socket.terminate();
-      resolve(exitCodeFor(status));
+      resolve(codeOf(status));
     };
 
     const note = (event: RunEvent): void => {
       renderer.event(event);
-      if (event.type === 'status') lastStatus = event.status;
+      if (event.type === 'status') {
+        lastStatus = event.status;
+        if (event.cause !== undefined) lastCause = event.cause;
+      }
     };
 
     socket.on('message', (raw: Buffer) => {

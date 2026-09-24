@@ -8,6 +8,7 @@ import {
   gitOrNull,
   isTerminal,
   priceFor,
+  timing,
   type PriceTable,
   type RunEvent,
   type RunLimits,
@@ -26,7 +27,9 @@ import type {
   MessageBody,
   RunDetail,
   RunSummary,
+  RunTimings,
   StatsResponse,
+  TimingsResponse,
 } from './protocol.js';
 import { TaskError } from '@emilswork/harness-core';
 
@@ -58,7 +61,12 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
 
   const listen = (port: number): Promise<http.Server> =>
     new Promise((resolve) => {
-      const server = http.createServer(handleHttp);
+      // Timed per route *pattern*, not per path: `/runs/:id/events` and not
+      // `/runs/run-1a2b/events`, because a name per run id would be one row per
+      // run for ever and the table would answer nothing.
+      const server = http.createServer((request, response) => {
+        timing.measure(`daemon.http.${routeNameOf(request.url ?? '/')}`, () => handleHttp(request, response));
+      });
       server.on('upgrade', handleUpgrade);
       server.listen(port, '127.0.0.1', () => resolve(server));
     });
@@ -271,6 +279,33 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
       return send(response, 200, stats);
     }
 
+    const timingsRoute = /^\/runs\/([^/]+)\/timings$/.exec(url.pathname);
+    if (request.method === 'GET' && timingsRoute?.[1] !== undefined) {
+      const detail = store.getRun(timingsRoute[1]);
+      if (detail === null) return send(response, 404, { error: `no run called ${timingsRoute[1]}` });
+      const readings = store.runTimings(detail.id);
+      const body: RunTimings = {
+        runId: detail.id,
+        wallMs: wallMsOf(detail),
+        entries: readings.entries,
+        at: readings.at,
+      };
+      return send(response, 200, body);
+    }
+
+    if (request.method === 'GET' && url.pathname === '/timings') {
+      const totals = store.timingTotals();
+      const body: TimingsResponse = {
+        runs: totals.runs,
+        wallMs: totals.wallMs,
+        entries: store.allTimings(),
+        // The daemon's own readings, which are not part of a run and are not
+        // added to one: see `TimingsResponse`.
+        process: timing.snapshot().entries,
+      };
+      return send(response, 200, body);
+    }
+
     const eventsRoute = /^\/runs\/([^/]+)\/events$/.exec(url.pathname);
     if (request.method === 'GET' && eventsRoute?.[1] !== undefined) {
       const after = Number(url.searchParams.get('after') ?? '0');
@@ -447,6 +482,30 @@ function portOf(server: http.Server): number {
  */
 function isPriced(model: string, prices: PriceTable | undefined): boolean {
   return priceFor(model, Date.now(), prices) !== undefined;
+}
+
+/**
+ * A request path as a route name, so the readings have one row per endpoint.
+ *
+ * Only the run id is collapsed: `/runs/:id/events` rather than a row per run.
+ */
+function routeNameOf(target: string): string {
+  const path = target.split('?')[0] ?? '/';
+  return path.replace(/\/runs\/[^/]+/, '/runs/:id');
+}
+
+/**
+ * How long a run has taken so far, or took in all.
+ *
+ * A run still going counts up to now, which is what makes a live run's share
+ * column meaningful rather than zero. A run whose start was never written (a
+ * daemon that died before it forked the worker) falls back to its creation, so
+ * the number is never negative or NaN.
+ */
+function wallMsOf(detail: RunDetail, now = Date.now()): number {
+  const from = Date.parse(detail.startedAt ?? detail.createdAt);
+  const to = detail.endedAt === null ? now : Date.parse(detail.endedAt);
+  return Number.isFinite(from) && Number.isFinite(to) && to > from ? to - from : 0;
 }
 
 function send(response: http.ServerResponse, status: number, body: unknown): void {

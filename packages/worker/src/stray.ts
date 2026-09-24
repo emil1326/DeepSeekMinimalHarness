@@ -1,4 +1,4 @@
-import { git, gitFailure, relNorm, toPosix, type ResolvedRunConfig } from '@emilswork/harness-core';
+import { git, gitFailure, relNorm, timing, toPosix, type ResolvedRunConfig } from '@emilswork/harness-core';
 
 export interface StrayReport {
   /** Changed files that are on no list at all. The ones that matter. */
@@ -50,6 +50,18 @@ export function strayChanges(
   root: string,
   allow: Iterable<string>,
   options: { soft?: Iterable<string>; baseline?: Iterable<string> } = {},
+): StrayReport {
+  // One `git status --porcelain -uall` over the worktree, listed and then
+  // filtered through three sets. Timed because it runs twice per run — once for
+  // the baseline and once at the end — and on a checkout with an installed
+  // `node_modules` that is a genuinely large listing to parse.
+  return timing.measure('worker.stray.status', () => scanForStray(root, allow, options));
+}
+
+function scanForStray(
+  root: string,
+  allow: Iterable<string>,
+  options: { soft?: Iterable<string>; baseline?: Iterable<string> },
 ): StrayReport {
   const allowed = new Set([...allow].map((entry) => relNorm(entry)));
   const soft = new Set([...(options.soft ?? [])].map((entry) => relNorm(entry)));

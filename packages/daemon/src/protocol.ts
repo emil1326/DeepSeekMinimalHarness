@@ -5,6 +5,7 @@ import type {
   RunStatus,
   RunTotals,
   Speaker,
+  TimingStat,
 } from '@emilswork/harness-core';
 
 export interface RunSummary {
@@ -128,6 +129,38 @@ export interface ModelStats {
 export interface StatsResponse {
   runs: number;
   models: ModelStats[];
+}
+
+/**
+ * Where one run's time went.
+ *
+ * `wallMs` is what makes the figures readable: a name that cost 12 ms is either
+ * nothing or the whole answer, and only the run's own runtime says which. `at`
+ * is when the worker last flushed, so a reader can tell a live run's partial
+ * readings from a finished run's complete ones.
+ */
+export interface RunTimings {
+  runId: string;
+  wallMs: number;
+  entries: TimingStat[];
+  at: string | null;
+}
+
+/**
+ * Where the time has gone across every run.
+ *
+ * Two lists, deliberately. `entries` is what the workers measured, added per
+ * name, because that is the part a change to the harness can move. `process` is
+ * the daemon's own readings since it started: its HTTP handling, its SQLite
+ * writes, its forks. They are not added together — a daemon outlives hundreds of
+ * runs, and mixing its uptime with a run's runtime would make the totals mean
+ * nothing.
+ */
+export interface TimingsResponse {
+  runs: number;
+  wallMs: number;
+  entries: TimingStat[];
+  process: TimingStat[];
 }
 
 export type AttachMessage =

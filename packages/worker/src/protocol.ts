@@ -7,6 +7,7 @@ import type {
   RunLimits,
   RunStatus,
   Speaker,
+  TimingSnapshot,
 } from '@emilswork/harness-core';
 
 /** An event as the worker writes it: the daemon stamps the sequence and the run. */
@@ -55,5 +56,14 @@ export type DaemonToWorker =
 export type WorkerToDaemon =
   | { type: 'ready'; pid: number; runId: string }
   | { type: 'event'; body: RunEventBody; at: string }
+  /**
+   * What the worker's stopwatch has recorded, cumulative.
+   *
+   * Sent at every turn boundary and once before the run reports itself done, and
+   * the daemon *replaces* this run's rows rather than adding to them: the
+   * figures are cumulative, so a flush arriving twice must not double them, and
+   * a flush arriving late must not leave a stale row behind.
+   */
+  | { type: 'timings'; snapshot: TimingSnapshot }
   | { type: 'done'; status: RunStatus; summary: string | null }
   | { type: 'fatal'; message: string };
