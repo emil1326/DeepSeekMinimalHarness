@@ -100,6 +100,13 @@ it is not there yet:
 { "prices": {}, "uiHosts": ["EmilsHarnessUI"] }
 ```
 
+`prices` is an override, and an empty one is the normal state: the harness knows
+DeepSeek's published prices, including the cheaper rate for input served from its
+cache, and works out what each call cost from the hour it was made. Name a model
+in there — `{ "deepseek-flash": { "inputPerMillion": 0.3, "outputPerMillion": 1.2 } }`
+— and that figure is used for it instead, which is how to correct a price or
+price a model the harness has never heard of.
+
 Nothing needs any of this, mind. `localhost:5173` is the default and works out of
 the box; the name only changes what `npm run dev` and `dsh ui` open. `docs/dev.md`
 has the details, and the three ways it can go wrong.
@@ -117,9 +124,14 @@ A task is a JSON file:
   "allow": ["ui/mark.spec.ts"],
   "checks": ["typecheck", "prettier"],
   "task": "Give mark.spec.ts's three polls a timeout of their own...",
-  "limits": { "turns": 12, "wallSeconds": 900, "outputTokens": 40000 }
+  "limits": { "turns": 12, "wallSeconds": 900, "outputTokens": 40000, "costUsd": 0.05 }
 }
 ```
+
+`costUsd` is the one to think about: it is the only limit counted in the thing
+you are actually spending, five cents by default. The agent is told when a fifth
+of any limit is left, so it can finish what it is on, ask for more room, or stop
+and say what is left — rather than being cut off mid-file.
 
 Then:
 
@@ -156,7 +168,8 @@ the run used it, and a diff tab shows the worktree.
 
 Every model call is measured in passing, no separate benchmark: time to first
 token, speed over the whole call, and DeepSeek's cache hits. `dsh stats` adds them
-up per model.
+up per model, with a cost column, and `dsh limits <run>` says what a run has used
+of each of its budgets — dollars included, since that is the one anybody means.
 
 Two things worth knowing about those numbers, because I got them wrong first:
 

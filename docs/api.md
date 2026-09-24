@@ -102,6 +102,7 @@ type RunEvent = { seq: number; runId: string; at: string } & (
   | { type: 'message'; by: Speaker; text: string }
   | { type: 'metrics'; turn: number; call: CallMetrics; totals: RunTotals }
   | { type: 'summary'; text: string }
+  | { type: 'retry'; turn: number; attempt: number; status: number; waitMs: number }
   | {
       type: 'context';
       turn: number;
@@ -112,13 +113,29 @@ type RunEvent = { seq: number; runId: string; at: string } & (
     }
   | {
       type: 'limit';
-      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'askSeconds';
+      which:
+        'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'askSeconds' | 'costUsd';
+      detail: string;
+      /** What it got to, of what. Never a bare number. */
+      used: number;
+      budget: number;
+    }
+  | {
+      type: 'warning';
+      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'costUsd';
+      used: number;
+      budget: number;
       detail: string;
     }
   | { type: 'stray'; files: string[] }
   | { type: 'error'; message: string }
 );
 ```
+
+`limit` and `warning` both carry `used` and `budget` in the limit's own unit, and
+`costUsd` is the one counted in dollars: a reader that formats every one of these
+as a whole number would show a run that has spent three cents as having spent
+nothing.
 
 Statuses are `queued`, `running`, `waiting`, `finished`, `failed`, `cancelled`,
 `interrupted` and `stopped_at_limit`. The last five are terminal, and a run that

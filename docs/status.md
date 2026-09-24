@@ -125,8 +125,10 @@ Worth knowing too: **74% of the prompt came from DeepSeek's cache** across the
 run, and 97% on the last two calls. The context is re-sent every turn and the
 cache is what makes that affordable.
 
-Cost is not shown because no price table has been filled into `config.json`,
-deliberately, since prices move and hardcoding one is worse than a blank.
+Cost is worked out from DeepSeek's published prices, which are in the code, and
+which `config.json` overrides per model. The cache rate is why the figure is
+small: a hit is a fiftieth of a miss on Flash, and most of what a run sends is
+hits.
 
 ## Where this went past the plan
 
@@ -177,8 +179,13 @@ deliberately, since prices move and hardcoding one is worse than a blank.
   reads asynchronous is what would overlap them, and the measured prize is
   milliseconds against a one-second first-token wait, so it is written down
   rather than done.
-- **Cost only appears once a price table is filled into `config.json`** in the
-  harness home. It is not hardcoded, on purpose, because prices move.
+- **Cost comes from DeepSeek's published prices**, in `core/pricing.ts`: cache
+  hit, cache miss and output, at peak and off peak, read per call from the hour
+  that call was made. `config.json` overrides any model outright, so a price
+  change or a new model does not wait for a release. Chinese public holidays are
+  not modelled, so a call in a peak window on one of those days is priced at
+  double what it really cost — the estimate is wrong upward, which is the
+  direction that keeps a budget a budget.
 - **The event log is append-only and never pruned.** Fine at this scale, and a
   thing to know about before it runs for months.
 - **`dsh` assumes Node 22 or later.**
