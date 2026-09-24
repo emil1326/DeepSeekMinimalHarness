@@ -17,6 +17,16 @@ export function isTerminal(status: RunStatus): boolean {
 
 export type Speaker = 'agent' | 'claude' | 'emil' | 'system';
 
+/**
+ * Why a run failed, in a form a script can branch on.
+ *
+ * A launched loop reads this rather than the prose in `detail`, because a spent
+ * account and a model that answered badly both look like `failed` and only one
+ * of them means stop launching. Mirrors core's `FAILURE_CAUSES`.
+ */
+export type FailureCause =
+  'provider_balance' | 'provider_auth' | 'provider_refused' | 'provider_unreachable' | 'harness';
+
 export interface CallMetrics {
   model: string;
   startedAt: string;
@@ -100,7 +110,7 @@ interface Base {
 }
 
 export type RunEventBody =
-  | { type: 'status'; status: RunStatus; detail?: string }
+  | { type: 'status'; status: RunStatus; detail?: string; cause?: FailureCause }
   | { type: 'turn.start'; turn: number }
   | { type: 'text.delta'; turn: number; text: string }
   | { type: 'thinking.delta'; turn: number; text: string }
@@ -144,6 +154,15 @@ export type RunEventBody =
       detail: string;
     }
   | { type: 'stray'; files: string[] }
+  /**
+   * Changed files that were on the soft list rather than the plan.
+   *
+   * Its own event rather than folded into `stray`, because they mean opposite
+   * things: a stray change is something nobody allowed, and one of these is a
+   * change the task said it might need. Reporting them together would teach a
+   * reader to skim the loud one.
+   */
+  | { type: 'offPlan'; files: string[] }
   | { type: 'error'; message: string };
 
 type Distribute<T> = T extends unknown ? Base & T : never;
