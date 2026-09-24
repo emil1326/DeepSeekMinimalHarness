@@ -16,10 +16,13 @@ import { execFileSync } from 'node:child_process';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   IS_WINDOWS,
+  NEVER_WRITE,
   Sandbox,
   SandboxRefusal,
+  covered,
   declaresProcMacro,
   isInside,
+  matchesGlob,
   realPath,
   relNorm,
   type Profile,
@@ -640,5 +643,201 @@ describe('relNorm', () => {
 
   it('does not collapse a parent segment', () => {
     expect(relNorm('../outside.txt')).toBe('../outside.txt');
+  });
+});
+
+/**
+ * Globs in the allow and soft lists, which silently did nothing.
+ *
+ * Found live rather than reasoned about. A task was run with
+ * `"allow": ["docs/**"]` and a one-line instruction to create
+ * `docs/watch-live.md`; the run was refused twice, reported "No files were
+ * changed, so nothing is done", and spent its turns explaining that the file it
+ * had been told to create was outside the area it had been told to write in.
+ *
+ * The cause was `allowed.has(path)` — string equality — with `matchesGlob`
+ * sitting right there, working, and uncalled. So a glob permitted a file
+ * literally named `docs/**` and nothing else, while the refusal printed the glob
+ * back at the model as though globs were supported. Two nested directories away
+ * the identical equality check in `stray.ts` would have reported the same file as
+ * a change on no list at all.
+ */
+describe('a glob in the allow list', () => {
+  const box = (allow: string[], soft?: string[]): Sandbox =>
+    new Sandbox({ root: repo, allow, profile: PROFILE, ...(soft === undefined ? {} : { soft }) });
+
+  it('permits a file that already exists anywhere the glob reaches', () => {
+    expect(box(['src/**']).readFile('src/a.ts')).toContain('export const a');
+    expect(box(['**/*.ts']).readFile('src/b.ts')).toContain('export const b');
+  });
+
+  it('permits a file that does not exist yet, which is the case that was broken', () => {
+    // Creating a file is the one write where the path is not in any list of
+    // names, so this is the case an exact-match check can never pass. It is also
+    // the common case: most tasks create something.
+    const created = box(['src/**']);
+    expect(created.createFile('src/new.ts', 'export const c = 3;\n')).toBe('created');
+    expect(fs.readFileSync(path.join(repo, 'src', 'new.ts'), 'utf8')).toBe('export const c = 3;\n');
+    fs.rmSync(path.join(repo, 'src', 'new.ts'), { force: true });
+  });
+
+  it('still refuses a file the glob does not reach', () => {
+    // The control. A glob has to widen the list, not dissolve it.
+    const narrow = box(['src/*.ts']);
+    expect(refused(() => narrow.createFile('other.ts', 'x\n'))).toBe(true);
+    expect(refused(() => narrow.createFile('src/deep/new.ts', 'x\n'))).toBe(true);
+  });
+
+  it('refuses a never-read directory at write time rather than at construction', () => {
+    // Two doors, deliberately, and this is the second one. The constructor
+    // refuses a never-write name and a secret name before a run starts, because
+    // both are mistakes in somebody's config and saying so to the person who
+    // typed it costs nothing. A never-*read* directory is not refused there: it
+    // is caught by `resolve`, which every read and every write goes through, so
+    // naming one in `allow` produces a refusal at the moment of writing rather
+    // than at the moment of loading.
+    const leaky = box(['src/**', '_private/**', 'target/**']);
+    expect(refused(() => leaky.readFile('_private/hosting.md'))).toBe(true);
+    expect(refused(() => leaky.createFile('_private/x.md', 'x\n'))).toBe(true);
+    expect(refused(() => leaky.createFile('target/x', 'x\n'))).toBe(true);
+  });
+
+  it('treats `**/` as zero or more directories, so a top-level file matches', () => {
+    // Otherwise `**/*.ts` compiles to `.*/.*\.ts` and misses `a.ts` at the root:
+    // the one file a rule written to cover "every TypeScript file" should cover.
+    expect(matchesGlob('a.ts', '**/*.ts')).toBe(true);
+    expect(matchesGlob('src/a.ts', '**/*.ts')).toBe(true);
+    expect(matchesGlob('src/deep/a.ts', '**/*.ts')).toBe(true);
+    expect(matchesGlob('a.js', '**/*.ts')).toBe(false);
+  });
+
+  it('counts a glob on the soft list as covered, and still reports it', () => {
+    // Soft means writable and reported, so both halves have to see the glob.
+    const wide = box(['src/a.ts'], ['crates/*/tests/**']);
+    expect(wide.soft.has('crates/*/tests/**')).toBe(true);
+    expect(covered(wide.soft, 'crates/one/tests/it.rs')).toBe(true);
+    expect(covered(wide.soft, 'crates/one/src/lib.rs')).toBe(false);
+  });
+
+  it('keeps `{allowed}` as real files rather than patterns', () => {
+    // A check handed a pattern is a check that examines nothing: eslint,
+    // prettier and cargo fmt disagree about globs, and one of them would exit 0.
+    // The expansion walks the tree, so it also has to skip what the sandbox
+    // never shows.
+    //
+    // Asserted as an invariant rather than an exact list, because this fixture
+    // repo is shared and some other describe in this file writes into it. The
+    // invariant is the thing that matters and it does not depend on who ran
+    // first.
+    const expanded = box(['src/**', 'target/**', '_private/**']).command({
+      when: ['.ts'],
+      run: ['echo', '{allowed}'],
+    });
+    expect(expanded?.[0]).toBe('echo');
+    const files = expanded?.slice(1) ?? [];
+    expect(files).toContain('src/a.ts');
+    expect(files).toContain('src/b.ts');
+    for (const file of files) {
+      // Every element is a file that exists, with nothing left as a pattern.
+      expect(file).not.toContain('*');
+      expect(fs.existsSync(path.join(repo, file))).toBe(true);
+      expect(file.endsWith('.ts')).toBe(true);
+      // And nothing from a directory the sandbox never shows, even though the
+      // allow list named it.
+      expect(file.startsWith('target/') || file.startsWith('_private/')).toBe(false);
+    }
+  });
+
+  it('says there is nothing to check rather than passing a pattern on', () => {
+    expect(box(['docs/**']).command({ when: ['.ts'], run: ['echo', '{allowed}'] })).toBeNull();
+    // And with no `when`, an allow list that matches no existing file is still
+    // an empty argv rather than a refusal to build one.
+    expect(box(['docs/**']).command({ run: ['echo', '{allowed}'] })).toEqual(['echo']);
+  });
+});
+
+/**
+ * What each never-write entry still catches.
+ *
+ * This exists because the semantics of `*` changed under it. `NEVER_WRITE` used
+ * to list a `*`-and-then-`build.rs` spelling and a bare `*.ps1`, which reached
+ * every depth only because `*` crossed a slash — and that same quirk was making a
+ * task's `"allow": ["src/*.ts"]` permit `src/deep/anything.ts`, a write
+ * permission wider than what it said. Fixing the matcher meant respelling the deny
+ * list, and a deny list respelled by hand is a deny list with a hole in it.
+ *
+ * So every entry is pinned from the other side: the paths it is there to catch,
+ * named one by one. A rule that quietly stops matching fails here rather than in
+ * a run.
+ */
+describe('the never-write list, entry by entry', () => {
+  /** Every path each entry must refuse. One entry, one reason, one line. */
+  const MUST_CATCH: [string, string[]][] = [
+    // The build script of any crate, at any depth. This is the one that runs at
+    // build time, so a check that runs it would be executing agent code.
+    ['**/build.rs', ['build.rs', 'crates/x/build.rs', 'a/b/c/build.rs']],
+    ['**/Cargo.toml', ['Cargo.toml', 'crates/x/Cargo.toml', 'a/b/Cargo.toml']],
+    ['Cargo.lock', ['Cargo.lock']],
+    ['package.json', ['package.json']],
+    ['package-lock.json', ['package-lock.json']],
+    ['pnpm-lock.yaml', ['pnpm-lock.yaml']],
+    ['yarn.lock', ['yarn.lock']],
+    // A JavaScript config whose plugins are resolved and then executed.
+    ['**/*.config.*', ['eslint.config.js', 'packages/core/vite.config.ts', 'ui/next.config.mjs']],
+    ['**/tsconfig*.json', ['tsconfig.json', 'packages/core/tsconfig.json', 'ui/tsconfig.app.json']],
+    ['**/.prettierrc*', ['.prettierrc', '.prettierrc.json', 'ui/.prettierrc']],
+    ['**/.eslintrc*', ['.eslintrc', '.eslintrc.cjs', 'ui/.eslintrc.json']],
+    ['**/.babelrc*', ['.babelrc', 'ui/.babelrc.json']],
+    ['**/.stylelintrc*', ['.stylelintrc', 'ui/.stylelintrc.json']],
+    ['**/.markdownlint*', ['.markdownlint.json', 'docs/.markdownlint-cli2.jsonc']],
+    // Read by npm and yarn before anything is fetched.
+    ['**/.npmrc', ['.npmrc', 'ui/.npmrc']],
+    ['**/.yarnrc*', ['.yarnrc', '.yarnrc.yml', 'ui/.yarnrc.yml']],
+    // A workflow file is a script that runs on a push, which is to say out of
+    // anybody's sight and after the run is over.
+    ['.github/**', ['.github/workflows/ci.yml', '.github/dependabot.yml']],
+    ['.claude/**', ['.claude/settings.json', '.claude/agents/x.md']],
+    ['.cargo/**', ['.cargo/config.toml']],
+    ['rust-toolchain*', ['rust-toolchain', 'rust-toolchain.toml']],
+    // Shell and PowerShell: the point of the sandbox is that a model-written
+    // string never reaches a command interpreter, and a script is that string
+    // with somewhere to live.
+    ['**/*.ps1', ['a.ps1', 'tools/build/x.ps1']],
+    ['**/*.cmd', ['a.cmd', 'tools/x/a.cmd']],
+    ['**/*.bat', ['a.bat', 'tools/x/a.bat']],
+    ['**/*.sh', ['a.sh', 'scripts/deploy.sh']],
+    ['setup.py', ['setup.py']],
+    ['pyproject.toml', ['pyproject.toml']],
+    ['Makefile', ['Makefile']],
+    ['Dockerfile', ['Dockerfile']],
+    // The files the harness reads to decide what a run may do.
+    ['dsh.workspace.json', ['dsh.workspace.json']],
+    ['.dsh/workspace.json', ['.dsh/workspace.json']],
+    ['.dsh/**', ['.dsh/workspace.json', '.dsh/profile.json', '.dsh/rules.md']],
+  ];
+
+  it('catches a path it is there to catch, for every entry', () => {
+    expect(NEVER_WRITE.sort()).toEqual(MUST_CATCH.map(([entry]) => entry).sort());
+    for (const [entry, paths] of MUST_CATCH) {
+      for (const target of paths) {
+        expect(matchesGlob(target, entry), `${entry} should catch ${target}`).toBe(true);
+      }
+    }
+  });
+
+  it('leaves ordinary code alone', () => {
+    // The other half, because a deny list that widened would refuse writes a
+    // task is entitled to and the failure would look like a sandbox bug.
+    for (const target of [
+      'src/a.ts',
+      'crates/x/src/lib.rs',
+      'docs/notes.md',
+      'ui/mark.spec.ts',
+      'README.md',
+    ]) {
+      for (const entry of NEVER_WRITE) {
+        expect(matchesGlob(target, entry), `${entry} should not catch ${target}`).toBe(false);
+      }
+    }
   });
 });

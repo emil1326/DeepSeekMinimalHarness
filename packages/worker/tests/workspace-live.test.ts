@@ -26,7 +26,7 @@ import {
   type RunEventBody,
   type Speaker,
 } from '@emilswork/harness-core';
-import { runAgentLoop, type LoopControl } from '@emilswork/harness-worker';
+import { runAgentLoop, strayChanges, type LoopControl } from '@emilswork/harness-worker';
 import { startFakeDeepSeek } from '../../core/tests/fake-server.js';
 import { createFixture } from './fixture.js';
 
@@ -307,5 +307,42 @@ describe('files outside the plan', () => {
     const config = loadRunConfig(taskFor(workspaceWith({ soft: ['src/a.ts'] })));
     const sandbox = sandboxOf(config);
     expect(sandbox.soft.has('src/a.ts')).toBe(false);
+  });
+
+  it('come back as a glob matches them, not only as a name', async () => {
+    // The second copy of the bug the allow list had, and the louder one. A task
+    // with `"allow": ["docs/**"]` that creates `docs/new.md` was refused at write
+    // time — and then, because `strayChanges` compared names the same way, the
+    // file it never wrote would have been reported as a change on no list at all.
+    // A stray change is the thing this harness exists to shout about, so a false
+    // one is the worst possible failure: it is the alarm nobody believes.
+    const config = loadRunConfig(taskFor(workspaceWith({}), { allow: ['src/a.ts', 'docs/**'] }));
+    const sandbox = sandboxOf(config);
+    const worktree = config.worktree;
+
+    fs.mkdirSync(path.join(worktree, 'docs'), { recursive: true });
+    fs.writeFileSync(path.join(worktree, 'docs', 'new.md'), 'written under a glob\n');
+    try {
+      const report = strayChanges(worktree, sandbox.allow, { soft: sandbox.soft });
+      expect(report.failure).toBeNull();
+      expect(report.files).toEqual([]);
+    } finally {
+      fs.rmSync(path.join(worktree, 'docs'), { recursive: true, force: true });
+    }
+  });
+
+  it('report a change on no list at all, which is what the alarm is for', async () => {
+    // The control. Widening the match must not have widened it to everything.
+    const config = loadRunConfig(taskFor(workspaceWith({}), { allow: ['src/a.ts', 'docs/**'] }));
+    const sandbox = sandboxOf(config);
+    const worktree = config.worktree;
+
+    fs.writeFileSync(path.join(worktree, 'elsewhere.md'), 'not allowed\n');
+    try {
+      const report = strayChanges(worktree, sandbox.allow, { soft: sandbox.soft });
+      expect(report.files).toContain('elsewhere.md');
+    } finally {
+      fs.rmSync(path.join(worktree, 'elsewhere.md'), { force: true });
+    }
   });
 });

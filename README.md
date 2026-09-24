@@ -219,7 +219,7 @@ unconstrained one is refused when the workspace is _read_ — not when the model
 first calls it.
 
 A workspace can live inside the worktree, because its own filename is on the
-never-write list, and so is the rest of `.dsh/*`. The rule that protects a config
+never-write list, and so is the rest of `.dsh/**`. The rule that protects a config
 was never "keep it outside the worktree"; a check can write anywhere its process
 reaches. It is that no tool the agent can call will touch the name — and a profile
 is exactly the thing the agent must not be able to edit, because a check it can
@@ -250,6 +250,44 @@ dsh cancel <run>                             stop it and everything it started
 dsh list | show <run> | logs <run> | diff <run> | stats
 dsh timings [run]                            where the time actually went
 ```
+
+### Watching a run without owning it
+
+`dsh run` is a claim. It starts a run that was queued, and the run is cancelled
+when the last attached connection goes away — right for whoever launched it, and
+wrong for everybody else, because closing a terminal window would then cancel
+somebody else's work.
+
+```
+dsh watch <run>                                    follow it, own nothing
+dsh watch <run> --quiet                            only questions, limits, strays, the end
+dsh watch <run> --on-question "notify-send dsh"    something tells you when it asks
+dsh watch <run> --json                             events and an exit line, for a script
+```
+
+A watcher sees every event an owner does, plus the whole history it missed —
+which is the normal case, because you start a run, notice it has been quiet, and
+want to know why. It cannot start a run and it cannot stop one. Closing it is
+just closing a window.
+
+`--on-question` is the reason the command exists. When a workspace declares
+`onAsk`, that process runs **inside the sandbox**, with a stripped environment and
+no shell, because everything it executes is code somebody wrote. This runs on your
+own machine, from a string you typed, so it gets a shell — the question arrives on
+**stdin**, and `DSH_RUN` and `DSH_QUESTION` are in the environment for anything
+that wants to answer rather than merely shout:
+
+```sh
+dsh watch run-1a2b --on-question 'while read -r q; do notify-send "dsh is asking" "$q"; done'
+```
+
+One line on stdin, so anything that reads it works: a `notify-send`, a `curl` at a
+webhook, a script that logs it and answers for you.
+
+A notifier that fails is swallowed on purpose: the watcher's job is to survive and
+keep reporting, and a broken `notify-send` must not take it down with it. A
+question that has already been answered is not announced, so a watcher started
+after somebody replied does not send you a notification you cannot act on.
 
 And the four that are about the run rather than about watching it:
 

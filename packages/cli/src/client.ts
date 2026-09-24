@@ -94,6 +94,22 @@ export class DaemonClient {
     });
   }
 
+  /**
+   * The same stream, without owning the run.
+   *
+   * The difference is not cosmetic and is worth knowing before using either.
+   * `attach` is a claim: it starts a run that was left queued, and the run is
+   * cancelled when the last attached connection goes away. So a connection that
+   * only wants to *read* a run must not use it — closing a terminal window would
+   * cancel somebody else's run. This one sees every event and a `bye` at the end
+   * and can never start or stop anything.
+   */
+  watch(runId: string): WebSocket {
+    return new WebSocket(`ws://127.0.0.1:${this.record.port}/runs/${runId}/watch`, {
+      headers: { authorization: `Bearer ${this.record.token}` },
+    });
+  }
+
   notices(): WebSocket {
     return new WebSocket(`ws://127.0.0.1:${this.record.port}/events`, {
       headers: { authorization: `Bearer ${this.record.token}` },

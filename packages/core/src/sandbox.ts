@@ -8,7 +8,7 @@ import {
   explainMissing,
   rewriteInlineFlags,
 } from './diagnose.js';
-import { isInside, matchesGlob, realPath, relNorm, toPosix } from './paths.js';
+import { covered, isInside, matchesGlob, realPath, relNorm, toPosix } from './paths.js';
 import { killTree, resolveExecutable, spawnTool, UnsafeCommandError } from './process.js';
 import { NOT_PROVEN } from './checks.js';
 import { commandArgv, trimOutput, unproven, type DeclaredCommand } from './commands.js';
@@ -36,40 +36,47 @@ export const SECRET_NAMES = [
  * build time, sets up the toolchain, or reaches outside the code under change.
  */
 export const NEVER_WRITE = [
-  'build.rs',
-  '*/build.rs',
-  'Cargo.toml',
-  '*/Cargo.toml',
+  // Written in the terms `matchesGlob` actually implements, which is worth
+  // knowing before editing: `*` stops at a `/` and `**` does not, and `**/`
+  // matches zero directories as well as several. So `**/build.rs` is one entry
+  // for the root file and for `crates/x/build.rs` both, and `**/*.ps1` is what
+  // "a PowerShell script anywhere" has to be spelled as. These used to read
+  // `'*/build.rs'` and `'*.ps1'`, which only reached that far because `*` then
+  // crossed `/` — a quirk the allow list was quietly paying for, in the
+  // permissive direction, on the list that decides what a run may write.
+  '**/build.rs',
+  '**/Cargo.toml',
+  // Only ever one, and only ever at the root of a workspace.
   'Cargo.lock',
   'package.json',
   'package-lock.json',
   'pnpm-lock.yaml',
   'yarn.lock',
-  '*.config.*',
-  'tsconfig*.json',
   // Tool configuration that a check loads, and that names code to run. Prettier,
   // ESLint, Babel and Stylelint all accept a JavaScript config whose plugins and
   // extends are resolved and then executed, so a task that may edit one of these
   // is a task that may run code. `*.config.*` catches the `eslint.config.js`
   // spelling; these are the dotfile spellings it does not, and they are the ones
   // that were missing.
-  '.prettierrc*',
-  '.eslintrc*',
-  '.babelrc*',
-  '.stylelintrc*',
-  '.markdownlint*',
+  '**/*.config.*',
+  '**/tsconfig*.json',
+  '**/.prettierrc*',
+  '**/.eslintrc*',
+  '**/.babelrc*',
+  '**/.stylelintrc*',
+  '**/.markdownlint*',
   // Read by npm and yarn before anything is fetched, so it can send a whole
   // install somewhere else.
-  '.npmrc',
-  '.yarnrc*',
-  '.github/*',
-  '.claude/*',
-  '.cargo/*',
+  '**/.npmrc',
+  '**/.yarnrc*',
+  '.github/**',
+  '.claude/**',
+  '.cargo/**',
   'rust-toolchain*',
-  '*.ps1',
-  '*.cmd',
-  '*.bat',
-  '*.sh',
+  '**/*.ps1',
+  '**/*.cmd',
+  '**/*.bat',
+  '**/*.sh',
   'setup.py',
   'pyproject.toml',
   'Makefile',
@@ -87,7 +94,7 @@ export const NEVER_WRITE = [
   // notification hook — and a profile is exactly the thing the agent must not be
   // able to edit, because a check it can rewrite is a check that cannot refuse
   // it. Found by a real project keeping its harness config there.
-  '.dsh/*',
+  '.dsh/**',
 ];
 
 /** Dropped from a check process's environment, whatever else it inherits. */
@@ -198,6 +205,8 @@ export class Sandbox {
   private readonly envOverride: Record<string, string> | undefined;
   /** Per-directory answer to "is this a proc-macro crate", read at most once. */
   private readonly procMacroDirs = new Map<string, boolean>();
+  /** The allow list expanded to real files, filled in on the first `{allowed}`. */
+  private allowFiles: string[] | undefined;
 
   constructor(options: SandboxOptions) {
     this.root = realPath(options.root);
@@ -340,7 +349,10 @@ export class Sandbox {
 
   private writablePath(target: string): string {
     const rel = this.normalise(target);
-    if (!this.allow.has(rel) && !this.soft.has(rel)) {
+    // `covered`, not `has`. A task file's allow list may hold globs, and until
+    // this called the glob matcher a glob only ever permitted a file literally
+    // named after itself — see `covered` in `paths.ts` for how that was found.
+    if (!covered(this.allow, rel) && !covered(this.soft, rel)) {
       const extra = this.soft.size === 0 ? '' : `, or on the soft list: ${[...this.soft].sort().join(', ')}`;
       throw new SandboxRefusal(
         `${rel} is not one of the files this task may change: ${[...this.allow].sort().join(', ')}${extra}`,
@@ -633,11 +645,53 @@ export class Sandbox {
     );
   }
 
+  /**
+   * Every file in the worktree the allow list covers, as real paths.
+   *
+   * A check that takes `{allowed}` has to be handed files, not patterns —
+   * `eslint`, `prettier` and `cargo fmt` disagree about globs, and handing one a
+   * pattern is how a check passes by examining nothing.
+   *
+   * So the tree is walked, once, lazily: only a profile with a `{allowed}` entry
+   * pays for it, and inside a run it is paid on the first check that needs it.
+   * Everything `NEVER_READ_DIRS` and `SECRET_NAMES` already hide is skipped, so
+   * `node_modules` and `target` cost nothing to step over.
+   */
+  private matchingFiles(): string[] {
+    if (this.allowFiles !== undefined) return this.allowFiles;
+    const found: string[] = [];
+    const walk = (rel: string): void => {
+      const full = rel === '' ? this.root : path.join(this.root, rel);
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(full, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (NEVER_READ_DIRS.has(entry.name)) continue;
+        if (SECRET_NAMES.some((pattern) => matchesGlob(entry.name.toLowerCase(), pattern.toLowerCase()))) {
+          continue;
+        }
+        const child = rel === '' ? entry.name : `${rel}/${entry.name}`;
+        if (entry.isDirectory()) {
+          walk(child);
+          continue;
+        }
+        if (!entry.isFile()) continue;
+        if (covered(this.allow, child)) found.push(child);
+      }
+    };
+    walk('');
+    this.allowFiles = found.sort();
+    return this.allowFiles;
+  }
+
   private argvFor(spec: CheckSpec): string[] | null {
     const when = spec.when;
-    const files = [...this.allow]
-      .filter((allowed) => !when || when.some((suffix) => allowed.endsWith(suffix)))
-      .sort();
+    const files = this.matchingFiles().filter(
+      (allowed) => !when || when.some((suffix) => allowed.endsWith(suffix)),
+    );
     if (when && files.length === 0) return null;
     const argv: string[] = [];
     for (const part of spec.run) argv.push(...(part === '{allowed}' ? files : [part]));

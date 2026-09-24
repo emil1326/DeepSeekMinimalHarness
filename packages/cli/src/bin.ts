@@ -169,6 +169,24 @@ program
   );
 
 program
+  .command('watch')
+  .argument('<run>')
+  .option('--json', 'print one JSON event per line, then an exit line')
+  .option('--quiet', 'only what a person has to act on: questions, warnings, the summary, the end')
+  .option('--thinking', "print the model's thinking, which is billed as output")
+  .option(
+    '--on-question <command>',
+    'run this shell command when the agent asks something, with the question on its stdin',
+  )
+  .description('follow a run without owning it, and have something tell you when it asks')
+  .action((run: string, options: FollowOptions) =>
+    guard(async () => {
+      const client = await DaemonClient.connect();
+      process.exitCode = await follow(client, run, options);
+    }),
+  );
+
+program
   .command('list')
   .description('every run, most recent first')
   .action(() =>
@@ -1074,12 +1092,196 @@ function stream(client: DaemonClient, runId: string, json: boolean): Promise<num
   });
 }
 
-function speed(run: RunSummary): string {
-  const value = run.totals.generationTokensPerSecond;
-  return value === null ? '-' : value.toFixed(0);
+interface FollowOptions {
+  json?: boolean;
+  quiet?: boolean;
+  thinking?: boolean;
+  onQuestion?: string;
 }
 
 /**
+ * Events a person has to act on, or would be annoyed to have missed.
+ *
+ * The point of `--quiet`: a run's stream is mostly the model writing, and a
+ * watcher exists precisely so that nobody has to read that. What it must not
+ * lose is the four things it was set up to catch — a question, a limit, a stray
+ * change, and the end.
+ */
+const WORTH_INTERRUPTING: ReadonlySet<RunEvent['type']> = new Set<RunEvent['type']>([
+  'question',
+  'answer',
+  'message',
+  'warning',
+  'limit',
+  'stray',
+  'offPlan',
+  'error',
+  'summary',
+]);
+
+/**
+ * Follow a run somebody else is running, without owning it.
+ *
+ * `dsh run` is a claim on a run: it starts a queued one and the run dies when it
+ * goes away. That is right for the person who launched it and wrong for anybody
+ * else, so this uses the daemon's watch stream, which is the same events and
+ * none of the ownership. Two windows, one run, no race — and closing this one is
+ * not an act of sabotage.
+ *
+ * The question notification is the part that earns the command. `onAsk` in a
+ * workspace spawns a process per question inside the sandbox, with a stripped
+ * environment and no shell, because everything it runs is code somebody wrote.
+ * This runs on the operator's own machine, from a string they typed themselves,
+ * so it gets a shell — and it is the thing that makes `dsh run --detach` plus
+ * `dsh watch --on-question ...` a complete answer to "tell me when it needs me"
+ * rather than a run that quietly waits out its allowance.
+ */
+function follow(client: DaemonClient, runId: string, options: FollowOptions): Promise<number> {
+  return new Promise<number>((resolve) => {
+    const socket = client.watch(runId);
+    const renderer = new Renderer((text) => process.stdout.write(text), {
+      json: options.json === true,
+      color: useColor(),
+      thinking: options.thinking === true,
+    });
+    const loud = options.quiet !== true;
+    let lastStatus: RunStatus | null = null;
+    let lastCause: FailureCause | undefined;
+    let settled = false;
+    /**
+     * Questions announced, and questions answered.
+     *
+     * A watcher that starts late is handed the whole history, which is the point
+     * — a run that has been waiting twenty minutes for an answer is exactly what
+     * somebody starts a watcher to find out. So the two sets are folded over the
+     * replay, and anything still open at the end of it is announced then. Without
+     * the answered set, a question that was answered last turn would be reported
+     * as pending for ever.
+     */
+    const asked = new Set<string>();
+    const answered = new Set<string>();
+
+    const settle = (status: RunStatus): void => {
+      if (settled) return;
+      settled = true;
+      socket.removeAllListeners();
+      const code = exitCodeFor(status, lastCause);
+      if (options.json === true) {
+        process.stdout.write(
+          `${JSON.stringify({ type: 'exit', status, code, ...(lastCause === undefined ? {} : { cause: lastCause }) })}\n`,
+        );
+      } else if (loud) {
+        process.stdout.write(`\n${statusWord(status)}${lastCause === undefined ? '' : ` (${lastCause})`}\n`);
+      }
+      socket.close();
+      socket.terminate();
+      resolve(code);
+    };
+
+    const announce = (id: string, question: string): void => {
+      if (asked.has(id)) return;
+      asked.add(id);
+      if (options.onQuestion !== undefined) notifyOperator(options.onQuestion, runId, id, question);
+    };
+
+    socket.on('message', (raw: Buffer) => {
+      const message = JSON.parse(raw.toString('utf8')) as AttachMessage;
+      if (message.type === 'hello') {
+        const detail = message.detail;
+        if (loud) {
+          process.stdout.write(
+            `watching ${runId} (${detail.name}), ${statusWord(detail.status)}${detail.detached ? ', detached' : ''}\n`,
+          );
+        }
+        // The question nobody is answering, stated as such. A run that is
+        // waiting looks identical to a run that is thinking from the outside,
+        // which is why this is worth saying rather than leaving to be inferred.
+        if (detail.owners === 0 && !detail.detached && !isTerminal(detail.status) && loud) {
+          process.stdout.write(
+            '  nothing is attached to this run, so it will be cancelled. Watch with `dsh run`, or it must be detached.\n',
+          );
+        }
+        // Two passes over the replay, deliberately. The first only records what
+        // is already answered and where the run got to; the second announces
+        // whatever is still open. Doing it in one pass would announce a question
+        // that the next event answers, which is a notification nobody can act on
+        // and the fastest way to teach somebody to ignore them.
+        for (const event of message.events) {
+          if (event.type === 'answer') answered.add(event.id);
+          if (event.type === 'status') {
+            lastStatus = event.status;
+            if (event.cause !== undefined) lastCause = event.cause;
+          }
+        }
+        for (const event of message.events) {
+          if (event.type === 'question' && !answered.has(event.id)) announce(event.id, event.question);
+          if (loud || WORTH_INTERRUPTING.has(event.type)) renderer.event(event);
+        }
+        if (isTerminal(detail.status)) settle(detail.status);
+        return;
+      }
+      if (message.type === 'event') {
+        const event = message.event;
+        if (event.type === 'question') announce(event.id, event.question);
+        if (event.type === 'answer') answered.add(event.id);
+        if (event.type === 'status') {
+          lastStatus = event.status;
+          if (event.cause !== undefined) lastCause = event.cause;
+        }
+        if (loud || WORTH_INTERRUPTING.has(event.type)) renderer.event(event);
+        return;
+      }
+      if (message.type === 'bye') settle(message.status);
+    });
+
+    socket.on('error', (error: Error) => {
+      process.stderr.write(`dsh: the connection to the daemon failed: ${error.message}\n`);
+      settle(lastStatus ?? 'interrupted');
+    });
+
+    // Unlike `dsh run`, a watcher going away is not an event worth reacting to:
+    // it owns nothing, so there is nothing to hand over or cancel.
+    socket.on('close', () => settle(lastStatus ?? 'interrupted'));
+  });
+}
+
+/**
+ * Run the operator's own command, when the agent asks something.
+ *
+ * `shell: true`, which is the one place in this codebase that is allowed. The
+ * sandbox never spawns a shell and `process.ts` goes to real trouble to keep
+ * model-written strings away from one. This string is not model-written: it came
+ * from command-line arguments typed by whoever started the watcher, on their own
+ * machine, and it is the same trust level as the command line itself. The
+ * question is handed over on stdin, so a notifier can be a one-liner — and the
+ * run id and question id are in the environment for anything that needs to
+ * answer rather than merely shout.
+ *
+ * A notifier that fails is swallowed on purpose. The whole point of this process
+ * is to survive and keep reporting; a broken `notify-send` must not take the
+ * watcher down with it.
+ */
+function notifyOperator(command: string, runId: string, questionId: string, question: string): void {
+  try {
+    const child = spawn(command, {
+      shell: true,
+      stdio: ['pipe', 'inherit', 'inherit'],
+      env: { ...process.env, DSH_RUN: runId, DSH_QUESTION: questionId },
+      windowsHide: true,
+    });
+    child.on('error', () => undefined);
+    child.stdin?.on('error', () => undefined);
+    child.stdin?.end(`${question}\n`);
+    child.unref();
+  } catch {
+    /* a notifier is best effort; the watcher keeps watching */
+  }
+}
+
+function speed(run: RunSummary): string {
+  const value = run.totals.generationTokensPerSecond;
+  return value === null ? '-' : value.toFixed(0);
+} /**
  * The limit this run is closest to, as `used of budget`.
  *
  * A bare token count says nothing. "6.0M" is only meaningful next to the 8M it

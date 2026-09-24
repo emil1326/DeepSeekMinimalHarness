@@ -1,4 +1,14 @@
-export { IS_WINDOWS, isInside, matchesGlob, realPath, relNorm, samePath, toPosix } from './paths.js';
+export {
+  IS_WINDOWS,
+  covered,
+  isInside,
+  isPattern,
+  matchesGlob,
+  realPath,
+  relNorm,
+  samePath,
+  toPosix,
+} from './paths.js';
 export { GIT_MAX_BUFFER, git, gitFailure, gitOrNull, type GitOptions } from './git.js';
 export { checkOutcome, checkPassed, exitCodes, NOT_PROVEN, type CheckOutcome } from './checks.js';
 export {

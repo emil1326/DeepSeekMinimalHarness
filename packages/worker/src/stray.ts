@@ -1,4 +1,12 @@
-import { git, gitFailure, relNorm, timing, toPosix, type ResolvedRunConfig } from '@emilswork/harness-core';
+import {
+  covered,
+  git,
+  gitFailure,
+  relNorm,
+  timing,
+  toPosix,
+  type ResolvedRunConfig,
+} from '@emilswork/harness-core';
 
 export interface StrayReport {
   /** Changed files that are on no list at all. The ones that matter. */
@@ -63,8 +71,13 @@ function scanForStray(
   allow: Iterable<string>,
   options: { soft?: Iterable<string>; baseline?: Iterable<string> },
 ): StrayReport {
-  const allowed = new Set([...allow].map((entry) => relNorm(entry)));
-  const soft = new Set([...(options.soft ?? [])].map((entry) => relNorm(entry)));
+  // Kept as lists rather than sets, because membership is `covered` and not
+  // equality: a task file's allow list holds globs, and until this asked the
+  // glob matcher, a file created under `docs/**` was reported as a change on no
+  // list at all — a loud false alarm about the only thing the run was allowed to
+  // touch. See `covered` in `paths.ts`.
+  const allowed = [...allow].map((entry) => relNorm(entry));
+  const soft = [...(options.soft ?? [])].map((entry) => relNorm(entry));
   const before = new Set([...(options.baseline ?? [])].map((entry) => relNorm(entry)));
 
   let output: string;
@@ -78,8 +91,8 @@ function scanForStray(
 
   const changed = changedPaths(output);
   return {
-    files: changed.filter((file) => !allowed.has(file) && !soft.has(file) && !before.has(file)),
-    offPlan: changed.filter((file) => soft.has(file) && !before.has(file)),
+    files: changed.filter((file) => !covered(allowed, file) && !covered(soft, file) && !before.has(file)),
+    offPlan: changed.filter((file) => covered(soft, file) && !before.has(file)),
     preExisting: changed.filter((file) => before.has(file)),
     failure: null,
   };

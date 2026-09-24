@@ -58,7 +58,7 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
   const { store, supervisor, auth } = options;
   const runSubscribers = new Map<string, Set<WebSocket>>();
   const noticeSubscribers = new Set<WebSocket>();
-  const heartbeats = new WeakMap<WebSocket, { lastPong: number; runId: string | null }>();
+  const heartbeats = new WeakMap<WebSocket, { lastPong: number; runId: string | null; owns: boolean }>();
 
   const listen = (port: number): Promise<http.Server> =>
     new Promise((resolve) => {
@@ -144,11 +144,12 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
     if (!authorised) return refuse('401', 'Unauthorized');
 
     const attach = /^\/runs\/([^/]+)\/attach$/.exec(url.pathname);
+    const watch = /^\/runs\/([^/]+)\/watch$/.exec(url.pathname);
     const isNotices = url.pathname === '/events';
-    if (attach === null && !isNotices) return refuse('404', 'Not Found');
+    if (attach === null && watch === null && !isNotices) return refuse('404', 'Not Found');
 
     wss.handleUpgrade(request, socket, head, (client) => {
-      heartbeats.set(client, { lastPong: Date.now(), runId: attach?.[1] ?? null });
+      heartbeats.set(client, { lastPong: Date.now(), runId: attach?.[1] ?? null, owns: attach !== null });
       client.on('pong', () => {
         const info = heartbeats.get(client);
         if (info !== undefined) info.lastPong = Date.now();
@@ -157,7 +158,10 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
         const info = heartbeats.get(client);
         if (info?.runId != null) {
           runSubscribers.get(info.runId)?.delete(client);
-          supervisor.ownerLost(info.runId);
+          // Only an owner's departure can end a run. A watcher that goes away
+          // is somebody closing a terminal window, and cancelling a run because
+          // nobody is looking at it would make watching it an act of sabotage.
+          if (info.owns) supervisor.ownerLost(info.runId);
         } else {
           noticeSubscribers.delete(client);
         }
@@ -169,12 +173,23 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
         return;
       }
 
-      const runId = attach?.[1] ?? '';
-      void attachRun(client, runId);
+      const runId = attach?.[1] ?? watch?.[1] ?? '';
+      void attachRun(client, runId, attach !== null);
     });
   }
 
-  async function attachRun(client: WebSocket, runId: string): Promise<void> {
+  /**
+   * Send a run's history and then its future, without owning it.
+   *
+   * `owns` is the whole reason this is one function rather than two. An owner is
+   * the connection the run's lifetime is tied to: attaching starts a queued run,
+   * and the last owner going away cancels it. A watcher is the opposite of that
+   * in both directions — it must not start anything, and it must not be able to
+   * stop anything — but it sees exactly the same stream, which is what makes
+   * `dsh run` in one window and `dsh watch` in another the intended thing to do
+   * rather than a race.
+   */
+  async function attachRun(client: WebSocket, runId: string, owns: boolean): Promise<void> {
     const detail = store.getRun(runId);
     if (detail === null) {
       client.send(JSON.stringify({ type: 'bye', status: 'failed' }));
@@ -188,9 +203,10 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
     );
     if (isTerminal(detail.status)) {
       client.send(JSON.stringify({ type: 'bye', status: detail.status }));
-      supervisor.ownerAttached(runId);
+      if (owns) supervisor.ownerAttached(runId);
       return;
     }
+    if (!owns) return;
     // Attaching is what starts a run that was left queued, and is what ties its
     // lifetime to this connection.
     supervisor.ownerAttached(runId);
@@ -533,7 +549,9 @@ function isPriced(model: string, prices: PriceTable | undefined): boolean {
 /**
  * A request path as a route name, so the readings have one row per endpoint.
  *
- * Only the run id is collapsed: `/runs/:id/events` rather than a row per run.
+ * Only the run id is collapsed: `/runs/:id/events` rather than a row per run —
+ * including for the sockets, whose paths arrive at the same place and would
+ * otherwise be one row per run for ever.
  */
 function routeNameOf(target: string): string {
   const path = target.split('?')[0] ?? '/';

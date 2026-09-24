@@ -75,22 +75,90 @@ export function realPath(target: string): string {
 }
 
 /**
- * `fnmatch` with `*` and `?`, case-insensitive because the callers lowercase first.
+ * `fnmatch` with `*`, `?` and `**`, case-insensitive because the callers lowercase first.
  *
- * Timed, and it is worth the two extra lines: this builds and compiles a fresh
+ * `*` and `?` do not cross a slash; `**` does. That is what they mean everywhere
+ * else, and it matters here rather than being pedantry: the allow and soft lists
+ * are write permissions, and a pattern like `crates&#47;*&#47;tests&#47;**`
+ * silently covering `crates/a/b/tests/c.rs` is a list that does something other
+ * than what it says.
+ *
+ * A leading `**&#47;` also matches zero directories, so `**&#47;build.rs` covers
+ * `build.rs` at the root as well as `crates/x/build.rs`, and one entry says both.
+ * Without that, every rule that has to reach into a tree needs two entries and one
+ * of them gets forgotten.
+ *
+ * The deny lists depend on this being right, and `NEVER_WRITE` is written
+ * explicitly in these terms — see the test that pins what each entry still
+ * catches, because a rule that quietly stops matching is a rule that is not
+ * there.
+ *
+ * Timed, and it is worth the extra lines: this builds and compiles a fresh
  * `RegExp` on every call, and every call is one directory entry of a `list_dir`
- * or one file of a `search`, against the five name lists in `sandbox.ts`. If
- * that is milliseconds it is milliseconds a compiled-once cache would not spend,
- * and a count with no time next to it would never have said so.
+ * or one file of a `search`, against the five name lists in `sandbox.ts`. If that
+ * is milliseconds it is milliseconds a compiled-once cache would not spend, and a
+ * count with no time next to it would never have said so.
  */
 export function matchesGlob(name: string, pattern: string): boolean {
   return timing.measure('core.paths.matchesGlob', () => {
     let source = '';
-    for (const char of pattern) {
-      if (char === '*') source += '.*';
-      else if (char === '?') source += '.';
-      else source += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    let at = 0;
+    while (at < pattern.length) {
+      const char = pattern[at] as string;
+      if (char === '*') {
+        // `**/`, `**`, then plain `*`. Order matters: `**` followed by anything
+        // but a `/` is a directory-crossing run of characters.
+        if (pattern[at + 1] === '*' && pattern[at + 2] === '/') {
+          source += '(?:.*/)?';
+          at += 3;
+          continue;
+        }
+        if (pattern[at + 1] === '*') {
+          source += '.*';
+          at += 2;
+          continue;
+        }
+        source += '[^/]*';
+        at += 1;
+        continue;
+      }
+      if (char === '?') {
+        source += '[^/]';
+        at += 1;
+        continue;
+      }
+      source += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      at += 1;
     }
-    return new RegExp(`^${source}$`, 's').test(name);
+    return new RegExp(`^${source}$`).test(name);
   });
+}
+
+/** Whether an entry is a pattern rather than one literal path. */
+export function isPattern(entry: string): boolean {
+  return entry.includes('*') || entry.includes('?');
+}
+
+/**
+ * Whether a path is covered by a list of allow-list entries.
+ *
+ * The bug this exists for, found live: every caller asked
+ * `allowed.has(path)` — string equality — so a glob in `allow` only ever
+ * permitted a file literally named `docs/**`. `matchesGlob` was right there and
+ * working; nothing called it. A task file with `"allow": ["docs/**"]` therefore
+ * refused to create `docs/anything.md`, and the refusal named `docs/**` back at
+ * the model as though globs were supported, which is worse than not offering
+ * them: the message reads as a bug in the model's understanding rather than in
+ * the harness. Two nested directories deep, a second copy of the same equality
+ * check in `stray.ts` reported the file as a stray change as well.
+ *
+ * A literal entry stays cheap — one hash lookup — and a pattern costs one
+ * compiled regex, so a list of exact paths is exactly as fast as it was.
+ */
+export function covered(entries: Iterable<string>, rel: string): boolean {
+  for (const entry of entries) {
+    if (entry === rel) return true;
+    if (isPattern(entry) && matchesGlob(rel, entry)) return true;
+  }
+  return false;
 }
