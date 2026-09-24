@@ -35,6 +35,15 @@ export interface WorkerStart {
    * the run it continues, so the daemon reads that one out and hands it over.
    */
   resume?: ChatMessage[];
+  /**
+   * The files the runs this one continues wrote, for a continuation.
+   *
+   * The baseline is `git status` at the start, and a continuation's start is
+   * its parent's end, so without this every file the parent changed was
+   * reported as "already changed before this run started" and left out of the
+   * report, which is the whole of the work when a run is carried on.
+   */
+  inherited?: string[];
 }
 
 export type DaemonToWorker =

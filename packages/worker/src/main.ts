@@ -23,6 +23,7 @@ import {
   dataDir,
   readApiKey,
   realPath,
+  relNorm,
   timing,
   writePrivateText,
   writeTranscript,
@@ -193,7 +194,12 @@ async function start(config: WorkerStart): Promise<void> {
 
     // Taken before the agent makes a single call, so the report at the end can
     // tell what this run did from what was already there. See `reportStray`.
-    const baseline = timing.measure('worker.setup.baseline', () => snapshotChanges(root));
+    // A continuation's own start is its parent's end, so what the parent wrote
+    // is this run's work and not something that was already there.
+    const inherited = new Set((config.inherited ?? []).map((file) => relNorm(file)));
+    const baseline = timing
+      .measure('worker.setup.baseline', () => snapshotChanges(root))
+      .filter((file) => !inherited.has(relNorm(file)));
 
     await timing.measureAsync('worker.setup.workspace', () => runSetup(built, config));
 

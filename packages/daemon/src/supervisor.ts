@@ -7,6 +7,7 @@ import {
   loadRunConfig,
   readApiKey,
   readTranscript,
+  writtenBy,
   type ChatMessage,
   type PriceTable,
   type RunEvent,
@@ -68,6 +69,8 @@ export class Supervisor {
   private readonly states = new Map<string, RunState>();
   /** Conversations waiting to be handed to a worker that has not been forked yet. */
   private readonly resumes = new Map<string, ChatMessage[] | undefined>();
+  /** What the runs a continuation carries on from wrote. See `WorkerStart.inherited`. */
+  private readonly inherited = new Map<string, string[]>();
 
   constructor(options: SupervisorOptions) {
     this.store = options.store;
@@ -102,6 +105,7 @@ export class Supervisor {
         );
       }
       resume = loaded.messages;
+      this.inherited.set(id, this.writtenAlong(options.continueFrom));
     }
 
     this.store.createRun({ id, name: config.name, config, detached, createdAt });
@@ -213,8 +217,33 @@ export class Supervisor {
       // messages, the row is read on a list view, and nothing but the fork
       // needs it.
       ...(this.resumes.get(runId) ? { resume: this.resumes.get(runId) as ChatMessage[] } : {}),
+      ...(this.inherited.get(runId) ? { inherited: this.inherited.get(runId) as string[] } : {}),
     };
     child.send(message);
+  }
+
+  /**
+   * Every file written by a run and by the runs it continues, back to the one
+   * started from a task file. A chain because a run can be carried on more than
+   * once, and each link's work is the same piece of work.
+   */
+  private writtenAlong(runId: string): string[] {
+    const files = new Set<string>();
+    const seen = new Set<string>();
+    let at: string | null = runId;
+    while (at !== null && !seen.has(at)) {
+      seen.add(at);
+      const events: RunEvent[] = [];
+      for (let after = 0; ;) {
+        const page = this.store.eventsAfter(at, after);
+        if (page.length === 0) break;
+        events.push(...page);
+        after = page[page.length - 1]?.seq ?? after;
+      }
+      for (const file of writtenBy(events)) files.add(file);
+      at = this.store.getRun(at)?.config.continues ?? null;
+    }
+    return [...files];
   }
 
   private onWorkerMessage(runId: string, raw: WorkerToDaemon): void {

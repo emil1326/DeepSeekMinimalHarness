@@ -434,6 +434,18 @@ function lastCheckOutcomes(events: RunEvent[], commandNames: string[]): CheckRes
  * Falls back to git only when the log has no writes in it, so a run that wrote
  * something in a way not modelled here is still described rather than empty.
  */
+/**
+ * The files a run's own successful writes touched, by its event log.
+ *
+ * A continuation starts in a worktree its parent already changed, and those
+ * changes are the same piece of work rather than something that was there
+ * before it. The daemon hands the files these name to the continuation, so its
+ * baseline leaves them out. See `WorkerStart.inherited`.
+ */
+export function writtenBy(events: RunEvent[]): string[] {
+  return [...writesOf(events).keys()];
+}
+
 function writesOf(events: RunEvent[]): Map<string, { added: number; removed: number }> {
   const attempts = new Map<string, { path: string; added: number; removed: number }>();
   for (const event of events) {

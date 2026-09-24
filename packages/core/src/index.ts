@@ -19,7 +19,14 @@ export {
   writeTranscript,
   type LoadedTranscript,
 } from './transcript.js';
-export { buildReport, limitName, type CheckResult, type ReportInput, type RunReport } from './report.js';
+export {
+  buildReport,
+  limitName,
+  writtenBy,
+  type CheckResult,
+  type ReportInput,
+  type RunReport,
+} from './report.js';
 export {
   WARN_AT,
   approaching,

@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildReport,
   emptyTotals,
+  writtenBy,
   type ReportInput,
   type RunEventBody,
   type RunEvent,
@@ -619,5 +620,38 @@ describe('what the report says about the worktree', () => {
     const report = buildReport(input({ summary: null }));
     expect(report.claim).toBeNull();
     expect(report.claimSupported).toBeNull();
+  });
+});
+
+describe('what a continuation inherits', () => {
+  // A continuation's baseline is `git status` at its start, which is its
+  // parent's end, so the daemon takes the parent's own writes out of it. These
+  // are the files it takes out: the writes that landed, and nothing a refused
+  // or failed write only tried.
+  it('names the files a run wrote, once each, and not the ones it only tried', () => {
+    const events = [
+      event({ type: 'tool.call', turn: 1, id: 'a', name: 'replace_in_file', args: { path: 'src/a.ts' } }),
+      event({ type: 'tool.result', turn: 1, id: 'a', name: 'replace_in_file', ok: true, result: 'replaced' }),
+      event({ type: 'tool.call', turn: 2, id: 'b', name: 'replace_in_file', args: { path: 'src/a.ts' } }),
+      event({ type: 'tool.result', turn: 2, id: 'b', name: 'replace_in_file', ok: true, result: 'replaced' }),
+      event({
+        type: 'tool.call',
+        turn: 3,
+        id: 'c',
+        name: 'create_file',
+        args: { path: 'src/new.ts', content: 'x' },
+      }),
+      event({ type: 'tool.result', turn: 3, id: 'c', name: 'create_file', ok: true, result: 'created' }),
+      event({ type: 'tool.call', turn: 4, id: 'd', name: 'replace_in_file', args: { path: 'src/b.ts' } }),
+      event({
+        type: 'tool.result',
+        turn: 4,
+        id: 'd',
+        name: 'replace_in_file',
+        ok: false,
+        result: 'refused: the old text does not occur',
+      }),
+    ];
+    expect(writtenBy(events).sort()).toEqual(['src/a.ts', 'src/new.ts']);
   });
 });
