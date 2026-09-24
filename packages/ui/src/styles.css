@@ -1687,7 +1687,9 @@ pre.diff {
 
 .report-checks li {
   display: grid;
-  grid-template-columns: 6ch 16ch 1fr;
+  /* An extra column for the tag, so a declared command's marker does not push
+     its own output onto a line of its own. */
+  grid-template-columns: 6ch 16ch auto 1fr;
   gap: var(--s3);
   align-items: baseline;
   font-size: var(--t-data);
@@ -1696,6 +1698,25 @@ pre.diff {
 .report-checks .word {
   font-family: var(--mono);
   color: var(--success);
+}
+
+/**
+ * Marks a result that came from a command the project declared rather than from
+ * a profile check.
+ *
+ * It is the strongest evidence in the list — the project's own test, run by the
+ * agent against its own work — so it is marked rather than left to look like
+ * another lint. Quiet, because it is a fact and not an alarm.
+ */
+.report-checks .tag {
+  font-size: var(--t-label);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--s1);
+  align-self: center;
 }
 
 .report-checks li[data-outcome='fail'] .word {
