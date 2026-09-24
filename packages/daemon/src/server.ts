@@ -7,6 +7,7 @@ import {
   buildReport,
   gitOrNull,
   isTerminal,
+  priceFor,
   type PriceTable,
   type RunEvent,
   type RunLimits,
@@ -256,7 +257,9 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
     }
 
     if (request.method === 'GET' && url.pathname === '/runs') {
-      const runs: RunSummary[] = store.listRuns((runId) => supervisor.ownersOf(runId));
+      const runs: RunSummary[] = store
+        .listRuns((runId) => supervisor.ownersOf(runId))
+        .map((run) => ({ ...run, priced: isPriced(run.model, options.prices) }));
       return send(response, 200, { runs });
     }
 
@@ -280,7 +283,11 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
     if (request.method === 'GET' && single?.[1] !== undefined) {
       const detail = store.getRun(single[1]);
       if (detail === null) return send(response, 404, { error: `no run called ${single[1]}` });
-      const withOwners: RunDetail = { ...detail, owners: supervisor.ownersOf(detail.id) };
+      const withOwners: RunDetail = {
+        ...detail,
+        owners: supervisor.ownersOf(detail.id),
+        priced: isPriced(detail.model, options.prices),
+      };
       return send(response, 200, withOwners);
     }
 
@@ -364,7 +371,7 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
           if (patch === null) {
             return send(response, 400, {
               error:
-                'give at least one of turns, wallSeconds, outputTokens, totalTokens or contextTokens, as a positive whole number',
+                'give at least one of turns, wallSeconds, outputTokens, totalTokens, contextTokens or costUsd; all are positive numbers, and costUsd is in dollars',
             });
           }
           try {
@@ -420,6 +427,22 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
 function portOf(server: http.Server): number {
   const address = server.address();
   return address !== null && typeof address === 'object' ? address.port : 0;
+}
+
+/**
+ * Whether a model can be priced at all, and so whether a run of it has a cost.
+ *
+ * Asked about *now* and read as a yes-or-no about the model, because a priced
+ * model has two prices — peak and off peak — so the hour changes the figure and
+ * never the answer. The figures themselves are worked out per call, in the
+ * worker and in `stats`.
+ *
+ * The UI needs this rather than inferring it from an empty cost, which would
+ * render `$0 of $0.050` for a model nobody has priced: a run that is not being
+ * measured, drawn as a run that has spent nothing.
+ */
+function isPriced(model: string, prices: PriceTable | undefined): boolean {
+  return priceFor(model, Date.now(), prices) !== undefined;
 }
 
 function send(response: http.ServerResponse, status: number, body: unknown): void {
@@ -479,6 +502,14 @@ function limitsPatch(body: LimitsBody): Partial<RunLimits> | null {
     if (value === undefined) continue;
     if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) return null;
     patch[name] = value;
+  }
+  const cost = body.costUsd;
+  if (cost !== undefined) {
+    // The one limit that is not a count of whole things. Five cents is typed as
+    // `0.05`, and demanding an integer here would make the dollar budget — the
+    // only limit that says what a run actually costs — impossible to set.
+    if (typeof cost !== 'number' || !Number.isFinite(cost) || cost <= 0) return null;
+    patch.costUsd = cost;
   }
   return Object.keys(patch).length === 0 ? null : patch;
 }

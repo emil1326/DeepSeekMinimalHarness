@@ -1,5 +1,5 @@
 import type { RunEvent, RunStatus, RunTotals } from '@emilswork/harness-core';
-import { formatCount } from '@emilswork/harness-core';
+import { formatLimit, formatUsd, limitName } from '@emilswork/harness-core';
 
 const CODES = {
   reset: '\u001b[0m',
@@ -102,7 +102,7 @@ export class Renderer {
         // Both numbers, so the reader can see how far past it went and whether
         // it was close. `6.0M used` on its own answers nothing.
         this.write(
-          `${this.colour('yellow', `stopped at the ${event.which} limit:`)} ${formatCount(event.used)} of ${formatCount(event.budget)} — ${event.detail}\n`,
+          `${this.colour('yellow', `stopped at the ${limitName(event.which)} limit:`)} ${formatLimit(event.which, event.used)} of ${formatLimit(event.which, event.budget)} — ${event.detail}\n`,
         );
         break;
       case 'warning':
@@ -110,7 +110,7 @@ export class Renderer {
         // model acted on, and because "it knew and still ran out" is a very
         // different story from "nobody told it".
         this.write(
-          `${this.colour('yellow', 'warning:')} ${event.which} at ${formatCount(event.used)} of ${formatCount(event.budget)}; the agent has been told\n`,
+          `${this.colour('yellow', 'warning:')} ${limitName(event.which)} at ${formatLimit(event.which, event.used)} of ${formatLimit(event.which, event.budget)}; the agent has been told\n`,
         );
         break;
       case 'stray':
@@ -160,7 +160,7 @@ export function metricsLine(
     `${call.promptTokens} in / ${call.completionTokens} out`,
     call.reasoningTokens > 0 ? `${call.reasoningTokens} of them thinking` : null,
   ].filter((part): part is string => part !== null);
-  const run = totals.costUsd === null ? '' : ` | run cost $${totals.costUsd.toFixed(4)}`;
+  const run = totals.costUsd === null ? '' : ` | run cost ${formatUsd(totals.costUsd)}`;
   return `   · ${parts.join(' | ')}${run}`;
 }
 

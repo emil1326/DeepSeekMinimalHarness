@@ -1,6 +1,6 @@
 import type {
   ChatMessage,
-  Price,
+  PriceTable,
   ResolvedRunConfig,
   RunEvent,
   RunEventBody,
@@ -18,7 +18,15 @@ export interface WorkerStart {
   config: ResolvedRunConfig;
   /** Where to reach DeepSeek. Overridable so tests can point at a fake. */
   baseUrl: string;
-  price?: Price;
+  /**
+   * Prices to bill against, as written in `config.json`.
+   *
+   * The whole table rather than the one price for this run's model, because
+   * DeepSeek charges half during off-peak hours: the price of a call depends on
+   * when it was made, so it is resolved once per call in the loop. Anything the
+   * table does not name falls back to the published prices in `core/pricing.ts`.
+   */
+  prices?: PriceTable;
   /**
    * The conversation to carry on from, for a continuation.
    *

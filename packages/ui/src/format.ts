@@ -17,7 +17,26 @@ export function tokens(value: number): string {
 
 export function money(value: number | null | undefined): string {
   if (value === null || value === undefined) return '-';
-  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(3)}`;
+  if (value === 0) return '$0';
+  if (value >= 1) return `$${value.toFixed(2)}`;
+  // Fixed places rather than trimmed ones, because these get compared by eye
+  // against each other. A hundredth of a cent is `$0.0001` and is not the
+  // `$0.00` that rounding to cents would make of it.
+  return `$${value >= 0.01 ? value.toFixed(3) : value.toFixed(4)}`;
+}
+
+/**
+ * A limit's numbers in its own unit, short enough to sit inside a ring.
+ *
+ * `turns` is a count, tokens get their `k` and `M`, a wall clock is minutes once
+ * it has any, and dollars never round to a whole number — a run that has spent
+ * three cents and one that has spent none are different runs.
+ */
+export function compactLimit(which: string, value: number): string {
+  if (which === 'costUsd') return money(value);
+  if (which === 'wallSeconds') return value < 60 ? `${Math.round(value)}s` : `${Math.round(value / 60)}m`;
+  if (which === 'turns') return String(Math.round(value));
+  return tokens(value);
 }
 
 export function hitRate(promptTokens: number, cacheHitTokens: number): string {

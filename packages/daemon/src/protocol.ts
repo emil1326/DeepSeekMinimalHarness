@@ -32,6 +32,14 @@ export interface RunSummary {
   detached: boolean;
   /** How many live connections are watching, and own, this run. */
   owners: number;
+  /**
+   * Whether this run's model has a price, and so whether a cost can be shown.
+   *
+   * Filled in by the server rather than the store, because only the server has
+   * the price table; optional for that reason, since the store builds these rows
+   * and genuinely does not know. Absent means "not asked", not "free".
+   */
+  priced?: boolean;
 }
 
 export interface RunDetail extends RunSummary {
@@ -84,6 +92,8 @@ export interface LimitsBody {
   outputTokens?: number;
   totalTokens?: number;
   contextTokens?: number;
+  /** Dollars, and so not a whole number. Five cents is `0.05`. */
+  costUsd?: number;
 }
 export interface DiffResponse {
   diff: string;

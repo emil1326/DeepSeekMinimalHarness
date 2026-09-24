@@ -86,16 +86,39 @@ export function round(value: number, places: number): number {
   return Math.round(value * factor) / factor;
 }
 
-/** Prices come from the daemon's config, filled in by hand. They change; don't hardcode them. */
+/**
+ * What a model charges, per million tokens.
+ *
+ * `cacheHitPerMillion` is optional and falls back to the miss price, because a
+ * hand-written table that does not know about caching should not be read as
+ * charging nothing for a cache hit.
+ */
 export interface Price {
   inputPerMillion: number;
   cacheHitPerMillion?: number;
   outputPerMillion: number;
 }
 
+/**
+ * Prices by model name, as written in `config.json`.
+ *
+ * The built-in table is in `pricing.ts` and this one overrides it per model, so
+ * a config with nothing in it still produces a cost. See `priceFor`.
+ */
 export type PriceTable = Record<string, Price>;
 
-export function costOf(price: Price | undefined, metrics: CallMetrics): number | null {
+/**
+ * What one call costs, from the three token counts it is billed on.
+ *
+ * Takes the three counts rather than a whole `CallMetrics`, because the other
+ * caller is `stats`, which has a stored call read back out of the database as
+ * loose JSON and no reason to fabricate the rest of the shape to ask this
+ * question.
+ */
+export function costOf(
+  price: Price | undefined,
+  metrics: Pick<CallMetrics, 'promptTokens' | 'cacheHitTokens' | 'completionTokens'>,
+): number | null {
   if (price === undefined) return null;
   const hitPrice = price.cacheHitPerMillion ?? price.inputPerMillion;
   const billed = Math.max(0, metrics.promptTokens - metrics.cacheHitTokens);

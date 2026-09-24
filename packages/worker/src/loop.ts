@@ -11,14 +11,17 @@ import {
   emptyTotals,
   exceeded,
   formatCount,
+  formatLimit,
+  formatUsd,
   limitUse,
+  priceFor,
   taskMessage,
   totalsOf,
   toolSpecs,
   type ChatMessage,
   type CumulativeLimit,
   type LimitUse,
-  type Price,
+  type PriceTable,
   type ResolvedRunConfig,
   type RunLimits,
   type RunEventBody,
@@ -37,19 +40,31 @@ import {
  * that does not know it may ask will either stop early or guess.
  */
 function warnAbout(use: LimitUse): string {
-  const what: Record<CumulativeLimit, string> = {
-    turns: 'model call',
-    wallSeconds: 'second',
-    outputTokens: 'output token',
-    totalTokens: 'billed token',
-  };
-  const left = `${formatCount(use.remaining)} ${what[use.which]}${use.remaining === 1 ? '' : 's'}`;
   return (
-    `[harness] You are near a limit: ${left} left of ${formatCount(use.budget)} (${formatCount(use.used)} already used).\n` +
+    `[harness] You are near a limit: ${left(use)} left of ${formatLimit(use.which, use.budget)} ` +
+    `(${formatLimit(use.which, use.used)} already used).\n` +
     `Finish what you can within it. If you genuinely need more room, call ask with how much ` +
     `more you need and what is left to do, and the person who launched you can grant it. ` +
     `If you cannot finish, call finish saying exactly what is done and what is not.`
   );
+}
+
+/** The unit each limit is counted in, for a sentence a person reads. */
+const UNIT: Record<CumulativeLimit, string> = {
+  turns: 'model calls',
+  wallSeconds: 'seconds',
+  outputTokens: 'output tokens',
+  totalTokens: 'billed tokens',
+  costUsd: 'dollars',
+};
+
+/** What is left, in the limit's own unit and its own words. */
+function left(use: LimitUse): string {
+  if (use.which === 'costUsd') return formatUsd(use.remaining);
+  // `1 model calls` is the kind of thing that makes a model stop trusting the
+  // numbers around it, so the singular loses its s.
+  const unit = UNIT[use.which];
+  return `${formatCount(use.remaining)} ${use.remaining === 1 ? unit.replace(/s$/, '') : unit}`;
 }
 
 /** Why a run stopped, with both numbers, for the event and the report. */
@@ -61,10 +76,16 @@ function whyStopped(use: LimitUse, totals: RunTotals): string {
       return `the run went past ${use.budget} s of wall clock`;
     case 'outputTokens':
       return `the run wrote ${formatCount(totals.completionTokens)} output tokens, past the ${formatCount(use.budget)} it may`;
+    case 'costUsd':
+      return (
+        `the run spent ${formatUsd(use.used)} of the ${formatUsd(use.budget)} it may, over ` +
+        `${totals.calls} model call${totals.calls === 1 ? '' : 's'}`
+      );
     case 'totalTokens':
       return (
         `the run used ${formatCount(totals.billedTokens)} billed tokens of the ${formatCount(use.budget)} it may, ` +
-        `out of ${formatCount(totals.promptTokens)} prompt tokens sent (${formatCount(totals.cacheHitTokens)} were cache hits, which cost a tenth as much)`
+        `out of ${formatCount(totals.promptTokens)} prompt tokens sent, of which ` +
+        `${formatCount(totals.cacheHitTokens)} were cache hits and cost a fraction of a miss`
       );
   }
 }
@@ -74,7 +95,15 @@ export interface LoopOptions {
   client: DeepSeekClient;
   config: ResolvedRunConfig;
   emit: (body: RunEventBody) => void;
-  price?: Price;
+  /**
+   * Prices to bill against, as written in `config.json`.
+   *
+   * A table rather than one price, because DeepSeek charges half during off-peak
+   * hours: the price of a call depends on the hour it was made, so it is looked
+   * up per call against that call's own timestamp. Anything the table does not
+   * name falls back to the published prices in `core/pricing.ts`.
+   */
+  prices?: PriceTable;
   /**
    * A conversation to carry on from, when this run continues an earlier one.
    *
@@ -170,7 +199,8 @@ class TextBuffer {
 function continuationMessage(limits: RunLimits, resumes: number): string {
   return (
     `[harness] You are continuing an earlier run that stopped at a limit. You now have ` +
-    `${limits.turns} turns and ${formatCount(limits.totalTokens)} billed tokens.\n` +
+    `${limits.turns} turns, ${formatCount(limits.totalTokens)} billed tokens and ` +
+    `${formatUsd(limits.costUsd)} to spend.\n` +
     `That run made ${resumes} model calls. Its edits are already in the worktree: do not redo them, and ` +
     `do not re-read a file to check whether you changed it, because you did.\n` +
     `Carry on from where you stopped. The remaining work is whatever you had not done when you ran out. ` +
@@ -337,7 +367,15 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
     buffer.drain();
     thoughts.drain();
 
-    totals = totalsOf(totals, outcome.metrics, options.price);
+    totals = totalsOf(
+      totals,
+      outcome.metrics,
+      // At the moment this call went out, not at the moment the run started. An
+      // hour into a run that began at 00:55 UTC, every further call is billed at
+      // half, and pricing the lot at the opening rate would overstate the bill
+      // that the cost limit is measured against.
+      priceFor(config.model, outcome.metrics.startedAt, options.prices),
+    );
     emit({ type: 'metrics', turn, call: outcome.metrics, totals });
     messages.push(outcome.message);
 

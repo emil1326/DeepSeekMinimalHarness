@@ -3,9 +3,11 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import {
   DEFAULT_LIMITS,
+  costOf,
   emptyTotals,
   isTerminal,
   metricsVersionOf,
+  priceFor,
   type PriceTable,
   type ResolvedRunConfig,
   type RunEvent,
@@ -379,16 +381,15 @@ export function summarise(
       current.endToEndSum += call.endToEndTokensPerSecond;
       current.endToEndCount += 1;
     }
-    const price = prices?.[model];
-    if (price !== undefined) {
-      const billed = Math.max(0, number(call.promptTokens) - number(call.cacheHitTokens));
-      const cost =
-        (billed * price.inputPerMillion +
-          number(call.cacheHitTokens) * (price.cacheHitPerMillion ?? price.inputPerMillion) +
-          number(call.completionTokens) * price.outputPerMillion) /
-        1_000_000;
-      current.costUsd = (current.costUsd ?? 0) + cost;
-    }
+    // Priced at the moment the call was made, by the same rule the worker bills
+    // by, so a total here adds up to what the runs themselves were told they had
+    // spent rather than to a second, differently-computed figure.
+    const cost = costOf(priceFor(model, typeof call.startedAt === 'string' ? call.startedAt : '', prices), {
+      promptTokens: number(call.promptTokens),
+      cacheHitTokens: number(call.cacheHitTokens),
+      completionTokens: number(call.completionTokens),
+    });
+    if (cost !== null) current.costUsd = (current.costUsd ?? 0) + cost;
     byModel.set(key, current);
   }
 

@@ -8,7 +8,7 @@ export {
   writeTranscript,
   type LoadedTranscript,
 } from './transcript.js';
-export { buildReport, type CheckResult, type ReportInput, type RunReport } from './report.js';
+export { buildReport, limitName, type CheckResult, type ReportInput, type RunReport } from './report.js';
 export {
   WARN_AT,
   approaching,
@@ -16,12 +16,15 @@ export {
   elapsedSeconds,
   exceeded,
   format as formatCount,
+  formatLimit,
+  formatUsd,
   limitUse,
   warnThreshold,
   type CumulativeLimit,
   type LimitReadings,
   type LimitUse,
 } from './limits.js';
+export { BUILTIN_PRICES, PEAK_HOURS_UTC, atPeak, priceFor, type TimedPrice } from './pricing.js';
 export {
   CHECK_TIMEOUT_MS,
   NEVER_READ_DIRS,

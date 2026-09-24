@@ -1373,57 +1373,122 @@ pre.diff {
 
 /* --- limits and the run report ----------------------------------------- */
 
-/* Three numbers, one bar each, read top to bottom. The bar is the question
-   "how much room is left", which a bare total cannot answer. */
+/* One ring per budget: the fraction as a dial with `used/budget` inside it. Five
+   of these in a row answer "how much room is left" at a glance, which five
+   separate bars in a wide column did not — the label and the number sat at
+   opposite ends of the row and the part that mattered was a 3px line. */
 .limits {
   padding: var(--s2) var(--s5) var(--s4);
   display: flex;
   flex-direction: column;
-  gap: var(--s2);
+  gap: var(--s3);
 }
 
-.limit-row {
-  display: grid;
-  grid-template-columns: 10ch 1fr auto;
+.rings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s5);
+}
+
+.ring {
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: var(--s4);
-  font-size: var(--t-data);
+  gap: var(--s1);
 }
 
-.limit-row .limit-name {
-  color: var(--text-faint);
+.ring-dial {
+  position: relative;
+  width: 60px;
+  height: 60px;
 }
 
-.limit-row .limit-numbers {
+.ring-dial svg {
+  display: block;
+}
+
+.ring-track {
+  fill: none;
+  stroke: var(--line);
+}
+
+.ring-arc {
+  fill: none;
+  stroke: var(--primary);
+  transition:
+    stroke-dasharray var(--step) var(--ease),
+    stroke var(--step) var(--ease);
+}
+
+/* The same four fifths the agent is warned at, so the page and the agent agree
+   about when a run is in trouble. */
+.ring[data-tone='near'] .ring-arc {
+  stroke: var(--warning);
+}
+
+.ring[data-tone='over'] .ring-arc {
+  stroke: var(--danger);
+}
+
+/* Centred in the ring rather than beside it, which is what makes the numbers and
+   the arc read as one object. Stacked because a dollar amount on one line is
+   wider than the ring: `$0.0005/$0.0030` runs off both sides and into the dial
+   next door. */
+.ring-read {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
   font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.2;
   font-variant-numeric: tabular-nums;
+  letter-spacing: -0.2px;
   color: var(--text-muted);
 }
 
-.limit-bar {
-  display: block;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--line-soft);
-  overflow: hidden;
+.ring-read > span {
+  font-size: 9px;
+  color: var(--text-faint);
 }
 
-.limit-fill {
-  display: block;
-  height: 100%;
-  background: var(--text-faint);
-  transition: width var(--step) var(--ease);
+.ring-read i {
+  font-style: normal;
 }
 
-.limit-fill[data-tone='warn'] {
-  background: var(--warning);
+.ring[data-tone='near'] .ring-read b {
+  color: var(--warning);
+}
+
+.ring[data-tone='over'] .ring-read b,
+.ring[data-tone='over'] .ring-read > span {
+  color: var(--danger);
+}
+
+.ring-label {
+  font-size: var(--t-label);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.limits-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font-size: var(--t-data);
+}
+
+.limits-foot .push {
+  flex: 1;
 }
 
 .limit-grant {
   display: flex;
   align-items: center;
   gap: var(--s3);
-  margin-top: var(--s2);
   color: var(--text-faint);
   font-size: var(--t-data);
 }
@@ -1443,6 +1508,11 @@ pre.diff {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   padding: 2px var(--s2);
+}
+
+/* A dollar amount is `0.05`, and 6ch clipped the placeholder to `0.`. */
+.limit-grant input.wide {
+  width: 8ch;
 }
 
 .tab[data-loud='true'] {

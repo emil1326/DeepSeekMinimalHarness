@@ -100,7 +100,15 @@ export type RunEventBody =
     }
   | {
       type: 'limit';
-      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'askSeconds';
+      which:
+        | 'turns'
+        | 'wallSeconds'
+        | 'outputTokens'
+        | 'totalTokens'
+        | 'contextTokens'
+        | 'askSeconds'
+        /** The run spent its dollar budget. Measured from DeepSeek's prices. */
+        | 'costUsd';
       detail: string;
       /** What it got to. `used` of `budget`, so a reader is never shown a bare number. */
       used: number;
@@ -117,7 +125,7 @@ export type RunEventBody =
    */
   | {
       type: 'warning';
-      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens';
+      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'costUsd';
       /** Already used, and the ceiling it is heading for. */
       used: number;
       budget: number;

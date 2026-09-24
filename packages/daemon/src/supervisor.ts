@@ -185,9 +185,10 @@ export class Supervisor {
       runId,
       config: detail.config,
       baseUrl: this.options.baseUrl,
-      ...(this.options.prices?.[detail.config.model]
-        ? { price: this.options.prices[detail.config.model] }
-        : {}),
+      // The whole table, not the one price for this run's model: a call made
+      // during off-peak hours costs half, so the price is resolved per call in
+      // the worker, against the time the call went out. See `core/pricing.ts`.
+      ...(this.options.prices ? { prices: this.options.prices } : {}),
       // The conversation this run carries on from, if it is a continuation.
       // Held in memory rather than in the row: it is hundreds of kilobytes of
       // messages, the row is read on a list view, and nothing but the fork

@@ -53,7 +53,17 @@ export interface DaemonRecord {
 }
 
 export interface HarnessConfig {
-  /** Filled in by hand, because prices change. Absent means cost is not shown. */
+  /**
+   * Model prices, written by hand, to override the published ones.
+   *
+   * Prices and models change, and the built-in table in `core/pricing.ts` will
+   * eventually be out of date. This is the way to correct it without waiting for
+   * a release, and to price a model the table has never heard of: anything here
+   * wins outright, and anything it does not name falls back to the table.
+   *
+   * A price given here is a flat figure and is not split by time of day, which
+   * is what somebody writing one means.
+   */
   prices?: PriceTable;
   /** Only for tests and for pointing at a proxy. Defaults to DeepSeek itself. */
   deepseekBaseUrl?: string;

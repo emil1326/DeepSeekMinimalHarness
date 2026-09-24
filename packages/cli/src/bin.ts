@@ -15,6 +15,8 @@ import { Command } from 'commander';
 import {
   elapsedSeconds,
   formatCount,
+  formatLimit,
+  formatUsd,
   isTerminal,
   limitUse,
   loadHarnessConfig,
@@ -174,7 +176,7 @@ program
       );
       for (const run of runs) {
         process.stdout.write(
-          `${pad(run.id, 14)}${pad(run.name, 24)}${pad(statusWord(run.status), 17)}${pad(run.model, 17)}${pad(String(run.turns), 8)}${pad(String(run.totals.completionTokens), 9)}${pad(speed(run), 8)}${pad(cost(run), 9)}${pad(nearestLimit(run), 12)}${pad(duration(run), 10)}\n`,
+          `${pad(run.id, 14)}${pad(run.name, 24)}${pad(statusWord(run.status), 17)}${pad(run.model, 17)}${pad(String(run.turns), 8)}${pad(String(run.totals.completionTokens), 9)}${pad(speed(run), 8)}${pad(cost(run), 9)}${pad(nearestLimit(run), 17)}${pad(duration(run), 10)}\n`,
         );
       }
     }),
@@ -208,16 +210,17 @@ program
           process.stdout.write(`${pad(use.which, 16)}${pad('unknown', 12)}${pad('?', 12)}${pad('?', 12)}\n`);
           continue;
         }
-        const left = Math.max(0, use.budget - use.used);
+        const stated = (value: number): string => formatLimit(use.which, value);
         process.stdout.write(
-          `${pad(use.which, 16)}${pad(formatCount(use.used), 12)}${pad(formatCount(use.budget), 12)}${pad(formatCount(left), 12)}\n`,
+          `${pad(use.which, 16)}${pad(stated(use.used), 12)}${pad(stated(use.budget), 12)}${pad(stated(use.remaining), 12)}\n`,
         );
       }
       process.stdout.write(
         `\nContext window  ${formatCount(detail.config.limits.contextTokens)} tokens per request.\n` +
           `totalTokens counts BILLED tokens: prompt cache misses plus output. Cache hits are\n` +
-          `about a tenth of a miss, so counting them at full price bounded nothing worth\n` +
-          `bounding and killed runs that had spent almost nothing.\n` +
+          `about a fiftieth of a miss on flash, so counting them at full price bounded nothing\n` +
+          `worth bounding and killed runs that had spent almost nothing.\n` +
+          `costUsd counts dollars, from DeepSeek's published prices at the hour of each call.\n` +
           `\nRaise one with: dsh limit ${run} --turns 60   (figures are absolute, +30 adds 30)\n`,
       );
     }),
@@ -231,6 +234,7 @@ program
   .option('--wallSeconds <n>', 'wall clock seconds to allow')
   .option('--outputTokens <n>', 'output tokens to allow')
   .option('--totalTokens <n>', 'billed tokens to allow')
+  .option('--costUsd <n>', 'dollars to allow, e.g. 0.25 or +0.05')
   .action(
     (
       run: string,
@@ -239,6 +243,7 @@ program
         wallSeconds?: string;
         outputTokens?: string;
         totalTokens?: string;
+        costUsd?: string;
       },
     ) =>
       guard(async () => {
@@ -252,9 +257,12 @@ program
           const value = absoluteLimit(given, detail.config.limits[name], name);
           patch[name] = value;
         }
+        if (options.costUsd !== undefined) {
+          patch.costUsd = absoluteLimit(options.costUsd, detail.config.limits.costUsd, 'costUsd');
+        }
         if (Object.keys(patch).length === 0) {
           process.stderr.write(
-            'dsh: give at least one of --turns, --wallSeconds, --outputTokens, --totalTokens\n',
+            'dsh: give at least one of --turns, --wallSeconds, --outputTokens, --totalTokens, --costUsd\n',
           );
           process.exitCode = 1;
           return;
@@ -279,14 +287,19 @@ program
  * absolute is what goes on the wire, so the conversion happens here once. If
  * the same message were ever delivered twice, a delta would compound and an
  * absolute figure cannot.
+ *
+ * Not restricted to whole numbers, because one of the limits is money and
+ * `--costUsd +0.05` is how somebody grants five more cents.
  */
-function absoluteLimit(given: string, current: number, name: string): number {
-  const relative = /^\+\s*\d+$/.test(given.trim());
+function absoluteLimit(given: string, current: number | undefined, name: string): number {
+  const relative = /^\+\s*\d+(\.\d+)?$/.test(given.trim());
   const value = Number(relative ? given.trim().slice(1) : given);
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new Error(`--${name} needs a positive whole number, not ${given}`);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`--${name} needs a positive number, not ${given}`);
   }
-  return relative ? current + value : value;
+  if (name === 'costUsd') return Math.round((relative ? (current ?? 0) + value : value) * 1e6) / 1e6;
+  if (!Number.isInteger(value)) throw new Error(`--${name} needs a whole number, not ${given}`);
+  return relative ? (current ?? 0) + value : value;
 }
 
 program
@@ -332,13 +345,18 @@ program
       );
       line(
         'cost',
-        report.totals.costUsd === null ? 'no price table' : `$${report.totals.costUsd.toFixed(4)}`,
+        report.totals.costUsd === null
+          ? 'the model has no known price'
+          : `${formatUsd(report.totals.costUsd)} of ${formatUsd(report.limits.costUsd)} allowed`,
       );
 
       process.stdout.write(`\n${paint('bold', 'limits')}\n`);
       for (const use of report.used) {
         const near = use.ratio >= 0.8 ? paint('yellow', ' (near)') : '';
-        line(`  ${use.which}`, `${formatCount(use.used)} of ${formatCount(use.budget)}${near}`);
+        line(
+          `  ${use.which}`,
+          `${formatLimit(use.which, use.used)} of ${formatLimit(use.which, use.budget)}${near}`,
+        );
       }
 
       process.stdout.write(`\n${paint('bold', 'checks')}\n`);
@@ -379,7 +397,7 @@ program
       }
       if (report.warnings > 0) {
         process.stdout.write(
-          `\n${paint('bold', 'limits')} the harness warned the agent ${report.warnings} time${report.warnings === 1 ? '' : 's'} before it stopped.\n`,
+          `\n${paint('bold', 'limits')} the harness warned the agent ${report.warnings} time${report.warnings === 1 ? '' : 's'} before it stopped, about ${report.warnedAbout.join(' and ')}.\n`,
         );
       }
 
@@ -435,6 +453,7 @@ program
   .option('--wallSeconds <n>', 'wall clock seconds to allow')
   .option('--outputTokens <n>', 'output tokens to allow')
   .option('--totalTokens <n>', 'billed tokens to allow')
+  .option('--costUsd <n>', 'dollars to allow, absolute, or +n for more than it had')
   .option('--json', 'print one JSON event per line')
   .option('--detach', 'start it and return without watching')
   .action(
@@ -445,6 +464,7 @@ program
         wallSeconds?: string;
         outputTokens?: string;
         totalTokens?: string;
+        costUsd?: string;
         json?: boolean;
         detach?: boolean;
       },
@@ -453,17 +473,18 @@ program
         const client = await DaemonClient.connect();
         const parent = await client.run(run);
         const limits: Record<string, number> = {};
-        const names = ['turns', 'wallSeconds', 'outputTokens', 'totalTokens'] as const;
+        const names = ['turns', 'wallSeconds', 'outputTokens', 'totalTokens', 'costUsd'] as const;
         for (const name of names) {
           const given = options[name];
           if (given === undefined) continue;
           limits[name] = absoluteLimit(given, parent.limits[name], name);
         }
         // A continuation with no new room would stop at the same wall again, so
-        // a bare `dsh continue` doubles the two budgets that actually run out.
+        // a bare `dsh continue` doubles the three budgets that actually run out.
         if (Object.keys(limits).length === 0) {
           limits.turns = parent.limits.turns * 2;
           limits.totalTokens = parent.limits.totalTokens * 2;
+          limits.costUsd = parent.limits.costUsd * 2;
         }
         const created = await client.json<{ id: string }>('POST', '/runs', {
           // The same task file it was resolved from, re-read rather than
@@ -741,11 +762,11 @@ function nearestLimit(run: RunSummary): string {
   );
   const worst = [...uses].sort((a, b) => b.ratio - a.ratio)[0];
   if (worst === undefined) return '-';
-  return `${formatCount(worst.used)}/${formatCount(worst.budget)}`;
+  return `${formatLimit(worst.which, worst.used)}/${formatLimit(worst.which, worst.budget)}`;
 }
 
 function cost(run: RunSummary): string {
-  return run.totals.costUsd === null ? '-' : `$${run.totals.costUsd.toFixed(4)}`;
+  return run.totals.costUsd === null ? '-' : formatUsd(run.totals.costUsd);
 }
 
 function duration(run: RunSummary): string {

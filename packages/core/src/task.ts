@@ -16,6 +16,14 @@ export const limitsSchema = z
     totalTokens: z.number().int().positive().optional(),
     contextTokens: z.number().int().positive().optional(),
     askSeconds: z.number().int().positive().optional(),
+    /**
+     * Dollars, and so not an integer: the default is five cents.
+     *
+     * The only limit here that is counted in money. Tokens and turns are
+     * proxies; this is the thing being spent, and it is the one a person can
+     * actually set without knowing what a token is worth.
+     */
+    costUsd: z.number().positive().optional(),
   })
   .strict();
 
@@ -50,6 +58,15 @@ export interface RunLimits {
    */
   contextTokens: number;
   askSeconds: number;
+  /**
+   * What the run may spend, in dollars.
+   *
+   * Five cents by default, which is deliberate: small enough that a task file
+   * that forgot to think about money cannot burn a balance, and large enough for
+   * a real multi-file edit on Flash at the cache rate. The other limits are
+   * guesses at this one, and a guess is a poor substitute for the number itself.
+   */
+  costUsd: number;
 }
 
 export const DEFAULT_LIMITS: RunLimits = {
@@ -65,6 +82,7 @@ export const DEFAULT_LIMITS: RunLimits = {
   // not end the run.
   contextTokens: 700_000,
   askSeconds: 3_600,
+  costUsd: 0.05,
 };
 
 /**

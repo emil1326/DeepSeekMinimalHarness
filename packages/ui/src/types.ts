@@ -87,7 +87,15 @@ export type RunEventBody =
     }
   | {
       type: 'limit';
-      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'askSeconds';
+      which:
+        | 'turns'
+        | 'wallSeconds'
+        | 'outputTokens'
+        | 'totalTokens'
+        | 'contextTokens'
+        | 'askSeconds'
+        /** The run spent its dollar budget. From DeepSeek's published prices. */
+        | 'costUsd';
       detail: string;
       /** What it got to, of what. Never a bare number. */
       used: number;
@@ -95,7 +103,7 @@ export type RunEventBody =
     }
   | {
       type: 'warning';
-      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens';
+      which: 'turns' | 'wallSeconds' | 'outputTokens' | 'totalTokens' | 'contextTokens' | 'costUsd';
       used: number;
       budget: number;
       detail: string;
@@ -115,6 +123,14 @@ export interface RunLimits {
   totalTokens: number;
   contextTokens: number;
   askSeconds: number;
+  /**
+   * Dollars the run may spend.
+   *
+   * Absent on a run recorded before the harness priced anything, which is why
+   * every reader of it has to cope with `undefined` rather than a zero: a run
+   * that was never given a dollar budget has not been given one of zero.
+   */
+  costUsd: number;
 }
 
 export interface ResolvedRunConfig {
@@ -151,6 +167,12 @@ export interface RunSummary {
   detail: string | null;
   detached: boolean;
   owners: number;
+  /**
+   * Whether the model has a known price, so a cost can be measured at all.
+   *
+   * Absent means the daemon was not asked, which is not the same as free.
+   */
+  priced?: boolean;
 }
 
 export interface RunDetail extends RunSummary {
@@ -221,5 +243,13 @@ export interface RunReport {
   stray: string[];
   strayFailure: string | null;
   questions: { question: string; answer: string | null }[];
+  /** True when the harness warned the agent before a limit, and how often. */
   warnings: number;
+  /**
+   * Which limits it was warned about, by the name a person uses.
+   *
+   * "Warned once" does not say whether that was about turns or about money, and
+   * the difference decides whether continuing the run is worth the money.
+   */
+  warnedAbout: string[];
 }

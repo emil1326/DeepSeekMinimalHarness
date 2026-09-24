@@ -19,6 +19,8 @@ import {
   emptyTotals,
   exceeded,
   formatCount,
+  formatLimit,
+  formatUsd,
   limitUse,
   warnThreshold,
   type LimitUse,
@@ -34,6 +36,7 @@ const LIMITS = {
   totalTokens: 2_000_000,
   contextTokens: 700_000,
   askSeconds: 3600,
+  costUsd: 0.05,
 };
 
 function readings(overrides: Partial<Parameters<typeof limitUse>[0]> = {}) {
@@ -212,5 +215,93 @@ describe('a limit event through the whole loop', () => {
     expect(event.used).toBeGreaterThan(event.budget);
     expect(formatCount(event.used)).toBe('8M');
     expect(formatCount(event.budget)).toBe('8M');
+  });
+});
+
+describe('the dollar budget', () => {
+  /** Five cents spent, of the five cents allowed. */
+  function spent(costUsd: number | null): Parameters<typeof limitUse>[0] {
+    return readings({ totals: { ...emptyTotals(), costUsd } });
+  }
+
+  it('is listed when the model has a price, last, after the things it is a proxy for', () => {
+    const uses = limitUse(spent(0.02), LIMITS);
+    expect(uses.map((use) => use.which)).toEqual([
+      'turns',
+      'wallSeconds',
+      'outputTokens',
+      'totalTokens',
+      'costUsd',
+    ]);
+    const cost = uses.find((use) => use.which === 'costUsd');
+    expect(cost?.used).toBe(0.02);
+    expect(cost?.budget).toBe(0.05);
+    expect(cost?.ratio).toBeCloseTo(0.4, 10);
+  });
+
+  it('is left out entirely when nothing is measuring it', () => {
+    // An unpriced model gives `costUsd: null`, and a row of `$0 of $0.05` would
+    // read as a run that had spent nothing rather than one nobody is counting.
+    expect(limitUse(spent(null), LIMITS).map((use) => use.which)).not.toContain('costUsd');
+  });
+
+  it('is left out for a run stored before the harness priced anything', () => {
+    // Those rows have no `costUsd` in their stored config, so the budget is
+    // `undefined` at runtime however the type reads.
+    const old = { ...LIMITS, costUsd: undefined } as unknown as typeof LIMITS;
+    expect(limitUse(spent(0.02), old).map((use) => use.which)).not.toContain('costUsd');
+  });
+
+  it('stops a run that has spent its budget', () => {
+    const hit = exceeded(limitUse(spent(0.05), LIMITS));
+    expect(hit?.which).toBe('costUsd');
+    expect(hit?.remaining).toBe(0);
+  });
+
+  it('warns when a fifth of it is left', () => {
+    // 0.042 spent of 0.05 leaves 0.008, which is under the 0.01 that a fifth of
+    // the budget comes to.
+    const near = approaching(limitUse(spent(0.042), LIMITS), new Set());
+    expect(near.map((use) => use.which)).toContain('costUsd');
+  });
+
+  it('says nothing on the first turn of a run that has barely spent anything', () => {
+    // The bug this exists to catch. Every other limit is counted in whole things
+    // and so rounds up to one of them, but a dollar is not: with a floor of one,
+    // the 0.049 left of a fresh five-cent budget was "one unit left", every run
+    // was warned on its first turn, and the warning said a dollar was nearly
+    // gone when a cent was.
+    expect(warnThreshold(0.05, 0.8, 0)).toBeCloseTo(0.01, 10);
+    expect(approaching(limitUse(spent(0.002), LIMITS), new Set())).toEqual([]);
+  });
+
+  it('is never warned about twice, like every other limit', () => {
+    const uses = limitUse(spent(0.048), LIMITS);
+    expect(approaching(uses, new Set(['costUsd']))).toEqual([]);
+  });
+});
+
+describe('writing a limit down', () => {
+  it('gives a cost its own unit, because rounding it to a whole number gives zero', () => {
+    const use: LimitUse = {
+      which: 'costUsd',
+      used: 0.0032,
+      budget: 0.05,
+      remaining: 0.0468,
+      ratio: 0.064,
+    };
+    expect(describeLimit(use)).toBe('$0.0032 of $0.050');
+    expect(formatLimit('costUsd', use.used)).toBe('$0.0032');
+    expect(formatLimit('turns', 3)).toBe('3');
+  });
+
+  it('never states a spent cent as nothing', () => {
+    // Two places would make a tenth of a cent $0.00, which reads as free.
+    expect(formatUsd(0)).toBe('$0');
+    expect(formatUsd(0.0001)).toBe('$0.0001');
+    expect(formatUsd(0.0032)).toBe('$0.0032');
+    expect(formatUsd(0.05)).toBe('$0.050');
+    expect(formatUsd(0.5)).toBe('$0.500');
+    expect(formatUsd(2.5)).toBe('$2.50');
   });
 });

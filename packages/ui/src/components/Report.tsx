@@ -14,6 +14,16 @@ import { money, statusWord, tokens } from '../format';
  * Everything here is derived rather than asserted. "Finished" means the agent
  * called `finish`; whether the checks agreed is a separate line.
  */
+/**
+ * Twice a dollar budget, rounded to a millionth.
+ *
+ * Adding cents to a float is how a budget ends up stored as 0.15000000000000002
+ * and shown that way on the next screen.
+ */
+function doubleCost(value: number | undefined): number {
+  return Math.round((value ?? 0) * 2 * 1e6) / 1e6;
+}
+
 export function Report({ runId, live, taskPath }: { runId: string; live: boolean; taskPath: string | null }) {
   const queryClient = useQueryClient();
   const report = useQuery({
@@ -76,7 +86,10 @@ export function Report({ runId, live, taskPath }: { runId: string; live: boolean
           {data.totals.costUsd !== null && (
             <div>
               <dt>cost</dt>
-              <dd>{money(data.totals.costUsd)}</dd>
+              <dd>
+                {money(data.totals.costUsd)}
+                <span className="quiet"> of {money(data.limits.costUsd)}</span>
+              </dd>
             </div>
           )}
         </dl>
@@ -145,7 +158,7 @@ export function Report({ runId, live, taskPath }: { runId: string; live: boolean
         {data.warnings > 0 && (
           <p className="quiet">
             The harness warned this run {data.warnings} time{data.warnings === 1 ? '' : 's'} before it
-            stopped.
+            stopped, about {data.warnedAbout.join(' and ')}.
           </p>
         )}
 
@@ -159,7 +172,14 @@ export function Report({ runId, live, taskPath }: { runId: string; live: boolean
             {live ? (
               <>
                 <button
-                  onClick={() => grant.mutate({ turns: data.limits.turns + 20 })}
+                  onClick={() =>
+                    grant.mutate({
+                      turns: data.limits.turns + 20,
+                      // The dollar budget as well, or a run that stopped on
+                      // money would be granted turns it cannot afford to use.
+                      costUsd: doubleCost(data.limits.costUsd),
+                    })
+                  }
                   disabled={grant.isPending}
                   title="It is still going, so this raises the budget it is working to right now."
                 >
@@ -170,15 +190,17 @@ export function Report({ runId, live, taskPath }: { runId: string; live: boolean
             ) : (
               <>
                 <button
-                  onClick={() => again.mutate({ turns: data.limits.turns * 2 })}
+                  onClick={() =>
+                    again.mutate({ turns: data.limits.turns * 2, costUsd: doubleCost(data.limits.costUsd) })
+                  }
                   disabled={again.isPending || taskPath === null}
                   title={
                     taskPath === null
                       ? 'This run does not record the task file it came from'
-                      : `Continue with ${data.limits.turns * 2} turns instead of ${data.limits.turns}`
+                      : `Continue with ${data.limits.turns * 2} turns and ${money(doubleCost(data.limits.costUsd))} instead of ${data.limits.turns} and ${money(data.limits.costUsd)}`
                   }
                 >
-                  continue with double the turns
+                  continue with double the room
                 </button>
                 {again.isError && <span className="quiet">{(again.error as Error).message}</span>}
               </>

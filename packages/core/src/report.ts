@@ -20,7 +20,7 @@
 
 import { checkOutcome, type CheckOutcome } from './checks.js';
 import type { RunEvent, RunStatus, RunTotals } from './events.js';
-import { elapsedSeconds, limitUse, type LimitUse } from './limits.js';
+import { elapsedSeconds, formatLimit, limitUse, type LimitUse } from './limits.js';
 import type { RunLimits } from './task.js';
 
 /** The last result of each check the run ran. */
@@ -70,6 +70,15 @@ export interface RunReport {
   questions: { question: string; answer: string | null }[];
   /** True when the harness warned the agent before a limit, and how often. */
   warnings: number;
+  /**
+   * Which limits it was warned about, in the order they were first mentioned.
+   *
+   * A run that was warned and then chose to stop is a different story from one
+   * that was stopped: the agent wrote its own summary and knew what it had not
+   * done. "Warned once" does not say whether that was about turns or about
+   * money, and the difference decides whether continuing is worth it.
+   */
+  warnedAbout: string[];
 }
 
 export interface ReportInput {
@@ -89,10 +98,53 @@ export interface ReportInput {
   strayFailure: string | null;
 }
 
+/**
+ * A limit's name as a person writes it.
+ *
+ * `costUsd` is a field name, and "the harness warned it about costUsd" is what
+ * comes out otherwise.
+ */
+export function limitName(which: string): string {
+  return which === 'costUsd' ? 'cost' : which;
+}
+
+/**
+ * The headline, plus the fact that the run went past a budget anyway.
+ *
+ * A run can be `finished` and over budget at the same time, and it is not rare:
+ * a call's cost is only known once it has been paid for, so the last turn of a
+ * run with a small dollar budget can carry it well past the ceiling and then
+ * call `finish` in the same turn. Measured live: a run told it had a tenth of a
+ * cent left spent four times that on one long answer and reported itself as
+ * finished, which is the one word a reader skims.
+ *
+ * Strictly past, not merely at. Reaching a limit exactly is the *normal* happy
+ * path — a four-turn run that finishes on its fourth turn has used all four
+ * turns — and saying that a run went over would be crying wolf on every single
+ * run that finishes on its last turn.
+ */
+function withOverspend(status: RunStatus, text: string, used: LimitUse[]): string {
+  if (status !== 'finished') return text;
+  const over = used.filter((use) => use.used > use.budget);
+  if (over.length === 0) return text;
+  const them = over
+    .map(
+      (use) =>
+        `${limitName(use.which)} budget (${formatLimit(use.which, use.used)} of ${formatLimit(use.which, use.budget)})`,
+    )
+    .join(' and ');
+  return `${text} It went past its ${them} on the way, so judge the claim below in that light.`;
+}
+
 export function buildReport(input: ReportInput): RunReport {
   const checks = lastCheckOutcomes(input.events);
   const questions = askedQuestions(input.events);
   const warnings = input.events.filter((event) => event.type === 'warning').length;
+  const warnedAbout = [
+    ...new Set(
+      input.events.filter((event) => event.type === 'warning').map((event) => limitName(event.which)),
+    ),
+  ];
   const stopped = [...input.events].reverse().find((event) => event.type === 'limit');
 
   const used = limitUse(
@@ -124,7 +176,7 @@ export function buildReport(input: ReportInput): RunReport {
     id: input.id,
     name: input.name,
     status: input.status,
-    headline: headline(input, checks, failed, stopped),
+    headline: withOverspend(input.status, headline(input, checks, failed, stopped), used),
     task: input.task,
     model: input.model,
     turns: input.turns,
@@ -143,6 +195,7 @@ export function buildReport(input: ReportInput): RunReport {
     strayFailure: input.strayFailure,
     questions,
     warnings,
+    warnedAbout,
   };
 }
 
@@ -161,7 +214,11 @@ function headline(
 ): string {
   const turns = `${input.turns} turn${input.turns === 1 ? '' : 's'}`;
   if (input.status === 'stopped_at_limit' && stopped?.type === 'limit') {
-    return `STOPPED at the ${stopped.which} limit after ${turns} (${stopped.used} of ${stopped.budget}). The work is partial: judge it as unfinished, not as a change to review.`;
+    return (
+      `STOPPED at the ${limitName(stopped.which)} limit after ${turns} ` +
+      `(${formatLimit(stopped.which, stopped.used)} of ${formatLimit(stopped.which, stopped.budget)}). ` +
+      `The work is partial: judge it as unfinished, not as a change to review.`
+    );
   }
   if (input.status === 'failed') {
     return `FAILED after ${turns}: ${input.summary ?? 'no summary'}`;

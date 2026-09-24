@@ -168,7 +168,7 @@ async function start(config: WorkerStart): Promise<void> {
         client,
         config: config.config,
         emit,
-        ...(config.price ? { price: config.price } : {}),
+        ...(config.prices ? { prices: config.prices } : {}),
         ...(config.resume ? { resume: config.resume } : {}),
         // Written as the run goes, so a run that stops at a limit can be
         // carried on from exactly where it got to, with its prefix intact and

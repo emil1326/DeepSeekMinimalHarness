@@ -13,6 +13,23 @@ import { StatusPill } from './Status';
 
 type Tab = 'chat' | 'report' | 'config' | 'diff';
 
+/**
+ * How long the run has been going, in seconds, for the wall-clock ring.
+ *
+ * To the run's own end when it has one, and to now only while it is still
+ * going: a finished run's clock must not keep climbing while nobody is looking
+ * at it, which is how the CLI came to report 15,000 of its 3,600 seconds used
+ * on a run that took three minutes.
+ */
+function wallSeconds(startedAt: string | null, endedAt: string | null): number {
+  if (startedAt === null) return 0;
+  const from = Date.parse(startedAt);
+  if (!Number.isFinite(from)) return 0;
+  const to = endedAt === null ? Date.now() : Date.parse(endedAt);
+  if (!Number.isFinite(to)) return 0;
+  return Math.max(0, Math.round((to - from) / 1000));
+}
+
 export function AgentPage({ runId, onBack }: { runId: string; onBack: () => void }) {
   const [tab, setTab] = useState<Tab>('chat');
   const queryClient = useQueryClient();
@@ -81,6 +98,8 @@ export function AgentPage({ runId, onBack }: { runId: string; onBack: () => void
           turns={detail.turns}
           totals={detail.totals}
           limits={detail.limits}
+          wallSeconds={wallSeconds(detail.startedAt, detail.endedAt)}
+          priced={detail.priced === true}
           status={detail.status}
         />
       </div>

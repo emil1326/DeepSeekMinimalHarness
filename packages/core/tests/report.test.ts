@@ -25,6 +25,7 @@ const LIMITS = {
   totalTokens: 2_000_000,
   contextTokens: 700_000,
   askSeconds: 3600,
+  costUsd: 0.05,
 };
 
 let seq = 0;
@@ -129,10 +130,81 @@ describe('a run that stopped at a limit', () => {
       }),
     );
     expect(report.warnings).toBe(1);
+    expect(report.warnedAbout).toEqual(['turns']);
+  });
+
+  it('names the limits it warned about, so "warned once" is not the whole story', () => {
+    // Turns or money? A run told about one and not the other is a run whose
+    // commissioner can decide whether continuing is worth paying for.
+    const report = buildReport(
+      input({
+        status: 'finished',
+        events: [
+          event({ type: 'warning', which: 'costUsd', used: 0.04, budget: 0.05, detail: 'near' }),
+          event({ type: 'warning', which: 'costUsd', used: 0.045, budget: 0.05, detail: 'again' }),
+          event({ type: 'warning', which: 'turns', used: 8, budget: 10, detail: 'near' }),
+        ],
+      }),
+    );
+    // Counted per event, named once each, in the order they first came up.
+    expect(report.warnings).toBe(3);
+    expect(report.warnedAbout).toEqual(['cost', 'turns']);
+  });
+
+  it('calls the dollar limit what a person calls it', () => {
+    // `costUsd` is a field name. "STOPPED at the costUsd limit" is what comes
+    // out otherwise, and the number beside it has to be read as money too:
+    // rounded to a whole number it is zero.
+    const report = buildReport(
+      input({
+        status: 'stopped_at_limit',
+        turns: 5,
+        events: [
+          event({
+            type: 'limit',
+            which: 'costUsd',
+            detail: 'the run spent $0.020 of the $0.020 it may',
+            used: 0.0202,
+            budget: 0.02,
+          }),
+        ],
+      }),
+    );
+    expect(report.headline).toContain('STOPPED at the cost limit');
+    expect(report.headline).toContain('$0.020 of $0.020');
+    expect(report.stoppedAt?.which).toBe('costUsd');
   });
 });
 
 describe('a run that finished', () => {
+  it('says so in the headline when it had gone past a budget anyway', () => {
+    // Found live. A call's cost is only known once it has been paid for, so the
+    // last turn of a run with a small dollar budget can carry it well past the
+    // ceiling and call `finish` in the same turn. Measured: a run told it had a
+    // tenth of a cent left spent four times that on one long answer and reported
+    // itself as finished — which is the one word a reader skims.
+    const report = buildReport(
+      input({
+        status: 'finished',
+        turns: 5,
+        limits: { ...LIMITS, costUsd: 0.0004 },
+        totals: { ...emptyTotals(), billedTokens: 3000, completionTokens: 1000, costUsd: 0.0008 },
+      }),
+    );
+    expect(report.headline).toContain('Finished after 5 turns');
+    expect(report.headline).toContain('past its cost budget');
+    expect(report.headline).toContain('$0.0008 of $0.0004');
+  });
+
+  it('says nothing about it when the run landed exactly on a limit', () => {
+    // Reaching a limit exactly is the normal happy path: a four-turn run that
+    // finishes on its fourth turn has used all four of its turns. Warning about
+    // that would be crying wolf on every run that finishes on its last turn.
+    const report = buildReport(input({ status: 'finished', turns: 10 }));
+    expect(report.used.find((use) => use.which === 'turns')?.used).toBe(10);
+    expect(report.headline).not.toContain('past its');
+  });
+
   it('says the checks passed, when they did', () => {
     const report = buildReport(
       input({ status: 'finished', events: [...check('typecheck', 0), ...check('prettier', 0)] }),
