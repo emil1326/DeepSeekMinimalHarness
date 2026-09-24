@@ -20,6 +20,7 @@ import {
   toolNames,
   toolSpecs,
   totalsOf,
+  wallClock,
   type ChatMessage,
   type CumulativeLimit,
   type FailureCause,
@@ -231,8 +232,8 @@ class TextBuffer {
 function continuationMessage(limits: RunLimits, resumes: number): string {
   return (
     `[harness] You are continuing an earlier run that stopped at a limit. You now have ` +
-    `${limits.turns} turns, ${formatCount(limits.totalTokens)} billed tokens and ` +
-    `${formatUsd(limits.costUsd)} to spend.\n` +
+    `${limits.turns} turns, ${wallClock(limits.wallSeconds)} of wall clock, ` +
+    `${formatCount(limits.totalTokens)} billed tokens and ${formatUsd(limits.costUsd)} to spend.\n` +
     `That run made ${resumes} model calls. Its edits are already in the worktree: do not redo them, and ` +
     `do not re-read a file to check whether you changed it, because you did.\n` +
     `Carry on from where you stopped. The remaining work is whatever you had not done when you ran out. ` +
@@ -279,6 +280,11 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
             checks: sandbox.checkNames,
             soft: config.soft,
             rules: config.rules,
+            // Read from the live object rather than the config, so a limit raised
+            // by hand before the run starts is reflected in what the agent was
+            // told it had. A run told the wrong number plans against the wrong
+            // number, which is the failure this whole message exists to prevent.
+            limits,
           }),
         },
       ];

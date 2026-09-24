@@ -1,5 +1,7 @@
 import type { ToolSpec } from './deepseek.js';
 import { describeArg, type DeclaredCommand } from './commands.js';
+import { formatUsd } from './limits.js';
+import type { RunLimits } from './task.js';
 
 /** What a run's tool set is built from. */
 export interface ToolContext {
@@ -246,6 +248,49 @@ tells you the values it takes, pass one of those; do not invent a target and do 
 is none.`;
 
 /**
+ * A duration in the unit somebody would actually say it in.
+ *
+ * `900 seconds` is a number nobody converts and `15 minutes` is the same number
+ * that anybody can plan against. Hours appear past two of them, because a run
+ * with an hour-long ceiling is a different kind of job from one with fifteen
+ * minutes and the figure should make that obvious at a glance.
+ */
+export function wallClock(seconds: number): string {
+  if (seconds < 120) return `${seconds} seconds`;
+  const minutes = Math.round(seconds / 60);
+  // Minutes up to two hours, because "90 minutes" is clearer than "1.5 hours" and
+  // "60 minutes" is clearer than "1.0 hours". Past that, hours, with the trailing
+  // `.0` dropped rather than left to look like a measurement.
+  if (minutes < 120) return `${minutes} minutes`;
+  const hours = minutes / 60;
+  return `${Number.isInteger(hours) ? hours : hours.toFixed(1)} hours`;
+}
+
+/**
+ * How much room the run has, in the units a person would say it in.
+ *
+ * The wall clock is the part that was missing, and it is the part that matters
+ * for planning. A run told only "12 turns" will spend eight of them waiting on an
+ * `ask` it did not need, and then be stopped at fifteen minutes with the work half
+ * done — the stopwatch does not pause while the agent waits for a person, which
+ * is not obvious and is exactly why it is worth saying. Measured on real runs:
+ * seven of nine stopped at a limit, and in every case the agent had no warning
+ * and no idea which clock was about to run out.
+ *
+ * The last sentence is the useful half. Knowing the ceiling is what lets a run
+ * decide it cannot finish everything and say which part it did do, rather than
+ * discovering the ceiling mid-change.
+ */
+export function budgetLine(limits: RunLimits): string {
+  return (
+    `How long you have: at most ${wallClock(limits.wallSeconds)} of wall clock and ${limits.turns} model calls, ` +
+    `whichever arrives first, and ${formatUsd(limits.costUsd)} to spend. The clock does not pause while you wait ` +
+    `for an answer to ask, and every command you run is on it, so spend neither on anything you do not need. ` +
+    `Finishing less and saying so beats being stopped mid-change.`
+  );
+}
+
+/**
  * The task text as the agent receives it.
  *
  * `rules` is the project's own notes, and it is appended rather than prepended:
@@ -263,8 +308,12 @@ export function taskMessage(args: {
   soft?: string[];
   /** The project's own notes. */
   rules?: string;
+  /** The run's budget, so the agent can plan against a clock instead of guessing. */
+  limits?: RunLimits;
 }): string {
-  const lines = [args.task.trim(), '', `Files you may change: ${args.allow.join(', ')}`];
+  const lines = [args.task.trim()];
+  if (args.limits !== undefined) lines.push('', budgetLine(args.limits));
+  lines.push('', `Files you may change: ${args.allow.join(', ')}`);
   if (args.checks.length > 0) lines.push(`Checks you may run: ${args.checks.join(', ')}`);
   if ((args.soft ?? []).length > 0) {
     lines.push(

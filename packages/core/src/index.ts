@@ -129,11 +129,13 @@ export {
 export {
   BUILTIN_TOOL_NAMES,
   SYSTEM_PROMPT,
+  budgetLine,
   taskMessage,
   toolCatalogue,
   toolDefinitions,
   toolNames,
   toolSpecs,
+  wallClock,
   type CatalogueEntry,
   type ToolContext,
   type ToolDefinition,

@@ -133,6 +133,21 @@ you are actually spending, five cents by default. The agent is told when a fifth
 of any limit is left, so it can finish what it is on, ask for more room, or stop
 and say what is left — rather than being cut off mid-file.
 
+It is also told the whole budget **before it starts**, in minutes rather than
+seconds, and told that the clock does not pause while it waits for an answer:
+
+```
+How long you have: at most 15 minutes of wall clock and 12 model calls, whichever
+arrives first, and $0.05 to spend. The clock does not pause while you wait for an
+answer to ask, and every command you run is on it, so spend neither on anything
+you do not need. Finishing less and saying so beats being stopped mid-change.
+```
+
+Of nine real runs, seven stopped at a limit and in every case the agent had no
+idea which clock was about to run out. A run that knows it has fifteen minutes
+plans differently from one that assumes it has an hour — and the wall clock was
+the one figure the task message never mentioned.
+
 ## The workspace, which is the bit that makes it usable
 
 A task file is one backlog line. There are things that are true of the _project_
@@ -228,6 +243,29 @@ rewrite is a check that cannot refuse it.
 `dsh tools <task.json>` lists exactly what that run gets, project commands
 included. Everything else in the file — `rules`, `soft`, `setup`, `onAsk`,
 `env` — is written up in `docs/feedback/REPONSES_AUX_14_POINTS.md`.
+
+### The presets in `profiles/`
+
+Those three files are not documentation. They are a working configuration for one
+real project, and they are meant to be copied:
+
+```
+profiles/esap.json            a profile: the checks and the formatters
+profiles/esap.rules.md        the project's standing notes, appended to every task
+profiles/esap.workspace.json  the workspace, which ties the two together
+```
+
+`dsh.workspace.json` in a project, pointing at its own copies of the other two,
+is the whole setup. Every `emils-planner-*` name in there is esap's and has to be
+replaced — the harness has no idea what those crates are, and that is the point
+rather than a limitation.
+
+They are loaded by a test, in `workspace.test.ts`, so a file a reader copies
+cannot quietly stop working. The first version of the workspace example was wrong
+in six ways at once and none of them were visible by reading it: a doubled profile
+path, a crate that does not exist, `crate:test` passed to `cargo -p`, a fixed
+target list, a command that exited 0 having run nothing, and an `onAsk` pointing
+at a script nobody had written.
 
 Then:
 
