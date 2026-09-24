@@ -27,6 +27,8 @@ random site could drive agents. Without the third, so could any other program.
 | `POST` | `/runs/:id/answers`        | `{ id?, text, by? }`      | `{ ok, id }`, or `409` when it is not waiting    |
 | `POST` | `/runs/:id/cancel`         |                           | `{ ok }`                                         |
 | `GET`  | `/stats`                   |                           | `{ runs, models: ModelStats[] }`                 |
+| `GET`  | `/runs/:id/timings`        |                           | `{ runId, wallMs, at, entries[] }`               |
+| `GET`  | `/timings`                 |                           | `{ runs, wallMs, entries[], process[] }`         |
 | `POST` | `/ui/ticket`               |                           | `{ ticket }`, single use, 60 s                   |
 | `GET`  | `/ui/session?ticket=`      |                           | `302` with the session cookie, or `403`          |
 | `POST` | `/daemon/stop`             |                           | `{ ok }`, then it stops                          |
@@ -61,6 +63,31 @@ field:
   ]
 }
 ```
+
+### Timings
+
+What the harness itself spent, as opposed to what the model spent. The worker
+measures every call site under a dotted name (`core.sandbox.readFile`,
+`worker.tool.read_file`), and hands the readings to the daemon once per turn and
+once more before it reports itself done, so a run that is killed still reports
+the turns it managed.
+
+Each entry is `{ name, count, totalMs, minMs, maxMs, bytes, histogram }`. The
+histogram is a fixed 24-bucket ladder rather than a list of samples, for two
+reasons: it is 24 numbers per name however often the name was hit, and two of
+them add, so `/timings` can merge every run exactly and answer a real p95 of all
+of them. `bytes` is the work the call handled when it has a unit, which is what
+makes milliseconds per megabyte askable.
+
+The daemon **replaces** a run's rows on every flush rather than appending: the
+readings are cumulative for the worker's whole life, so appending would double
+every count as the run went on.
+
+`/timings` returns two lists. `entries` is the runs' readings, merged by name.
+`process` is the daemon's own, since it started: not added to `entries`, because
+a daemon outlives hundreds of runs and mixing its uptime into their runtime would
+make both numbers meaningless. `wallMs` is the sum of every run's duration, which
+is the denominator a share needs.
 
 ## WebSockets
 

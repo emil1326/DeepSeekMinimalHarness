@@ -163,19 +163,17 @@ export class DeepSeekClient {
       // Everything before the first byte of the answer: the headers come back
       // after the prompt has been read, so this is the first-token wait plus
       // the round trip, and it is expected to dominate.
-      response = await timing.measureAsync(
-        'core.deepseek.request',
-        () =>
-          fetch(`${this.baseUrl}/chat/completions`, {
-            method: 'POST',
-            headers: {
-              authorization: `Bearer ${this.apiKey}`,
-              'content-type': 'application/json',
-              accept: 'text/event-stream',
-            },
-            body,
-            signal,
-          }),
+      response = await timing.measureAsync('core.deepseek.request', () =>
+        fetch(`${this.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${this.apiKey}`,
+            'content-type': 'application/json',
+            accept: 'text/event-stream',
+          },
+          body,
+          signal,
+        }),
       );
     } catch (error) {
       if (request.signal?.aborted) throw new AbortedError();
