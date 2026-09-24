@@ -277,6 +277,12 @@ token, no cookie and no login: it answers any program on this machine, and refus
 only a web page that is not its own. One daemon, one address, and it learns what a
 run is from the task file the run arrives with.
 
+The daemon runs from memory and forks each worker from disk, so after an
+`npm run build` an old daemon would speak the old protocol to a new worker. It
+writes a build stamp into `daemon.json`, and a CLI that finds it older than the
+code on disk restarts it when nothing is running, or says so and leaves it when
+something is.
+
 Killing `dsh run` kills the agent, including every check process it started. Ctrl+C
 asks politely first.
 
