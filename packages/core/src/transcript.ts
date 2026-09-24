@@ -28,6 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { harnessHome } from './config.js';
 import type { ChatMessage } from './deepseek.js';
+import { timing } from './timing.js';
 
 /** Where a run's conversation is kept. */
 export function transcriptsDir(): string {
@@ -44,7 +45,19 @@ export function transcriptFile(runId: string): string {
   return path.join(transcriptsDir(), `${runId}.json`);
 }
 
+/**
+ * Write the conversation down, atomically.
+ *
+ * Timed, and split into the two halves that fail differently. This is called at
+ * every balanced point in a turn, and it serialises the *whole* conversation
+ * every time: by turn twenty that is hundreds of kilobytes written to disk for
+ * a run that changed one line. `stringify` against `file` tells the two apart.
+ * Bytes are the size of the JSON, which is the only way to read the total as
+ * "ms per megabyte of transcript".
+ */
 export function writeTranscript(runId: string, messages: ChatMessage[]): void {
+  const span = timing.start('core.transcript.write');
+  let bytes = 0;
   try {
     const file = transcriptFile(runId);
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -53,11 +66,21 @@ export function writeTranscript(runId: string, messages: ChatMessage[]): void {
     // runs on; an interrupted write would otherwise leave truncated JSON, which
     // reads as "no transcript" and silently loses the cache.
     const temporary = `${file}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(messages), 'utf8');
-    fs.renameSync(temporary, file);
+    const json = timing.measure(
+      'core.transcript.write.stringify',
+      () => JSON.stringify(messages),
+      (text) => text.length,
+    );
+    bytes = json.length;
+    timing.measure('core.transcript.write.file', () => {
+      fs.writeFileSync(temporary, json, 'utf8');
+      fs.renameSync(temporary, file);
+    });
   } catch {
     // Best effort. Losing the transcript costs a continuation its cache, and
     // failing the run over that would cost it everything.
+  } finally {
+    span.end(bytes);
   }
 }
 

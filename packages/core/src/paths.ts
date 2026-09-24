@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { timing } from './timing.js';
 
 export const IS_WINDOWS = process.platform === 'win32';
 
@@ -50,30 +51,46 @@ export function isInside(candidate: string, root: string): boolean {
  * ancestor is resolved and the rest is appended, so the containment check can
  * still run on it. That matters because a missing file must read as "the
  * sandbox let this through and the path happened to miss", not as a refusal.
+ *
+ * Timed because it is the sandbox's most-taken path to a syscall: `resolve`,
+ * `writable`, the proc-macro walk and every declared command all land here, and
+ * the loop below can call `realpathSync.native` once per missing ancestor.
  */
 export function realPath(target: string): string {
-  let current = path.resolve(target);
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      const real = fs.realpathSync.native(current);
-      return tail.length > 0 ? path.join(real, ...tail.reverse()) : real;
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) return path.resolve(target);
-      tail.push(path.basename(current));
-      current = parent;
+  return timing.measure('core.paths.realPath', () => {
+    let current = path.resolve(target);
+    const tail: string[] = [];
+    for (;;) {
+      try {
+        const real = fs.realpathSync.native(current);
+        return tail.length > 0 ? path.join(real, ...tail.reverse()) : real;
+      } catch {
+        const parent = path.dirname(current);
+        if (parent === current) return path.resolve(target);
+        tail.push(path.basename(current));
+        current = parent;
+      }
     }
-  }
+  });
 }
 
-/** `fnmatch` with `*` and `?`, case-insensitive because the callers lowercase first. */
+/**
+ * `fnmatch` with `*` and `?`, case-insensitive because the callers lowercase first.
+ *
+ * Timed, and it is worth the two extra lines: this builds and compiles a fresh
+ * `RegExp` on every call, and every call is one directory entry of a `list_dir`
+ * or one file of a `search`, against the five name lists in `sandbox.ts`. If
+ * that is milliseconds it is milliseconds a compiled-once cache would not spend,
+ * and a count with no time next to it would never have said so.
+ */
 export function matchesGlob(name: string, pattern: string): boolean {
-  let source = '';
-  for (const char of pattern) {
-    if (char === '*') source += '.*';
-    else if (char === '?') source += '.';
-    else source += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
-  return new RegExp(`^${source}$`, 's').test(name);
+  return timing.measure('core.paths.matchesGlob', () => {
+    let source = '';
+    for (const char of pattern) {
+      if (char === '*') source += '.*';
+      else if (char === '?') source += '.';
+      else source += char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+    return new RegExp(`^${source}$`, 's').test(name);
+  });
 }

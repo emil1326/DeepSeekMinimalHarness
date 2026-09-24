@@ -12,8 +12,12 @@
  *   - the text is genuinely absent, so the file needs reading
  *
  * Everything here runs only after a failure, so none of it is on the hot path
- * of a call that worked.
+ * of a call that worked. It is timed anyway, because "only after a failure" is
+ * not the same as "cheap": each of these walks the whole file, and a model that
+ * misses three times in a turn pays for it three times.
  */
+
+import { timing } from './timing.js';
 
 /** Longest text worth searching for again loosely. Beyond this it is not a typo. */
 const NEAR_MATCH_MAX = 8000;
@@ -54,6 +58,17 @@ export function loosePattern(needle: string): RegExp | null {
 
 /** Where a whitespace-tolerant match of `needle` sits, and what it looks like. */
 export function findNearMatches(haystack: string, needle: string, limit = 3): NearMatch[] {
+  // A regex over the whole file built from the needle: linear in the file, and
+  // the line number is counted from the start of the match on every hit, which
+  // is a second pass over everything before it.
+  return timing.measure(
+    'core.diagnose.findNearMatches',
+    () => nearMatchesIn(haystack, needle, limit),
+    () => haystack.length,
+  );
+}
+
+function nearMatchesIn(haystack: string, needle: string, limit: number): NearMatch[] {
   const pattern = loosePattern(needle);
   if (pattern === null) return [];
   const found: NearMatch[] = [];
@@ -74,6 +89,14 @@ export function findNearMatches(haystack: string, needle: string, limit = 3): Ne
 
 /** Every line `needle` occurs on, for when it matched too many times. */
 export function findMatches(haystack: string, needle: string, limit = 5): number[] {
+  return timing.measure(
+    'core.diagnose.findMatches',
+    () => matchLinesIn(haystack, needle, limit),
+    () => haystack.length,
+  );
+}
+
+function matchLinesIn(haystack: string, needle: string, limit: number): number[] {
   if (needle === '') return [];
   const lines: number[] = [];
   let at = haystack.indexOf(needle);
@@ -102,6 +125,14 @@ function lineCount(text: string): number {
  * it, with line endings already normalised.
  */
 export function explainMissing(path: string, haystack: string, needle: string): string {
+  return timing.measure(
+    'core.diagnose.explainMissing',
+    () => explainMissingIn(path, haystack, needle),
+    () => haystack.length,
+  );
+}
+
+function explainMissingIn(path: string, haystack: string, needle: string): string {
   const total = lineCount(haystack);
   if (needle === '') {
     return `refused: no old text was given. ${path} has ${total} lines; read it with read_file.`;
@@ -150,6 +181,14 @@ export function explainMissing(path: string, haystack: string, needle: string): 
 
 /** What to say when the old text was in the file more than once. */
 export function explainAmbiguous(path: string, haystack: string, needle: string, count: number): string {
+  return timing.measure(
+    'core.diagnose.explainAmbiguous',
+    () => explainAmbiguousIn(path, haystack, needle, count),
+    () => haystack.length,
+  );
+}
+
+function explainAmbiguousIn(path: string, haystack: string, needle: string, count: number): string {
   const lines = findMatches(haystack, needle);
   const where =
     lines.length === 0
@@ -260,6 +299,17 @@ export function distance(a: string, b: string): number {
 
 /** Up to `limit` names from `candidates` that look like what was asked for. */
 export function closestNames(wanted: string, candidates: string[], limit = 3): string[] {
+  // Quadratic in name length and linear in the listing, run once per candidate
+  // in a directory and again for the display name, so a `read_file` that missed
+  // in a 4000-file directory pays this over every one of them. See `distance`.
+  return timing.measure(
+    'core.diagnose.closestNames',
+    () => closestOf(wanted, candidates, limit),
+    () => candidates.length,
+  );
+}
+
+function closestOf(wanted: string, candidates: string[], limit: number): string[] {
   const stem = (name: string): string => name.replace(/\.[^.]*$/, '').toLowerCase();
   const target = wanted.toLowerCase();
   const scored = candidates

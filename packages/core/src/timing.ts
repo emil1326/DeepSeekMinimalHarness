@@ -57,8 +57,8 @@ export const TIMING_VERSION = 1;
  * coarse above a second because "this took 4 minutes" has one conclusion anyway.
  */
 export const TIMING_EDGES_MS = [
-  0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000,
-  30000, 60000, 300000, 1800000,
+  0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000,
+  60000, 300000, 1800000,
 ];
 
 /** How many buckets a histogram has: one per edge, plus the overflow. */
@@ -119,7 +119,10 @@ export function emptyHistogram(): number[] {
  * the answer. A reader is told "p95 is at most 25 ms, and above 10 ms" by the
  * number and by the doc.
  */
-export function percentile(stat: Pick<TimingStat, 'count' | 'histogram' | 'maxMs'>, q: number): number | null {
+export function percentile(
+  stat: Pick<TimingStat, 'count' | 'histogram' | 'maxMs'>,
+  q: number,
+): number | null {
   if (stat.count <= 0) return null;
   const target = Math.ceil(stat.count * Math.min(1, Math.max(0, q)));
   let seen = 0;

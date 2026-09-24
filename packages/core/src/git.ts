@@ -21,6 +21,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { timing } from './timing.js';
 
 /**
  * Big enough for a very dirty worktree.
@@ -36,15 +37,27 @@ export interface GitOptions {
   maxBuffer?: number;
 }
 
-/** Run git and return its stdout. Throws on a non-zero exit. */
+/**
+ * Run git and return its stdout. Throws on a non-zero exit.
+ *
+ * Timed because a git call is the one thing in the harness that starts a whole
+ * process for a millisecond of work, and the end-of-run stray check is a
+ * `git status -uall` over an entire worktree. It is also named for its argv, so
+ * the table says which call was slow rather than "git was slow".
+ */
 export function git(args: string[], options: GitOptions): string {
-  return execFileSync('git', args, {
-    cwd: options.cwd,
-    encoding: 'utf8',
-    maxBuffer: options.maxBuffer ?? GIT_MAX_BUFFER,
-    // Without this a detached daemon puts a console window on somebody's screen.
-    windowsHide: true,
-  });
+  return timing.measure(
+    `core.git.${args[0] ?? 'git'}`,
+    () =>
+      execFileSync('git', args, {
+        cwd: options.cwd,
+        encoding: 'utf8',
+        maxBuffer: options.maxBuffer ?? GIT_MAX_BUFFER,
+        // Without this a detached daemon puts a console window on somebody's screen.
+        windowsHide: true,
+      }),
+    (out) => out.length,
+  );
 }
 
 /** Run git, or get `null` if it failed at all. */

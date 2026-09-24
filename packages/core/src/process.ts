@@ -2,9 +2,25 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, spawnSync, type ChildProcess, type StdioOptions } from 'node:child_process';
 import { IS_WINDOWS } from './paths.js';
+import { timing } from './timing.js';
 
-/** Resolve a program the way `shutil.which` did, preferring npm's `.cmd` shim on Windows. */
+/**
+ * Resolve a program the way `shutil.which` did, preferring npm's `.cmd` shim on Windows.
+ *
+ * Timed, and it is one of the first things to look at in a table of small
+ * numbers: on Windows this `statSync`s every PATH directory for a `.cmd` shim,
+ * then every extension in `PATHEXT` in both cases, so a 40-entry PATH with no
+ * hit near the front is a few hundred stat calls before a check even starts.
+ */
 export function resolveExecutable(name: string): string {
+  return timing.measure(
+    'core.process.resolveExecutable',
+    () => resolveOnPath(name),
+    (found) => found.length,
+  );
+}
+
+function resolveOnPath(name: string): string {
   if (name.includes('/') || name.includes('\\')) return name;
   const searchPath = process.env.PATH ?? process.env.Path ?? '';
   const dirs = searchPath.split(path.delimiter).filter((dir) => dir !== '');
@@ -62,6 +78,13 @@ export function spawnTool(
   argv: string[],
   options: { cwd: string; env: NodeJS.ProcessEnv; stdio?: 'pipe' | 'ignore' },
 ): ChildProcess {
+  return timing.measure('core.process.spawnTool', () => spawnToolInner(argv, options));
+}
+
+function spawnToolInner(
+  argv: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; stdio?: 'pipe' | 'ignore' },
+): ChildProcess {
   const [program, ...args] = argv;
   if (program === undefined) throw new UnsafeCommandError('an empty command was given');
   const stdio = options.stdio ?? 'pipe';
@@ -95,6 +118,12 @@ export function spawnTool(
 
 /** Kill a process and everything it started. Nothing may survive a cancel. */
 export function killTree(pid: number): void {
+  // On Windows this starts `taskkill`, so it is a process spawn and not a
+  // signal: worth a row of its own when a cancel takes a second to land.
+  return timing.measure('core.process.killTree', () => killProcessTree(pid));
+}
+
+function killProcessTree(pid: number): void {
   if (pid <= 0) return;
   if (IS_WINDOWS) {
     try {

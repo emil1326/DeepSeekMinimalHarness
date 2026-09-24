@@ -1,6 +1,7 @@
 import { DEFAULT_BASE_URL } from './config.js';
 import type { CallMetrics } from './metrics.js';
 import { METRICS_VERSION, rate, round } from './metrics.js';
+import { timing } from './timing.js';
 
 export interface ToolCall {
   id: string;
@@ -139,16 +140,14 @@ export class DeepSeekClient {
     const timeout = AbortSignal.timeout(this.timeoutMs);
     const signal = request.signal ? AbortSignal.any([request.signal, timeout]) : timeout;
 
-    let response: Response;
-    try {
-      response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${this.apiKey}`,
-          'content-type': 'application/json',
-          accept: 'text/event-stream',
-        },
-        body: JSON.stringify({
+    // The body is the whole conversation, several hundred kilobytes by the
+    // middle of a run, and it is built from scratch every turn. Separating this
+    // from the fetch is the difference between the harness's own milliseconds
+    // and the model's seconds, which is exactly the line a slow run needs drawn.
+    const body = timing.measure(
+      'core.deepseek.serialize',
+      () =>
+        JSON.stringify({
           model: request.model,
           messages: request.messages,
           tools: request.tools,
@@ -156,8 +155,28 @@ export class DeepSeekClient {
           stream: true,
           stream_options: { include_usage: true },
         }),
-        signal,
-      });
+      (text) => text.length,
+    );
+
+    let response: Response;
+    try {
+      // Everything before the first byte of the answer: the headers come back
+      // after the prompt has been read, so this is the first-token wait plus
+      // the round trip, and it is expected to dominate.
+      response = await timing.measureAsync(
+        'core.deepseek.request',
+        () =>
+          fetch(`${this.baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${this.apiKey}`,
+              'content-type': 'application/json',
+              accept: 'text/event-stream',
+            },
+            body,
+            signal,
+          }),
+      );
     } catch (error) {
       if (request.signal?.aborted) throw new AbortedError();
       throw error;
@@ -184,6 +203,8 @@ export class DeepSeekClient {
       largestGapMs: 0,
       lastDeltaAt: null as number | null,
       finished: false,
+      /** Total characters of SSE payload, so the stream's cost has a denominator. */
+      payloadChars: 0,
     };
 
     /**
@@ -206,7 +227,7 @@ export class DeepSeekClient {
       state.lastTokenMs = since;
     };
 
-    const handle = (payload: string): void => {
+    const applyChunk = (payload: string): void => {
       if (payload === '[DONE]') {
         state.finished = true;
         return;
@@ -246,12 +267,34 @@ export class DeepSeekClient {
       }
     };
 
+    /**
+     * One SSE payload, parsed and applied.
+     *
+     * Timed per chunk, because a stream is thousands of these and the harness
+     * does real work inside each one: a `JSON.parse`, a string concatenation of
+     * the answer or the tool arguments, and the callback out to the loop. The
+     * model's own streaming time is measured separately; this is the part of the
+     * stream that is ours, and the count is the number of deltas, which is the
+     * only way to read a total as "per delta".
+     */
+    const handle = (payload: string): void => {
+      state.payloadChars += payload.length;
+      timing.measure(
+        'core.deepseek.chunk',
+        () => applyChunk(payload),
+        () => payload.length,
+      );
+    };
+
+    const streaming = timing.start('core.deepseek.stream');
     try {
       await readSse(response.body, handle);
     } catch (error) {
+      streaming.end(state.payloadChars);
       if (request.signal?.aborted) throw new AbortedError();
       throw error;
     }
+    streaming.end(state.payloadChars);
 
     const durationMs = round(performance.now() - start, 1);
     const streamingMs = state.firstTokenMs === null ? null : round(state.lastTokenMs - state.firstTokenMs, 1);

@@ -145,18 +145,14 @@ describe('percentiles', () => {
 describe('merging', () => {
   it('is the same as having measured everything in one process', () => {
     const all = statOf('core.test.m', [1, 2, 30, 1, 2, 30], 30);
-    const parts = mergeStats([
-      statOf('core.test.m', [1, 2, 30], 30),
-      statOf('core.test.m', [1, 2, 30], 30),
-    ]);
+    const parts = mergeStats([statOf('core.test.m', [1, 2, 30], 30), statOf('core.test.m', [1, 2, 30], 30)]);
     expect(parts).toEqual([all]);
   });
 
   it('keeps the extremes of each side, not the extremes of one', () => {
-    const [merged] = mergeStats([
-      statOf('core.test.x', [1, 2]),
-      statOf('core.test.x', [7, 9]),
-    ]) as [TimingStat];
+    const [merged] = mergeStats([statOf('core.test.x', [1, 2]), statOf('core.test.x', [7, 9])]) as [
+      TimingStat,
+    ];
     expect(merged.minMs).toBeCloseTo(1, 6);
     expect(merged.maxMs).toBeCloseTo(9, 6);
     expect(merged.count).toBe(4);

@@ -23,6 +23,7 @@
  */
 
 import type { ChatMessage } from './deepseek.js';
+import { timing } from './timing.js';
 
 /**
  * Characters per token, deliberately pessimistic.
@@ -71,15 +72,25 @@ export interface CompactResult {
   impossible: boolean;
 }
 
+/**
+ * Roughly how many tokens the message list would cost.
+ *
+ * Timed because `compact` calls it inside its own loop: it is the inner loop of
+ * the per-turn context check, and it walks every character of every message
+ * each time it is asked, so "the estimator" and "the compactor" are two
+ * different answers to why a turn takes 40 ms before the request goes out.
+ */
 export function estimateTokens(messages: ChatMessage[]): number {
-  let chars = 0;
-  for (const message of messages) {
-    if (typeof message.content === 'string') chars += message.content.length;
-    for (const call of message.tool_calls ?? []) {
-      chars += call.function.name.length + call.function.arguments.length + 20;
+  return timing.measure('core.context.estimateTokens', () => {
+    let chars = 0;
+    for (const message of messages) {
+      if (typeof message.content === 'string') chars += message.content.length;
+      for (const call of message.tool_calls ?? []) {
+        chars += call.function.name.length + call.function.arguments.length + 20;
+      }
     }
-  }
-  return Math.ceil(chars / CHARS_PER_TOKEN) + messages.length * PER_MESSAGE_TOKENS;
+    return Math.ceil(chars / CHARS_PER_TOKEN) + messages.length * PER_MESSAGE_TOKENS;
+  });
 }
 
 /** The one thing worth knowing about a tool call, for the elision notice. */
@@ -134,6 +145,10 @@ function notice(name: string, subject: string): string {
  * so a tool call always keeps its reply and the API's pairing rule holds.
  */
 export function compact(messages: ChatMessage[], options: CompactOptions): CompactResult {
+  return timing.measure('core.context.compact', () => compactMessages(messages, options));
+}
+
+function compactMessages(messages: ChatMessage[], options: CompactOptions): CompactResult {
   const keepRecent = options.keepRecent ?? 4;
   const tokensBefore = estimateTokens(messages);
   if (tokensBefore <= options.budget) {
