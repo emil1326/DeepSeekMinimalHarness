@@ -145,9 +145,38 @@ describe('the daemon', () => {
     const paths = problems.map((problem) => problem.path).sort();
     expect(paths).toContain('allow');
     expect(paths).toContain('worktree');
-    expect(paths).toContain('profile');
-    expect(paths).toContain('model');
     expect(paths).toContain('extra');
+    // `profile` and `model` are no longer unconditionally required: a workspace
+    // can supply both, which is the point of having one. They are still missing
+    // from this file and still reported, when the file is otherwise well formed
+    // — see the next test, because a schema failure short-circuits the rest.
+    expect(paths).not.toContain('profile');
+  });
+
+  it('says so when nothing supplies a profile or a model, rather than guessing', async () => {
+    daemon = await startTestDaemon(ONE_EDIT);
+    const bare = path.join(daemon.fixture.base, 'bare.json');
+    // Well formed, and every one of these is optional on its own: the worktree,
+    // the task text and the allow list are here, and the profile and the model
+    // are supposed to come from a workspace that this project does not have.
+    fs.writeFileSync(
+      bare,
+      JSON.stringify({
+        name: 'bare',
+        worktree: daemon.fixture.repo,
+        allow: ['src/a.ts'],
+        task: 'change the constant',
+      }),
+    );
+    const response = await daemon.request('POST', '/runs', { body: { taskPath: bare } });
+    expect(response.status).toBe(400);
+    const problems = response.body.problems as { path: string; message: string }[];
+    const paths = problems.map((problem) => problem.path).sort();
+    expect(paths).toEqual(['model', 'profile']);
+    // The message has to say what to do, because "profile is required" would be
+    // wrong now: it is required *somewhere*, and the workspace is the other place.
+    const profile = problems.find((problem) => problem.path === 'profile');
+    expect(profile?.message).toContain('workspace');
   });
 
   it('runs a task end to end and stores the config exactly as used', async () => {
@@ -277,6 +306,13 @@ describe('the daemon', () => {
         configPath: path.join(home, 'task.json'),
         raw: {},
         resolvedProfile: {},
+        workspace: null,
+        rules: '',
+        soft: [],
+        commands: {},
+        env: {},
+        setup: [],
+        onAsk: null,
       },
     });
     first.setStatus('run-old', 'running');
@@ -328,6 +364,13 @@ describe('the daemon', () => {
         configPath: path.join(home, 'task.json'),
         raw: {},
         resolvedProfile: {},
+        workspace: null,
+        rules: '',
+        soft: [],
+        commands: {},
+        env: {},
+        setup: [],
+        onAsk: null,
       },
     });
     store.setStatus('run-crashed', 'running');

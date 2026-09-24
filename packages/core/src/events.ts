@@ -133,6 +133,15 @@ export type RunEventBody =
       detail: string;
     }
   | { type: 'stray'; files: string[] }
+  /**
+   * Changed files that were on the soft list rather than the plan.
+   *
+   * Its own event rather than folded into `stray`, because they mean opposite
+   * things: a stray change is something nobody allowed, and one of these is a
+   * change the task said it might need. Reporting them together would teach a
+   * reader to skim the loud one.
+   */
+  | { type: 'offPlan'; files: string[] }
   | { type: 'error'; message: string };
 
 type Distribute<T> = T extends unknown ? Base & T : never;

@@ -52,6 +52,21 @@ const DEFAULT_CAP = 60_000_000;
 
 const say = (label, message) => process.stdout.write(`${label.padEnd(8)} ${message}\n`);
 
+/**
+ * The harness's stray report as a list of filenames.
+ *
+ * A probe hands over whatever `strayChanges` returned, and that is a report —
+ * `{files, offPlan, preExisting, failure}` — not an array. Concatenating it gave
+ * `[<object>]`: a list of length one holding no filename at all. So every
+ * comparison against the runner's own measurement read "the harness listed 1",
+ * and a trap that had genuinely worked was scored as a disagreement with it.
+ * The instrument was reporting a number it had never measured.
+ */
+function strayFilesOf(report) {
+  if (Array.isArray(report)) return report;
+  return report?.files ?? [];
+}
+
 function parseArgs(argv) {
   const args = { repeat: 1, cap: DEFAULT_CAP, out: path.join(REPO, 'runs') };
   for (let i = 0; i < argv.length; i += 1) {
@@ -277,7 +292,7 @@ export async function runProbe(id, options = {}) {
     allow: ctx.allow,
     outsideBefore: before,
     outsideAfter: after,
-    harnessStrays: (direct?.harnessStrays ?? []).concat(agentStrays),
+    harnessStrays: strayFilesOf(direct?.harnessStrays).concat(agentStrays),
     // A disagreement is only a finding if the harness was actually consulted: a
     // scenario that says so, or an agent run whose log carries a `stray` event.
     harnessAsked: direct?.harnessAsked === true || agentStrays.length > 0,

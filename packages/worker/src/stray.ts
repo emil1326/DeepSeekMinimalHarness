@@ -1,8 +1,29 @@
 import { git, gitFailure, relNorm, toPosix, type ResolvedRunConfig } from '@emilswork/harness-core';
 
 export interface StrayReport {
-  /** Changed files that are not on the allow list. */
+  /** Changed files that are on no list at all. The ones that matter. */
   files: string[];
+  /**
+   * Changed files on the task's soft list.
+   *
+   * Writable, and reported rather than refused. A test file beside the one a
+   * task modifies has to be touched almost every time and is forgotten in the
+   * task file almost every time, and the choice used to be between stopping the
+   * run and loosening a rule. These are the middle ground: allowed, and said out
+   * loud, so a reader can see the task grew beyond its own plan without the run
+   * having to stop and ask.
+   */
+  offPlan: string[];
+  /**
+   * Files that were already changed when this run started.
+   *
+   * Excluded from `files` on purpose. A second run in a worktree that already
+   * holds a first run's work reported every one of the first run's files as a
+   * stray change, which is true and useless: the loudest control in the harness
+   * fired on every run after the first, and the one that mattered was lost in
+   * it. What a reader needs is what *this* run did.
+   */
+  preExisting: string[];
   /**
    * Why the worktree could not be read, when it could not be.
    *
@@ -15,26 +36,52 @@ export interface StrayReport {
 }
 
 /**
- * What the worktree changed that the task did not allow.
+ * The files a worktree has changed, split by whether anybody said they could be.
  *
- * Whatever caused it, it is reported loudly: the whole point of running in a
- * git worktree is that every change it makes is a diff somebody reads.
+ * Whatever caused it, a change on no list is reported loudly: the whole point of
+ * running in a git worktree is that every change it makes is a diff somebody
+ * reads.
  *
  * `-uall` matters: without it git collapses a wholly untracked directory into
  * one `dir/` entry, which never matches the allow list and reports a stray
  * change for a file that was allowed.
  */
-export function strayChanges(root: string, allow: Iterable<string>): StrayReport {
+export function strayChanges(
+  root: string,
+  allow: Iterable<string>,
+  options: { soft?: Iterable<string>; baseline?: Iterable<string> } = {},
+): StrayReport {
   const allowed = new Set([...allow].map((entry) => relNorm(entry)));
+  const soft = new Set([...(options.soft ?? [])].map((entry) => relNorm(entry)));
+  const before = new Set([...(options.baseline ?? [])].map((entry) => relNorm(entry)));
+
   let output: string;
   try {
     // Through the shared helper, so this cannot drift from the daemon's own git
     // calls in buffer size or in whether it hides its console window.
     output = git(['status', '--porcelain', '-uall'], { cwd: root });
   } catch (error) {
-    return { files: [], failure: gitFailure(error) };
+    return { files: [], offPlan: [], preExisting: [], failure: gitFailure(error) };
   }
-  const changed = output
+
+  const changed = changedPaths(output);
+  return {
+    files: changed.filter((file) => !allowed.has(file) && !soft.has(file) && !before.has(file)),
+    offPlan: changed.filter((file) => soft.has(file) && !before.has(file)),
+    preExisting: changed.filter((file) => before.has(file)),
+    failure: null,
+  };
+}
+
+/**
+ * Every path `git status --porcelain` reports, in allow-list form.
+ *
+ * Split out because two callers want the raw set now: the check at the end of a
+ * run, and the snapshot taken at the start of one. A rename is reported as the
+ * name it ended up with, which is the one that exists on disk.
+ */
+export function changedPaths(output: string): string[] {
+  return output
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '')
@@ -42,8 +89,24 @@ export function strayChanges(root: string, allow: Iterable<string>): StrayReport
       const entry = line.slice(2).trim();
       const renamed = entry.split(' -> ');
       return toPosix((renamed[renamed.length - 1] ?? entry).replace(/^"|"$/g, ''));
-    });
-  return { files: changed.filter((file) => !allowed.has(relNorm(file))), failure: null };
+    })
+    .map((file) => relNorm(file));
+}
+
+/**
+ * The set of already-changed files, taken before an agent starts.
+ *
+ * Best effort: a worktree that cannot be read gives an empty set, which means
+ * everything it later reports is treated as this run's doing. That is the safe
+ * direction — it over-reports rather than under-reports — and the failure is
+ * reported separately when the run ends.
+ */
+export function snapshotChanges(root: string): string[] {
+  try {
+    return changedPaths(git(['status', '--porcelain', '-uall'], { cwd: root }));
+  } catch {
+    return [];
+  }
 }
 
 export function isGitWorktree(root: string): boolean {

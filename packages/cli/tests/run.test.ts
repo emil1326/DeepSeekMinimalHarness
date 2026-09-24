@@ -208,7 +208,7 @@ describe('the dsh command', () => {
     const { done } = runCli(entry, ['run', bad]);
     const result = await done;
     expect(result.code).toBe(4);
-    for (const field of ['worktree', 'profile', 'model', 'allow', 'nope']) {
+    for (const field of ['worktree', 'model', 'allow', 'nope']) {
       expect(result.output).toContain(field);
     }
   });

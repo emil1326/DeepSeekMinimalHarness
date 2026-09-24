@@ -295,9 +295,11 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
     if (request.method === 'GET' && diffRoute?.[1] !== undefined) {
       const detail = store.getRun(diffRoute[1]);
       if (detail === null) return send(response, 404, { error: `no run called ${diffRoute[1]}` });
+      // No baseline here: this is the worktree as it stands, for somebody who
+      // wants to read the change, not a claim about who made it.
       const body: DiffResponse = {
         diff: gitDiff(detail.worktree),
-        stray: strayChanges(detail.worktree, detail.config.allow).files,
+        stray: strayChanges(detail.worktree, detail.config.allow, { soft: detail.config.soft }).files,
       };
       return send(response, 200, body);
     }
@@ -306,7 +308,7 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
     if (request.method === 'GET' && reportRoute?.[1] !== undefined) {
       const detail = store.getRun(reportRoute[1]);
       if (detail === null) return send(response, 404, { error: `no run called ${reportRoute[1]}` });
-      const stray = strayChanges(detail.worktree, detail.config.allow);
+      const stray = strayChanges(detail.worktree, detail.config.allow, { soft: detail.config.soft });
       return send(response, 200, {
         report: buildReport({
           id: detail.id,
@@ -322,6 +324,8 @@ export async function startServer(options: ServerOptions): Promise<HarnessServer
           events: store.eventsAfter(detail.id, 0, 100_000),
           changed: changedFiles(detail.worktree),
           stray: stray.files,
+          offPlan: stray.offPlan,
+          preExisting: stray.preExisting,
           strayFailure: stray.failure,
         }),
       });

@@ -26,7 +26,7 @@ import {
   type Speaker,
 } from '@emilswork/harness-core';
 import { runAgentLoop, type LoopControl } from './loop.js';
-import { isGitWorktree, strayChanges } from './stray.js';
+import { isGitWorktree, snapshotChanges, strayChanges } from './stray.js';
 import type { DaemonToWorker, WorkerStart, WorkerToDaemon } from './protocol.js';
 
 function send(message: WorkerToDaemon): void {
@@ -130,8 +130,18 @@ async function start(config: WorkerStart): Promise<void> {
       allow: config.config.allow,
       profile: config.config.resolvedProfile,
       checkNames: config.config.checks,
+      // The project's own commands, which become tools, and the environment
+      // they run in. Both came from the workspace and were resolved once, when
+      // the task was read, so nothing here has to know what they mean.
+      commands: config.config.commands,
+      env: config.config.env,
+      soft: config.config.soft,
     });
     running = sandbox;
+
+    // Taken before the agent makes a single call, so the report at the end can
+    // tell what this run did from what was already there. See `reportStray`.
+    const baseline = snapshotChanges(root);
 
     // The task's own limits, into the live object the loop reads.
     Object.assign(limits, config.config.limits);
@@ -177,7 +187,7 @@ async function start(config: WorkerStart): Promise<void> {
       },
       control,
     );
-    reportStray(root, sandbox);
+    reportStray(root, sandbox, baseline);
     tellThenExit(result.status, result.summary);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -188,9 +198,16 @@ async function start(config: WorkerStart): Promise<void> {
   }
 }
 
-/** Anything changed outside the allowed files is reported, whatever caused it. */
-function reportStray(root: string, sandbox: Sandbox): void {
-  const stray = strayChanges(root, sandbox.allow);
+/**
+ * Anything changed since this run started, reported however it got changed.
+ *
+ * The baseline is the whole point of the split. Without it, a second run in a
+ * worktree already holding a first run's work reported every one of the first
+ * run's files as a change this run made: true, and useless, and it buried the
+ * one file that this run really did touch on the wrong side of a line.
+ */
+function reportStray(root: string, sandbox: Sandbox, baseline: Iterable<string>): void {
+  const stray = strayChanges(root, sandbox.allow, { soft: sandbox.soft, baseline });
   if (stray.failure !== null) {
     // Said out loud rather than passed over. "Could not tell" and "nothing
     // stray" are different answers, and reporting the second when the first is
@@ -203,4 +220,14 @@ function reportStray(root: string, sandbox: Sandbox): void {
     return;
   }
   if (stray.files.length > 0) emit({ type: 'stray', files: stray.files });
+  if (stray.offPlan.length > 0) emit({ type: 'offPlan', files: stray.offPlan });
+  if (stray.preExisting.length > 0) {
+    // Not a complaint. A reader comparing this run's diff against a list of
+    // changes needs to know which of them were somebody else's.
+    emit({
+      type: 'message',
+      by: 'system',
+      text: `${stray.preExisting.length} file(s) were already changed before this run started, so they are left out of the report: ${stray.preExisting.join(', ')}`,
+    });
+  }
 }

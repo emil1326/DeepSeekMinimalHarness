@@ -10,7 +10,9 @@ import {
 } from './diagnose.js';
 import { isInside, matchesGlob, realPath, relNorm, toPosix } from './paths.js';
 import { killTree, resolveExecutable, spawnTool, UnsafeCommandError } from './process.js';
+import { commandArgv, trimOutput, type DeclaredCommand } from './commands.js';
 import type { CheckSpec, Profile } from './profile.js';
+import { timing } from './timing.js';
 
 /** Directories the sandbox never shows, wherever they turn up in a path. */
 export const NEVER_READ_DIRS = new Set(['.git', 'target', 'node_modules', '_private', 'dist']);
@@ -71,6 +73,14 @@ export const NEVER_WRITE = [
   'pyproject.toml',
   'Makefile',
   'Dockerfile',
+  // The files the harness itself reads to decide what a run may do. A model that
+  // could write one would be editing its own rules, and this is what actually
+  // prevents that: not where the file sits, since a check can write anywhere its
+  // process can reach, but that no tool the agent can call will touch this name.
+  // It is why a workspace can live inside the worktree, where a project keeps its
+  // configuration, instead of having to be remembered somewhere else.
+  'dsh.workspace.json',
+  '.dsh/workspace.json',
 ];
 
 /** Dropped from a check process's environment, whatever else it inherits. */
@@ -104,6 +114,15 @@ export const RESULT_CHARS = 8000;
 export const SEARCH_HITS = 80;
 export const SEARCH_MAX_BYTES = 2_000_000;
 export const CHECK_TIMEOUT_MS = 15 * 60 * 1000;
+/**
+ * How long a declared command gets when the workspace names no timeout.
+ *
+ * Much shorter than a check's fifteen minutes, deliberately. A check is the last
+ * thing a run does and may legitimately compile a workspace; a command is called
+ * in the middle of a turn, and a run has a wall clock of its own that it would
+ * otherwise spend waiting for a test that is never going to print anything.
+ */
+export const COMMAND_TIMEOUT_S = 120;
 
 export class SandboxRefusal extends Error {
   constructor(message: string) {
@@ -125,18 +144,42 @@ export interface SandboxOptions {
    * dot-dependent guards go red. Production always uses `relNorm`.
    */
   normalise?: (path: string) => string;
+  /**
+   * Environment for every check and command, already interpolated.
+   *
+   * Takes precedence over the profile's own `env`, which is left working so a
+   * profile can still be used on its own. `{parent}` in a profile's value is
+   * still substituted here for that reason.
+   */
+  env?: Record<string, string>;
+  /** The commands the project declared, which become tool calls the model can make. */
+  commands?: Record<string, DeclaredCommand>;
+  /**
+   * Files outside the plan that may still be changed.
+   *
+   * Writable, and every change to one is reported. The middle ground between the
+   * allow list and a refusal: a test file beside the one a task modifies has to
+   * be touched almost every time and is forgotten in the task file almost every
+   * time, and the choice used to be between stopping the run and loosening a
+   * rule. See `ResolvedRunConfig.soft`.
+   */
+  soft?: string[];
 }
 
 export class Sandbox {
   readonly root: string;
   readonly allow: Set<string>;
+  /** Files outside the plan that may still be changed, and are reported. */
+  readonly soft: Set<string>;
   readonly profile: Profile;
   readonly checks: Record<string, CheckSpec>;
   readonly checkNames: string[];
+  readonly commands: Record<string, DeclaredCommand>;
 
   private readonly normalise: (path: string) => string;
   private readonly onRecord: ((entry: Record<string, unknown>) => void) | undefined;
   private readonly active = new Set<number>();
+  private readonly envOverride: Record<string, string> | undefined;
   /** Per-directory answer to "is this a proc-macro crate", read at most once. */
   private readonly procMacroDirs = new Map<string, boolean>();
 
@@ -147,7 +190,14 @@ export class Sandbox {
     this.normalise = options.normalise ?? relNorm;
     this.checks = options.profile.checks ?? {};
     this.checkNames = options.checkNames ?? Object.keys(this.checks);
+    this.commands = options.commands ?? {};
+    this.envOverride = options.env;
     this.allow = new Set(options.allow.map((entry) => this.normalise(entry)));
+    this.soft = new Set((options.soft ?? []).map((entry) => this.normalise(entry)));
+    // A soft entry that is also a plain allow entry would be reported as being
+    // outside a plan it is inside of, so it is dropped here rather than
+    // producing a note about a file the task itself named.
+    for (const entry of this.allow) this.soft.delete(entry);
     for (const allowed of this.allow) {
       if (NEVER_WRITE.some((pattern) => this.matches(allowed, pattern))) {
         throw new SandboxRefusal(`refusing to allow ${allowed}: it is on the never-write list`);
@@ -204,7 +254,9 @@ export class Sandbox {
     if (cached !== undefined) return cached;
     let answer = false;
     try {
-      answer = declaresProcMacro(fs.readFileSync(path.join(this.root, ...manifest.split('/')), 'utf8'));
+      answer = timing.measure('core.sandbox.procMacroCrate', () =>
+        declaresProcMacro(fs.readFileSync(path.join(this.root, ...manifest.split('/')), 'utf8')),
+      );
     } catch {
       // No manifest there, or it cannot be read. Either way, not a proc-macro
       // crate. A manifest that is a symlink out of the worktree can only make
@@ -236,8 +288,19 @@ export class Sandbox {
       .filter((part) => part !== '' && part !== '.');
   }
 
-  /** The real path of an allowed-to-read file, or a refusal saying why not. */
+  /**
+   * The real path of an allowed-to-read file, or a refusal saying why not.
+   *
+   * Timed, because it is the gate every tool call goes through and it is not
+   * free: a `realpathSync` per call, a walk of the whole path against the
+   * never-read list, and five globs against the secret list. A `read_file` of
+   * four lines that costs 10 ms is this function, not the read.
+   */
   resolve(target: string): string {
+    return timing.measure('core.sandbox.resolve', () => this.resolvePath(target));
+  }
+
+  private resolvePath(target: string): string {
     const rel = this.normalise(target);
     const full = realPath(path.resolve(this.root, rel));
     if (!isInside(full, this.root)) {
@@ -256,10 +319,15 @@ export class Sandbox {
 
   /** The real path of a file this task may change, or a refusal. */
   writable(target: string): string {
+    return timing.measure('core.sandbox.writable', () => this.writablePath(target));
+  }
+
+  private writablePath(target: string): string {
     const rel = this.normalise(target);
-    if (!this.allow.has(rel)) {
+    if (!this.allow.has(rel) && !this.soft.has(rel)) {
+      const extra = this.soft.size === 0 ? '' : `, or on the soft list: ${[...this.soft].sort().join(', ')}`;
       throw new SandboxRefusal(
-        `${rel} is not one of the files this task may change: ${[...this.allow].sort().join(', ')}`,
+        `${rel} is not one of the files this task may change: ${[...this.allow].sort().join(', ')}${extra}`,
       );
     }
     // The second door on the proc-macro rule. Reaching this means a refactor or
@@ -277,10 +345,21 @@ export class Sandbox {
   // --- the tools ---------------------------------------------------------
 
   readFile(target: string, start = 1, end?: number | null): string {
+    // Bytes are the point of measuring this one: a 1500-line read is 60 KB and
+    // the ms/MB line is what says whether the cost is the file or the harness.
+    return timing.measure(
+      'core.sandbox.readFile',
+      () => this.readFileText(target, start, end),
+      (out) => out.length,
+    );
+  }
+
+  /** The read itself. Split out so the timed wrapper adds no indentation to it. */
+  private readFileText(target: string, start = 1, end?: number | null): string {
     const full = this.resolve(target);
     let raw: string;
     try {
-      raw = fs.readFileSync(full, 'utf8');
+      raw = timing.measure('core.sandbox.readFile.io', () => fs.readFileSync(full, 'utf8'));
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT' && code !== 'EISDIR') throw error;
@@ -316,6 +395,11 @@ export class Sandbox {
 
   /** "did you mean" for a path that was not there, cheap enough to always do. */
   private nearbyHint(target: string): string {
+    return timing.measure('core.sandbox.nearbyHint', () => this.nearbyHintFor(target));
+  }
+
+  /** The hint itself, with the `readdir` and the edit-distance sort inside it. */
+  private nearbyHintFor(target: string): string {
     const rel = this.normalise(target);
     const parent = path.dirname(rel);
     const wanted = path.basename(rel);
@@ -333,6 +417,15 @@ export class Sandbox {
   }
 
   listDir(target = '.'): string {
+    return timing.measure(
+      'core.sandbox.listDir',
+      () => this.listDirectory(target),
+      (out) => out.length,
+    );
+  }
+
+  /** The listing itself, with the two name filters and the sort inside it. */
+  private listDirectory(target: string): string {
     const full = this.resolve(target);
     const rows = fs
       .readdirSync(full, { withFileTypes: true })
@@ -346,6 +439,15 @@ export class Sandbox {
   }
 
   search(pattern: string, target = '.'): string {
+    return timing.measure(
+      'core.sandbox.search',
+      () => this.searchTree(pattern, target),
+      (out) => out.length,
+    );
+  }
+
+  /** The search itself. Split out so the timed wrapper adds no indentation to it. */
+  private searchTree(pattern: string, target: string): string {
     // Inline flags first, because a model that writes `(?i)` wants a
     // case-insensitive search and refusing costs it a turn. A leading `(?i)`
     // means the whole pattern, which is exactly the `i` flag.
@@ -353,7 +455,7 @@ export class Sandbox {
     const source = rewritten === null ? pattern : rewritten.pattern;
     let regex: RegExp;
     try {
-      regex = new RegExp(source, rewritten?.flags ?? '');
+      regex = timing.measure('core.sandbox.search.compile', () => new RegExp(source, rewritten?.flags ?? ''));
     } catch (error) {
       return explainBadPattern(pattern, (error as Error).message);
     }
@@ -382,8 +484,14 @@ export class Sandbox {
         files.push(child);
       }
     };
+    // The walk and the per-file scan are the two halves of a search and they
+    // fail differently: a walk that is slow is a tree with too many entries in
+    // it, a scan that is slow is one large file, and the count on the second
+    // says how many candidate files the tree handed over at all.
+    const walked = timing.start('core.sandbox.search.walk');
     if (pathIsDirectory(base)) walk(base);
     else files.push(base);
+    walked.end(files.length);
 
     // Only the links need resolving, and the answer is cached across them.
     const allowedLinks = new Set<string>();
@@ -399,18 +507,26 @@ export class Sandbox {
     const hits: string[] = [];
     let truncated = false;
     for (const file of files) {
+      // Ended on every exit including the skips: a span that is never ended
+      // records nothing at all, which is how a measurement quietly disappears.
+      const scan = timing.start('core.sandbox.search.file');
       let size = Number.POSITIVE_INFINITY;
       try {
         size = fs.statSync(file).size;
       } catch {
+        scan.end();
         continue;
       }
-      if (size > SEARCH_MAX_BYTES) continue;
+      if (size > SEARCH_MAX_BYTES) {
+        scan.end(size);
+        continue;
+      }
       let text: string;
       try {
         text = fs.readFileSync(file, 'utf8');
       } catch {
         // Unreadable, or vanished between the walk and the read.
+        scan.end(size);
         continue;
       }
       const shown = toPosix(path.relative(this.root, file));
@@ -425,6 +541,7 @@ export class Sandbox {
         const line = text.slice(found.from, found.to).trim().slice(0, 200);
         hits.push(`${shown}:${found.line}: ${line}`);
       }
+      scan.end(size);
       if (hits.length >= SEARCH_HITS) {
         truncated = true;
         break;
@@ -440,6 +557,14 @@ export class Sandbox {
   }
 
   replaceInFile(target: string, oldText: string, newText: string): string {
+    // The read and the write are two syscalls; the interesting part when this
+    // is slow is the diagnostic, which is timed under `core.diagnose.*`.
+    return timing.measure('core.sandbox.replaceInFile', () =>
+      this.replaceInFileBody(target, oldText, newText),
+    );
+  }
+
+  private replaceInFileBody(target: string, oldText: string, newText: string): string {
     const full = this.writable(target);
     const raw = fs.readFileSync(full, 'utf8');
     const newline = raw.includes('\r\n') ? '\r\n' : '\n';
@@ -461,11 +586,21 @@ export class Sandbox {
       return count === 0 ? explainMissing(shown, text, before) : explainAmbiguous(shown, text, before, count);
     }
     text = text.replace(before, after);
-    fs.writeFileSync(full, newline === '\n' ? text : text.replace(/\n/g, newline), 'utf8');
+    timing.measure('core.sandbox.replaceInFile.write', () =>
+      fs.writeFileSync(full, newline === '\n' ? text : text.replace(/\n/g, newline), 'utf8'),
+    );
     return 'replaced';
   }
 
   createFile(target: string, content: string): string {
+    return timing.measure(
+      'core.sandbox.createFile',
+      () => this.createFileAt(target, content),
+      () => content.length,
+    );
+  }
+
+  private createFileAt(target: string, content: string): string {
     const full = this.writable(target);
     if (fs.existsSync(full)) return 'refused: the file exists; use replace_in_file';
     fs.mkdirSync(path.dirname(full), { recursive: true });
@@ -475,6 +610,14 @@ export class Sandbox {
 
   /** A profile entry made into argv, `{allowed}` standing for the files it applies to. */
   command(spec: CheckSpec): string[] | null {
+    return timing.measure(
+      'core.sandbox.command',
+      () => this.argvFor(spec),
+      (argv) => argv?.length ?? 0,
+    );
+  }
+
+  private argvFor(spec: CheckSpec): string[] | null {
     const when = spec.when;
     const files = [...this.allow]
       .filter((allowed) => !when || when.some((suffix) => allowed.endsWith(suffix)))
@@ -486,16 +629,24 @@ export class Sandbox {
   }
 
   runCheck(name: string): Promise<string> {
+    return timing.measureAsync(
+      'core.sandbox.runCheck',
+      () => this.runCheckNamed(name),
+      (output) => output.length,
+    );
+  }
+
+  private async runCheckNamed(name: string): Promise<string> {
     if (name === 'format') {
       return this.runFormat();
     }
     const spec = this.checks[name];
     if (spec === undefined || !this.checkNames.includes(name)) {
       const offered = [...this.checkNames, 'format'].sort();
-      return Promise.resolve(`refused: no check called ${name}; there are ${offered.join(', ')}`);
+      return `refused: no check called ${name}; there are ${offered.join(', ')}`;
     }
     const argv = this.command(spec);
-    if (argv === null) return Promise.resolve('nothing to check: no allowed file of that kind');
+    if (argv === null) return 'nothing to check: no allowed file of that kind';
     return this.run(argv);
   }
 
@@ -510,20 +661,84 @@ export class Sandbox {
     return results.join('\n') || 'nothing to format';
   }
 
+  /**
+   * A command the project declared, run with the arguments the model chose.
+   *
+   * The whole point of the declared-command design: this method knows how to
+   * spawn a process and return its output, and knows nothing else. It does not
+   * know what a test is, what cargo is, or which of the commands in front of it
+   * matter. Everything specific came from the workspace file, and everything
+   * dangerous was constrained there too — see `commands.ts` for why an argument
+   * has to be a closed set and a placeholder a whole argv element.
+   *
+   * A refusal is returned as text rather than thrown, because the caller is
+   * answering a tool call from a model that can fix its arguments in one turn if
+   * it is told what was wrong.
+   */
+  async runDeclared(name: string, args: Record<string, unknown>): Promise<string> {
+    // Named for the command, not for the method: the useful row in the table is
+    // "the project's own test command took 40 s", which the caller knows the
+    // name of and this does not. See `runTool` in the worker's loop.
+    return timing.measureAsync(
+      'core.sandbox.runDeclared',
+      () => this.runDeclaredCommand(name, args),
+      (output) => output.length,
+    );
+  }
+
+  private async runDeclaredCommand(name: string, args: Record<string, unknown>): Promise<string> {
+    const declared = this.commands[name];
+    if (declared === undefined) {
+      const offered = Object.keys(this.commands).sort();
+      return `refused: no command called ${name}${offered.length === 0 ? '' : `; there is ${offered.join(', ')}`}`;
+    }
+    const built = commandArgv(declared, args);
+    if ('refusal' in built) return built.refusal;
+    const output = await this.run(built.argv, (declared.timeoutSeconds ?? COMMAND_TIMEOUT_S) * 1000);
+    // Trimmed after the fact rather than while collecting, so the "ran past its
+    // timeout" case still reports what it managed to print.
+    return declared.keep === undefined
+      ? output
+      : withExitLine(output, trimOutput(bodyOf(output), declared.keep));
+  }
+
   /** Run one check process: stripped environment, no shell, whole tree killable. */
-  async run(argv: string[]): Promise<string> {
+  async run(argv: string[], timeoutMs = CHECK_TIMEOUT_MS): Promise<string> {
+    return timing.measureAsync(
+      'core.sandbox.run',
+      () => this.runProcess(argv, timeoutMs),
+      (output) => output.length,
+    );
+  }
+
+  private async runProcess(argv: string[], timeoutMs: number): Promise<string> {
     const env: NodeJS.ProcessEnv = {};
+    const buildEnv = timing.start('core.sandbox.run.env');
     for (const [key, value] of Object.entries(process.env)) {
       if (!SECRET_ENV.test(key)) env[key] = value;
     }
-    for (const [key, value] of Object.entries(this.profile.env ?? {})) {
-      env[key] = value.replace('{parent}', path.dirname(this.root));
+    if (this.envOverride !== undefined) {
+      Object.assign(env, this.envOverride);
+    } else {
+      // A profile used on its own, with no workspace above it. `{parent}` is
+      // the only placeholder this ever had; the workspace layer adds the rest
+      // and resolves them before the sandbox sees them.
+      for (const [key, value] of Object.entries(this.profile.env ?? {})) {
+        env[key] = value.replace('{parent}', path.dirname(this.root));
+      }
     }
+    buildEnv.end(Object.keys(env).length);
 
-    const resolved = [resolveExecutable(argv[0] ?? ''), ...argv.slice(1)];
+    // A PATH scan with a `statSync` per candidate on Windows, so this can be
+    // milliseconds on a machine with a long PATH and no `npx.cmd` near the top.
+    const resolved = timing.measure(
+      'core.sandbox.run.resolve',
+      () => [resolveExecutable(argv[0] ?? ''), ...argv.slice(1)],
+      (parts) => parts.length,
+    );
     let child: ChildProcess;
     try {
-      child = spawnTool(resolved, { cwd: this.root, env });
+      child = timing.measure('core.sandbox.run.spawn', () => spawnTool(resolved, { cwd: this.root, env }));
     } catch (error) {
       if (error instanceof UnsafeCommandError) return `refused: ${error.message}`;
       return `could not start ${resolved[0]}: ${(error as Error).message}`;
@@ -532,6 +747,11 @@ export class Sandbox {
     const pid = child.pid ?? -1;
     this.active.add(pid);
     const started = Date.now();
+    let ranOut = false;
+    // The wait is the check's own wall clock and is expected to be most of a
+    // run's second half. It is here so that "40 s of check" and "40 s of
+    // waiting for a check that already exits" can be told apart.
+    const wait = timing.start('core.sandbox.run.wait');
     const output = await new Promise<{ code: number; text: string }>((settle) => {
       let text = '';
       const collect = (chunk: Buffer | string): void => {
@@ -540,8 +760,9 @@ export class Sandbox {
       child.stdout?.on('data', collect);
       child.stderr?.on('data', collect);
       const timer = setTimeout(() => {
+        ranOut = true;
         killTree(pid);
-      }, CHECK_TIMEOUT_MS);
+      }, timeoutMs);
       child.on('error', (error) => {
         clearTimeout(timer);
         settle({ code: -1, text: `could not start ${resolved[0]}: ${error.message}` });
@@ -551,9 +772,14 @@ export class Sandbox {
         settle({ code: code ?? -1, text });
       });
     }).finally(() => this.active.delete(pid));
+    wait.end(output.text.length);
 
-    if (Date.now() - started >= CHECK_TIMEOUT_MS) {
-      return 'the check ran past 15 minutes and was stopped';
+    // Whichever came first: the clock, or the process noticing it had been
+    // killed. `ranOut` is set by the timer itself, so this does not depend on
+    // the callback arriving late and on the elapsed time being long enough to
+    // measure — which it never was, because the timer fires on the dot.
+    if (ranOut || Date.now() - started >= timeoutMs) {
+      return `the command ran past ${Math.round(timeoutMs / 1000)} s and was stopped${output.text.trim() === '' ? '' : `\n${output.text.trim().slice(0, 2000)}`}`;
     }
     const text = output.text.trim();
     const body =
@@ -572,6 +798,24 @@ export class Sandbox {
   record(entry: Record<string, unknown>): void {
     this.onRecord?.(entry);
   }
+}
+
+/**
+ * A `run` result split back into its exit code and its output.
+ *
+ * The exit code is meant to survive a trim: a caller that keeps only the
+ * failing lines of a test run must still be able to see whether it passed, and
+ * `exit 0` is very often not one of the lines the pattern matched. Returns the
+ * text unchanged when there is no exit line to find, which is the case for a
+ * refusal from `spawnTool` rather than something the process printed.
+ */
+function bodyOf(result: string): string {
+  return /^exit -?\d+\n/.test(result) ? result.slice(result.indexOf('\n') + 1) : result;
+}
+
+function withExitLine(result: string, body: string): string {
+  const header = /^exit -?\d+\n/.exec(result);
+  return header === null ? body : `${header[0]}${body}`;
 }
 
 function isDirectory(full: string, entry: fs.Dirent): boolean {

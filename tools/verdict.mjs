@@ -92,18 +92,24 @@ export function compareStray(harnessStrays, measured, asked) {
   if (!measured.ok) {
     return { verdict: 'unmeasurable', note: `the runner's own diff failed: ${measured.reason}` };
   }
-  if (measured.stray.length === 0) return { verdict: 'clean', note: '' };
-  if (harnessStrays.length === 0) {
+  // `strayChanges` answers with a report — `{files, offPlan, preExisting,
+  // failure}` — and the probes hand that straight over. Reading `.length` off it
+  // gave `undefined`, so the "the harness reported nothing" branch never fired,
+  // the comparison below found a mismatch against a count of one, and a probe
+  // whose trap had really worked was scored as a disagreement. That is a
+  // measurement instrument reporting a number it never measured.
+  const reported = Array.isArray(harnessStrays) ? harnessStrays : (harnessStrays?.files ?? []);
+  if (reported.length === 0) {
     return {
       verdict: 'harness-missed-it',
       note: `the runner measured ${measured.stray.length} stray change(s) and the harness reported none`,
     };
   }
-  const missing = measured.stray.filter((file) => !harnessStrays.includes(file));
+  const missing = measured.stray.filter((file) => !reported.includes(file));
   if (missing.length > 0) {
     return {
       verdict: 'harness-understated',
-      note: `the harness listed ${harnessStrays.length}, the runner measured ${measured.stray.length}`,
+      note: `the harness listed ${reported.length}, the runner measured ${measured.stray.length}`,
     };
   }
   return { verdict: 'agreed', note: '' };

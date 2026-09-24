@@ -115,15 +115,44 @@ export {
   type Elision,
 } from './context.js';
 export {
+  BUILTIN_TOOL_NAMES,
   SYSTEM_PROMPT,
-  TOOL_NAMES,
   taskMessage,
   toolCatalogue,
   toolDefinitions,
+  toolNames,
   toolSpecs,
   type CatalogueEntry,
+  type ToolContext,
   type ToolDefinition,
 } from './tools.js';
+export {
+  COMMAND_NAME,
+  RESERVED_TOOL_NAMES,
+  checkCommandArg,
+  commandArgSchema,
+  commandArgv,
+  declaredCommandSchema,
+  describeArg,
+  trimOutput,
+  type CommandArg,
+  type DeclaredCommand,
+} from './commands.js';
+export {
+  WORKSPACE_FILES,
+  WorkspaceError,
+  findWorkspace,
+  interpolate,
+  loadWorkspace,
+  readRules,
+  setupStepSchema,
+  workspaceSchema,
+  type Interpolation,
+  type SetupStep,
+  type Workspace,
+  type WorkspaceProblem,
+  type WorkspaceRef,
+} from './workspace.js';
 export {
   DEFAULT_BASE_URL,
   daemonConfigFile,

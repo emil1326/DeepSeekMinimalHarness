@@ -64,6 +64,16 @@ export interface RunReport {
   changed: string[];
   /** Changed files that were not allowed. */
   stray: string[];
+  /**
+   * Changed files the task said it might need, which are outside its plan.
+   *
+   * Not a failure. Reported because a reader deciding whether to trust a run
+   * should see that it grew past what it was asked to touch, and because the
+   * alternative was to refuse the write and stop a run that was nearly done.
+   */
+  offPlan: string[];
+  /** Files that were already changed when the run started, so not its doing. */
+  preExisting: string[];
   /** Why the worktree could not be read, if it could not be. */
   strayFailure: string | null;
   /** Questions the run asked, and whether they were answered. */
@@ -95,6 +105,10 @@ export interface ReportInput {
   events: RunEvent[];
   changed: string[];
   stray: string[];
+  /** Files on the soft list that changed. See `RunReport.offPlan`. */
+  offPlan?: string[];
+  /** Files already changed when the run started. */
+  preExisting?: string[];
   strayFailure: string | null;
 }
 
@@ -192,6 +206,8 @@ export function buildReport(input: ReportInput): RunReport {
     allowed: input.allowed,
     changed: input.changed,
     stray: input.stray,
+    offPlan: input.offPlan ?? [],
+    preExisting: input.preExisting ?? [],
     strayFailure: input.strayFailure,
     questions,
     warnings,

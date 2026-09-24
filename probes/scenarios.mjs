@@ -258,7 +258,7 @@ export const SCENARIOS = {
         diff = `[git diff failed] ${error.message}`;
       }
       return {
-        text: `strayChanges -> ${strays.length} entries\ngit diff -> ${diff}`,
+        text: `strayChanges -> ${strays.files.length} entries\ngit diff -> ${diff}`,
         harnessStrays: strays,
         harnessAsked: true,
         allow: ctx.allow,
@@ -293,7 +293,7 @@ export const SCENARIOS = {
       const { strayChanges } = await built(path.join('packages', 'worker', 'dist', 'stray.js'));
       const strays = strayChanges(fixture.root, ctx.allow);
       return {
-        text: `strayChanges -> ${strays.length} entries (the tree has ~6000 new files)`,
+        text: `strayChanges -> ${strays.files.length} entries (the tree has ~6000 new files)`,
         harnessStrays: strays,
         harnessAsked: true,
         allow: ctx.allow,

@@ -20,10 +20,13 @@ import {
   isTerminal,
   limitUse,
   loadHarnessConfig,
+  loadRunConfig,
   toolCatalogue,
   uiHostnames,
+  type ResolvedRunConfig,
   type RunEvent,
   type RunStatus,
+  type ToolContext,
 } from '@emilswork/harness-core';
 import type {
   AttachMessage,
@@ -423,11 +426,16 @@ program
 
 program
   .command('tools')
+  .argument('[task]', 'a task file, to show the tools that run would actually get')
   .description('every tool an agent can call, and what it is for')
   .option('--json', 'the same thing, as JSON')
-  .action((options: { json?: boolean }) =>
+  .action((task: string | undefined, options: { json?: boolean }) =>
     guard(async () => {
-      const listing = toolCatalogue();
+      // With a task file, the answer is the real one: the built-ins plus every
+      // command that project declared. Without one there is no way to know what
+      // a project declares, so the built-ins are what can honestly be listed.
+      const context = task === undefined ? { checkNames: [] } : toolsOf(loadRunConfig(path.resolve(task)));
+      const listing = toolCatalogue(context);
       if (options.json === true) {
         process.stdout.write(`${JSON.stringify(listing, null, 2)}\n`);
         return;
@@ -439,11 +447,20 @@ program
         process.stdout.write('\n');
       }
       process.stdout.write(
-        'A check is named, never a command: the profile decides what each name runs, and the\n' +
-          'agent cannot pass it an argument or reach a shell. `dsh tools --json` is the same list.\n',
+        (task === undefined
+          ? "These are the harness's own tools. A project declares more, and `dsh tools <task.json>`\n" +
+            'lists exactly what that run gets, project commands included.\n'
+          : `As ${task} would get them, project commands included.\n`) +
+          'A check is named, never a command: the profile decides what each name runs. A declared\n' +
+          'command takes only the arguments its project listed, and nothing reaches a shell.\n',
       );
     }),
   );
+
+function toolsOf(config: ResolvedRunConfig): ToolContext {
+  const checkNames = config.checks;
+  return { checkNames, commands: config.commands };
+}
 
 program
   .command('continue')

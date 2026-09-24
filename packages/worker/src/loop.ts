@@ -4,7 +4,6 @@ import {
   Sandbox,
   SandboxRefusal,
   SYSTEM_PROMPT,
-  TOOL_NAMES,
   approaching,
   checkPassed,
   compact,
@@ -16,8 +15,9 @@ import {
   limitUse,
   priceFor,
   taskMessage,
-  totalsOf,
+  toolNames,
   toolSpecs,
+  totalsOf,
   type ChatMessage,
   type CumulativeLimit,
   type LimitUse,
@@ -243,11 +243,15 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
             task: config.task,
             allow: [...sandbox.allow].sort(),
             checks: sandbox.checkNames,
+            soft: config.soft,
+            rules: config.rules,
           }),
         },
       ];
 
-  const specs = toolSpecs(sandbox.checkNames);
+  const tools = { checkNames: sandbox.checkNames, commands: sandbox.commands };
+  const specs = toolSpecs(tools);
+  const known = toolNames(tools);
   let turn = 0;
 
   /**
@@ -448,7 +452,7 @@ export async function runAgentLoop(options: LoopOptions, control: LoopControl): 
       }
 
       const outcomes = await Promise.all(
-        batch.map((each) => runTool(sandbox, each.function.name, parseArgs(each))),
+        batch.map((each) => runTool(sandbox, each.function.name, parseArgs(each), known)),
       );
 
       if (control.signal.aborted) return { status: 'cancelled', summary };
@@ -508,9 +512,22 @@ interface ToolOutcome {
   ok: boolean;
 }
 
-async function runTool(sandbox: Sandbox, name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
+/**
+ * One tool call, answered.
+ *
+ * `known` is passed in rather than imported, because the set of tools is a
+ * property of the run now: it is the built-ins plus whatever this project
+ * declared. A module-level constant here would be the one place a project's own
+ * command names had to be known to the harness.
+ */
+async function runTool(
+  sandbox: Sandbox,
+  name: string,
+  args: Record<string, unknown>,
+  known: Set<string>,
+): Promise<ToolOutcome> {
   try {
-    if (!TOOL_NAMES.has(name)) return { result: `no tool called ${name}`, ok: false };
+    if (!known.has(name)) return { result: `no tool called ${name}`, ok: false };
 
     const text = (key: string): string => {
       const value = args[key];
@@ -544,8 +561,19 @@ async function runTool(sandbox: Sandbox, name: string, args: Record<string, unkn
         // have read the check as fine.
         return { result: output, ok: checkPassed(output) };
       }
-      default:
-        return { result: `no tool called ${name}`, ok: false };
+      default: {
+        // A command the project declared. Reaching the default is not an error:
+        // it is where every project-specific tool in every run is handled, and
+        // the branch is one line because everything specific about it lives in
+        // the workspace file the project wrote. The sandbox refuses an unknown
+        // name, so a command that no longer exists is answered rather than
+        // crashing the turn.
+        const output = await sandbox.runDeclared(name, args);
+        return {
+          result: output,
+          ok: !output.startsWith('refused') && !output.startsWith('failed'),
+        };
+      }
     }
   } catch (error) {
     if (error instanceof SandboxRefusal) return { result: `refused: ${error.message}`, ok: false };
