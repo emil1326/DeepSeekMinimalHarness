@@ -58,6 +58,47 @@ export interface RunTotals {
   costUsd: number | null;
 }
 
+/**
+ * One instrumented call site, as the daemon stored it.
+ *
+ * `histogram` is a fixed bucket ladder, which is what makes a merge across runs
+ * exact, so the percentiles are read from it rather than recomputed here: the
+ * UI reads the same buckets the CLI does.
+ */
+export interface TimingStat {
+  name: string;
+  count: number;
+  totalMs: number;
+  minMs: number;
+  maxMs: number;
+  /** Bytes the call handled, when it has a unit. Zero otherwise. */
+  bytes: number;
+  histogram: number[];
+}
+
+/** Where one run's time went. `wallMs` is what the shares are a share of. */
+export interface RunTimings {
+  runId: string;
+  wallMs: number;
+  entries: TimingStat[];
+  /** When the worker last flushed, or null if it never did. */
+  at: string | null;
+}
+
+/**
+ * Where the time went across every run, and in the daemon itself.
+ *
+ * `process` is the daemon's own readings, kept out of `entries` because a daemon
+ * outlives hundreds of runs and adding its uptime to their runtime would make
+ * both numbers mean nothing.
+ */
+export interface TimingsResponse {
+  runs: number;
+  wallMs: number;
+  entries: TimingStat[];
+  process: TimingStat[];
+}
+
 interface Base {
   seq: number;
   runId: string;

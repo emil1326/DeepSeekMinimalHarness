@@ -3,6 +3,7 @@ import { api } from '../api';
 import { durationOf, money, shortPath, speed, tokens } from '../format';
 import { isTerminal, type RunSummary } from '../types';
 import { StatusPill } from './Status';
+import { AllTimings } from './Timings';
 
 export function AgentsList({ onOpen }: { onOpen: (runId: string) => void }) {
   const runs = useQuery({ queryKey: ['runs'], queryFn: api.runs, refetchInterval: 5000 });
@@ -91,6 +92,11 @@ export function AgentsList({ onOpen }: { onOpen: (runId: string) => void }) {
           </tbody>
         </table>
       </div>
+
+      {/* Where the time goes, across every run. Folded away because it is the
+          answer to a question nobody has on a normal day, and the answer to the
+          question somebody has on a bad one. */}
+      <AllTimings />
     </div>
   );
 }

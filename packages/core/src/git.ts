@@ -44,19 +44,21 @@ export interface GitOptions {
  * process for a millisecond of work, and the end-of-run stray check is a
  * `git status -uall` over an entire worktree. It is also named for its argv, so
  * the table says which call was slow rather than "git was slow".
+ *
+ * Deliberately *without* a byte count, which is the one place in the stopwatch
+ * where that column would mislead: what these calls cost is the process spawn,
+ * not the bytes they return, and a rate derived from a hundred bytes of status
+ * output reads as a throughput problem that does not exist.
  */
 export function git(args: string[], options: GitOptions): string {
-  return timing.measure(
-    `core.git.${args[0] ?? 'git'}`,
-    () =>
-      execFileSync('git', args, {
-        cwd: options.cwd,
-        encoding: 'utf8',
-        maxBuffer: options.maxBuffer ?? GIT_MAX_BUFFER,
-        // Without this a detached daemon puts a console window on somebody's screen.
-        windowsHide: true,
-      }),
-    (out) => out.length,
+  return timing.measure(`core.git.${args[0] ?? 'git'}`, () =>
+    execFileSync('git', args, {
+      cwd: options.cwd,
+      encoding: 'utf8',
+      maxBuffer: options.maxBuffer ?? GIT_MAX_BUFFER,
+      // Without this a detached daemon puts a console window on somebody's screen.
+      windowsHide: true,
+    }),
   );
 }
 

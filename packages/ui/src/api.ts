@@ -4,8 +4,10 @@ import type {
   RunEvent,
   RunReport,
   RunSummary,
+  RunTimings,
   Speaker,
   StatsResponse,
+  TimingsResponse,
 } from './types';
 
 async function get<T>(path: string): Promise<T> {
@@ -36,6 +38,10 @@ export const api = {
     get<{ events: RunEvent[] }>(`/runs/${id}/events?after=${after}`).then((body) => body.events),
   diff: (id: string) => get<DiffResponse>(`/runs/${id}/diff`),
   stats: () => get<StatsResponse>('/stats'),
+  /** One run's instrumented readings: what the harness itself spent. */
+  timings: (id: string) => get<RunTimings>(`/runs/${id}/timings`),
+  /** The same readings added up over every run, plus the daemon's own. */
+  allTimings: () => get<TimingsResponse>('/timings'),
   tell: (id: string, text: string) =>
     post<{ ok: boolean }>(`/runs/${id}/messages`, { text, by: 'emil' satisfies Speaker }),
   answer: (id: string, text: string) =>

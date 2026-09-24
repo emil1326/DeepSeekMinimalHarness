@@ -10,8 +10,9 @@ import { Limits } from './Limits';
 import { MetricsStrip } from './Metrics';
 import { Report } from './Report';
 import { StatusPill } from './Status';
+import { Timings } from './Timings';
 
-type Tab = 'chat' | 'report' | 'config' | 'diff';
+type Tab = 'chat' | 'report' | 'config' | 'diff' | 'timing';
 
 /**
  * How long the run has been going, in seconds, for the wall-clock ring.
@@ -140,9 +141,16 @@ export function AgentPage({ runId, onBack }: { runId: string; onBack: () => void
         <button className="tab" role="tab" aria-selected={tab === 'diff'} onClick={() => setTab('diff')}>
           diff
         </button>
+        {/* Its own tab rather than a strip in the header: a run's readings are
+            twenty-odd rows of six columns read with intent, not a glance. */}
+        <button className="tab" role="tab" aria-selected={tab === 'timing'} onClick={() => setTab('timing')}>
+          timing
+        </button>
       </div>
 
       {tab === 'report' && <Report runId={runId} live={live} taskPath={detail.config.configPath} />}
+
+      {tab === 'timing' && <Timings runId={runId} />}
 
       {tab === 'chat' && <Chat runId={runId} events={events.data ?? []} live={live} />}
 

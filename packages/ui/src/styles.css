@@ -776,6 +776,112 @@ table.runs td.num {
   border-top: 1px solid var(--line-soft);
 }
 
+/* --- where the time goes ------------------------------------------------ */
+
+/* A measuring table rather than a data table: every number is monospace,
+   tabular and right-aligned, so a column of durations can be compared by eye
+   without reading any of them. The one colour is reserved for a name whose
+   worst case is ten times its median -- a cliff is what a person actually
+   feels, and it should be findable without arithmetic. */
+table.timings {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-data);
+}
+
+table.timings th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-faint);
+  font-size: var(--t-label);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: var(--s2) var(--s5);
+  border-bottom: 1px solid var(--line);
+}
+
+table.timings td {
+  padding: var(--s2) var(--s5);
+  border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
+}
+
+table.timings tbody tr:last-child td {
+  border-bottom: none;
+}
+
+table.timings td.name {
+  width: 100%;
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+table.timings .num {
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+table.timings .num[data-spike] {
+  color: var(--orange);
+}
+
+table.timings .sortable {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+  border-bottom: 1px dotted transparent;
+}
+
+table.timings .sortable:hover,
+table.timings .sortable[data-on] {
+  color: var(--text);
+  border-bottom-color: var(--line);
+}
+
+/* The one paragraph that has to be read before the table can be trusted. Kept
+   to a readable measure: it is three caveats, not three hundred words. */
+.note {
+  max-width: 78ch;
+  margin: var(--s5) var(--s5) 0;
+  color: var(--text-faint);
+  font-size: var(--t-data);
+  line-height: 1.6;
+}
+
+.all-timings {
+  margin: var(--s6) var(--s3) 0;
+}
+
+.all-timings > .timings {
+  margin-top: var(--s4);
+}
+
+.all-timings > summary.metrics-strip::after {
+  content: 'per call site';
+}
+
+.all-timings[open] > summary.metrics-strip::after {
+  content: 'hide';
+}
+
+.all-timings .note {
+  margin-inline: var(--s5);
+}
+
+.all-timings details.metrics {
+  margin: var(--s5) var(--s5) 0;
+}
+
 /* --- tabs --------------------------------------------------------------- */
 
 .tabs {

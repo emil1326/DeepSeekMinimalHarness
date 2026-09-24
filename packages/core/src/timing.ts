@@ -113,11 +113,16 @@ export function emptyHistogram(): number[] {
 /**
  * A quantile from a histogram, as the top edge of the bucket it lands in.
  *
- * Deliberately an upper bound. Reporting a midpoint would be inventing
- * precision: the bucket's floor is the top edge of the previous bucket, and
- * across a factor of 2.5 the difference between floor and ceiling is most of
- * the answer. A reader is told "p95 is at most 25 ms, and above 10 ms" by the
- * number and by the doc.
+ * Deliberately an upper bound, and one clamped to the largest value that was
+ * actually seen: a bucket reading "up to 1 s" holding six calls whose maximum is
+ * 754 ms reports 754 ms, not 1 s. A median above the maximum is the kind of
+ * number that makes a reader stop trusting the table, and printing it buys
+ * nothing, because the maximum is a true upper bound of the sample and so a
+ * valid bound for any quantile of it.
+ *
+ * What it does not do is invent precision. Across a bucket spanning a factor of
+ * 2.5 the gap between its floor and its ceiling is most of the answer, so the
+ * reading is a bound rather than a measurement, and a reader is told so here.
  */
 export function percentile(
   stat: Pick<TimingStat, 'count' | 'histogram' | 'maxMs'>,
@@ -129,9 +134,10 @@ export function percentile(
   for (let bucket = 0; bucket < stat.histogram.length; bucket += 1) {
     seen += stat.histogram[bucket] ?? 0;
     if (seen >= target) {
-      // The overflow bucket has no edge, so the observed maximum is what it can
+      // The overflow bucket has no edge, so the observed maximum is all it can
       // honestly report.
-      return bucket >= TIMING_EDGES_MS.length ? stat.maxMs : (TIMING_EDGES_MS[bucket] as number);
+      const edge = TIMING_EDGES_MS[bucket];
+      return edge === undefined ? stat.maxMs : Math.min(stat.maxMs, edge);
     }
   }
   return stat.maxMs;

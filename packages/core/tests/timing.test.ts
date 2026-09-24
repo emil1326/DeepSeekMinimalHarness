@@ -109,13 +109,15 @@ describe('a recorder', () => {
 });
 
 describe('percentiles', () => {
-  it('never reads below the value it came from', () => {
+  it('never reads above the maximum that was seen', () => {
     // 100 readings of 8 ms: the bucket p50 lands in has 10 ms as its top edge,
-    // and 10 is the honest answer for a reading the ladder cannot place exactly.
+    // and the only honest ceiling for any quantile of this sample is the 8 ms
+    // that was measured. A median above the maximum is what makes a reader stop
+    // trusting a table.
     const stat = statOf('core.test.p', new Array<number>(100).fill(8));
-    expect(percentile(stat, 0.5)).toBe(10);
-    expect(percentile(stat, 0.95)).toBe(10);
-    expect(percentile(stat, 1)).toBe(10);
+    expect(percentile(stat, 0.5)).toBe(8);
+    expect(percentile(stat, 0.95)).toBe(8);
+    expect(percentile(stat, 1)).toBe(8);
   });
 
   it('reads the overflow bucket as the maximum that was seen', () => {
