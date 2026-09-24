@@ -133,6 +133,63 @@ you are actually spending, five cents by default. The agent is told when a fifth
 of any limit is left, so it can finish what it is on, ask for more room, or stop
 and say what is left — rather than being cut off mid-file.
 
+## The workspace, which is the bit that makes it usable
+
+A task file is one backlog line. There are things that are true of the _project_
+and were being copied into every task file by hand — the same rules, the same
+check list, the same "here is how you run a test" — and every copy was a chance
+to lose one.
+
+So a project gets one file, found by walking up from the worktree. This one is
+`profiles/esap.workspace.json`, a worked example:
+
+```json
+{
+  "name": "esap",
+  "model": "deepseek-flash",
+  "profiles": { "default": "profiles/esap.json" },
+  "defaultProfile": "default",
+  "env": { "CARGO_TARGET_DIR": "{worktree}-target" },
+  "rules": "esap.rules.md",
+  "soft": ["ui/*.spec.ts"],
+  "setup": [{ "run": ["cargo", "build", "-p", "emils-planner-avoid"] }],
+  "onAsk": { "run": ["node", "notify.mjs"] },
+
+  "commands": {
+    "run_test": {
+      "description": "Run one Rust test target that this task owns.",
+      "args": { "target": { "description": "a target", "values": ["plain-core:comments"] } },
+      "run": ["cargo", "test", "-p", "{target}"],
+      "timeoutSeconds": 90,
+      "keep": "^(error|FAIL|test result)"
+    }
+  }
+}
+```
+
+**`commands` is the one that matters.** It is how the agent gets to run the
+project's own tests, and the whole point is that **the harness does not know what
+a test is.** `commands.ts` contains no `cargo`, no `vitest`, no `playwright`;
+every name in it came from a file somebody wrote. One mechanism covers running
+tests, running a single UI spec, and running project scripts.
+
+The security decision, stated plainly: an argument must be a **closed set**
+(`values`, or a `pattern` it must match whole), and a placeholder must be a
+**whole argv element**. Your test command's argv is assembled from arguments the
+model chose, and `--target-dir=../../..` is an argument rather than a path the
+sandbox can see. A free-text argument would hand that back one layer up, so an
+unconstrained one is refused when the workspace is _read_ — not when the model
+first calls it.
+
+A workspace can live inside the worktree, because its own filename is on the
+never-write list. The rule that protects a config was never "keep it outside the
+worktree"; a check can write anywhere its process reaches. It is that no tool the
+agent can call will touch the name.
+
+`dsh tools <task.json>` lists exactly what that run gets, project commands
+included. Everything else in the file — `rules`, `soft`, `setup`, `onAsk`,
+`env` — is written up in `docs/feedback/REPONSES_AUX_14_POINTS.md`.
+
 Then:
 
 ```
@@ -152,6 +209,7 @@ dsh send <run> "also rename the constant"    arrives at the next turn
 dsh reply <run> "the ts one"                 answers the question it's stuck on
 dsh cancel <run>                             stop it and everything it started
 dsh list | show <run> | logs <run> | diff <run> | stats
+dsh timings [run]                            where the time actually went
 ```
 
 That's built for how Claude works: it runs `dsh run` in the background, reads the
@@ -182,6 +240,44 @@ Two things worth knowing about those numbers, because I got them wrong first:
   are a reasoning channel that arrives before the answer. It shows up as a
   collapsed block under the turn it belongs to rather than being thrown away,
   and `dsh run --thinking` prints it as it streams.
+
+## Where the time went
+
+A run is mostly the model waiting to be read, so "how long did this take" is not
+the interesting question. The interesting one is whether any of the rest of it is
+slower than it should be, which nothing could answer until every call site in the
+harness got a stopwatch. So they did:
+
+```
+dsh timings            every run added up
+dsh timings <run>      one run, which is the per-chat view
+```
+
+The UI has the same thing as a `timing` tab on a run, and a folded-away table
+under the agents list for all of them.
+
+A few minutes of watching it turned up two things I would not have guessed:
+`matchesGlob` builds a fresh `RegExp` for every directory entry it tests against
+five pattern lists, and `resolveExecutable` walks `PATH` with a `statSync` per
+candidate before any check can start. Both are still in there; they are
+measurable now, which they were not before.
+
+What the numbers mean, because a table like this is easy to misread:
+
+- **Count, mean and p95 for each name**, so a call site that is fine on average
+  and occasionally takes a second stands out. That is the one a person notices.
+- **Share** of the run's own wall clock, model waiting included. Thirty lines of
+  code at 12 ms is nothing; the same 12 ms on every one of 900 calls is not.
+- **Bytes**, where a call has a size. A read of 4 kB that costs 3 ms is a fixed
+  cost and there is nothing to fix. A read of 2 MB that costs 3 ms is fine, and
+  the rate column is what tells the two apart.
+- The shares **overlap on purpose**: `worker.tool.read_file` contains
+  `core.sandbox.readFile`, which contains `core.sandbox.resolve`. They are not a
+  partition and they do not add up to 100%.
+
+Readings are flushed to the daemon once per turn, so a run that gets killed
+still reports the turns it managed, and they live in `runs.db` next to everything
+else rather than in a log file nobody reads.
 
 ## Checking the sandbox actually holds
 
