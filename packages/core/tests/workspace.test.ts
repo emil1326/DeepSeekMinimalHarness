@@ -25,6 +25,7 @@ import {
   interpolate,
   loadRunConfig,
   loadWorkspace,
+  toolDefinitions,
 } from '@emilswork/harness-core';
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-workspace-'));
@@ -426,5 +427,112 @@ describe('a task resolved against a workspace', () => {
       message = (error as Error).message;
     }
     expect(message).toContain('the workspace names default');
+  });
+});
+
+/**
+ * The worked examples the harness ships.
+ *
+ * These exist because the first version of `profiles/esap.workspace.json` was
+ * wrong in six ways at once and nobody could tell by reading it. The profile path
+ * was doubled — `"profiles": {"default": "profiles/esap.json"}` inside a file
+ * that already lives in `profiles/` — a command named a crate that does not
+ * exist, another passed `crate:test` to `cargo -p`, the target list was a fixed
+ * four, a command ran a filter that matched a helper function and exited 0
+ * having run nothing, and `onAsk` pointed at a script nobody had written.
+ *
+ * Every one of those is a config mistake, and every one of those is something a
+ * loader can catch. So the example is loaded, here, like any other workspace. A
+ * worked example that does not work is worse than no example: it is a page of
+ * copy-paste that teaches the wrong shape.
+ */
+describe('the worked examples that ship with the harness', () => {
+  const shipped = path.resolve(__dirname, '../../..', 'profiles');
+
+  it('loads every example workspace, as a workspace', () => {
+    const examples = fs.readdirSync(shipped).filter((name) => name.endsWith('.workspace.json'));
+    expect(examples.length).toBeGreaterThan(0);
+    for (const name of examples) {
+      // Throws `WorkspaceError` with every problem at once, which is the point:
+      // reading the file is the same validation a real project gets.
+      const loaded = loadWorkspace(path.join(shipped, name));
+      expect(loaded.config.name).toBeTruthy();
+    }
+  });
+
+  it('resolves every example\u2019s profile and rules from where the example sits', () => {
+    // The doubled path, specifically. A workspace's own file paths are relative
+    // to the workspace file, and an example living beside its profile is exactly
+    // where that is easiest to get wrong.
+    for (const name of fs.readdirSync(shipped).filter((n) => n.endsWith('.workspace.json'))) {
+      const loaded = loadWorkspace(path.join(shipped, name));
+      const here = path.dirname(loaded.path);
+      for (const [key, target] of Object.entries(loaded.config.profiles ?? {})) {
+        expect(fs.existsSync(path.resolve(here, target)), `${name}: profiles.${key} -> ${target}`).toBe(true);
+      }
+      if (loaded.config.rules !== undefined) {
+        expect(
+          fs.existsSync(path.resolve(here, loaded.config.rules)),
+          `${name}: rules -> ${loaded.config.rules}`,
+        ).toBe(true);
+      }
+      for (const [key, step] of Object.entries(loaded.config.checks ?? {})) {
+        void key;
+        expect(step.run.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('every example\u2019s expect and keep patterns compile', () => {
+    // A pattern that is not a regular expression is not a typo with a warning:
+    // `expect` fails closed, so a broken one means the command can never pass,
+    // and `keep` silently does nothing. Both are worth catching in a file whose
+    // whole job is to be copied.
+    for (const name of fs.readdirSync(shipped).filter((n) => n.endsWith('.workspace.json'))) {
+      const loaded = loadWorkspace(path.join(shipped, name));
+      for (const [command, spec] of Object.entries(loaded.config.commands ?? {})) {
+        for (const [field, pattern] of [
+          ['expect', spec.expect],
+          ['keep', spec.keep],
+        ] as const) {
+          if (pattern === undefined) continue;
+          expect(
+            () => new RegExp(pattern),
+            `${name}: commands.${command}.${field} is not a regular expression`,
+          ).not.toThrow();
+        }
+      }
+    }
+  });
+
+  it('no example declares a command whose optional placeholder would dangle', () => {
+    // Loading already refuses this, so this test is the reason it stays refused
+    // in the example, not the reason it is caught. Named separately so a reader
+    // looking for "why can ui_spec not take an optional flag" finds it.
+    for (const name of fs.readdirSync(shipped).filter((n) => n.endsWith('.workspace.json'))) {
+      const loaded = loadWorkspace(path.join(shipped, name));
+      for (const [command, spec] of Object.entries(loaded.config.commands ?? {})) {
+        for (const [at, part] of spec.run.entries()) {
+          const whole = /^\{([A-Za-z0-9_]+)\}$/.exec(part);
+          if (whole === null) continue;
+          if (spec.args?.[whole[1] as string]?.optional !== true) continue;
+          expect(/^-/.test(spec.run[at - 1] ?? ''), `${name}: commands.${command}`).toBe(false);
+        }
+      }
+    }
+  });
+
+  it('tells the model what a command does, including what counts as a pass', () => {
+    // The description is the only place a run learns that a green tick has to be
+    // earned. Stated here so an example that drops it is a test failure rather
+    // than a run that quietly trusts an exit code.
+    const loaded = loadWorkspace(path.join(shipped, 'esap.workspace.json'));
+    const tools = toolDefinitions({ checkNames: [], commands: loaded.config.commands });
+    const registry = tools.find((tool) => tool.name === 'registry');
+    expect(registry?.description).toContain('test result: ok');
+    for (const tool of tools) {
+      if (loaded.config.commands?.[tool.name]?.timeoutSeconds === undefined) continue;
+      expect(tool.description).toContain('Stops after');
+    }
   });
 });

@@ -52,6 +52,17 @@ export const WORKSPACE_FILES = ['dsh.workspace.json', '.dsh/workspace.json'];
 /** A command the project runs itself, rather than one the agent may call. */
 export const setupStepSchema = z
   .object({
+    /**
+     * Why this step is here.
+     *
+     * A setup step is the most expensive thing in a workspace — esap's three run
+     * to an hour between them — and the least self-explanatory, because the
+     * reason is almost never in the command. "Without this the routing tests fail
+     * by the dozen for a missing DLL" is the whole justification, and there is
+     * nowhere else to put it: a comment in JSON is not a thing, and the person
+     * who needs it is the one deciding whether they can drop the step.
+     */
+    description: z.string().min(1).optional(),
     /** Only run when the worktree has a file matching one of these. */
     when: z.array(z.string().min(1)).optional(),
     run: z.array(z.string().min(1)).min(1),

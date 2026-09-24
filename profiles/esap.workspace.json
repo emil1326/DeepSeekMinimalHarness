@@ -1,9 +1,9 @@
 {
   "name": "esap",
-  "description": "Emil's Super App Planner. Copy this to dsh.workspace.json in the project and change what is untrue of yours.",
+  "description": "Emil's Super App Planner, as dsh runs it. A worked example, not a default: copy it to dsh.workspace.json in your own project and change every emils-planner-* name, because those are esap's crates and nothing here is generic.",
 
   "model": "deepseek-flash",
-  "profiles": { "default": "profiles/esap.json" },
+  "profiles": { "default": "esap.json" },
   "defaultProfile": "default",
 
   "env": {
@@ -18,16 +18,32 @@
 
   "setup": [
     {
+      "description": "Without this the routing tests fail by the dozen for a missing DLL, and a run spends its whole budget reading failures that are not its fault.",
       "when": ["Cargo.toml"],
       "run": ["cargo", "build", "-p", "emils-planner-avoid"],
-      "timeoutSeconds": 600
+      "timeoutSeconds": 1800
+    },
+    {
+      "when": ["package.json"],
+      "run": ["npm", "run", "build", "--silent"],
+      "timeoutSeconds": 900
+    },
+    {
+      "description": "ui_spec measures the real app, so it has to exist before the first spec runs. This is why ui_spec's own timeout is an hour: on a cold worktree the build is the slow part, and it happens here, once.",
+      "when": ["Cargo.toml"],
+      "run": [
+        "cargo",
+        "build",
+        "--profile",
+        "dev",
+        "-p",
+        "emils-planner-app",
+        "--features",
+        "self-test,custom-protocol"
+      ],
+      "timeoutSeconds": 3600
     }
   ],
-
-  "onAsk": {
-    "run": ["node", "notify.mjs"],
-    "timeoutSeconds": 15
-  },
 
   "checks": {
     "cargo_check": { "run": ["cargo", "check", "--workspace", "--all-targets"] }
@@ -35,57 +51,89 @@
 
   "commands": {
     "run_test": {
-      "description": "Run one Rust test target that this task owns. Not the whole suite: name a target from the list.",
+      "description": "Run one Rust integration test file: the crate, and the file's name under that crate's tests/ without .rs. Run the one your task touches, not the whole suite. These four crates are the ones that have a tests/ directory; use run_unit_tests for the others.",
       "args": {
-        "target": {
-          "description": "the crate and test name, as in plain-core:comments",
+        "crate": {
+          "description": "the crate",
           "values": [
-            "emils-planner-core:comments",
-            "emils-planner-core:fields",
-            "emils-planner-avoid:routing",
-            "emils-planner-wire:registry"
+            "emils-planner-cli",
+            "emils-planner-core",
+            "emils-planner-harness",
+            "emils-planner-scene"
+          ]
+        },
+        "test": {
+          "description": "the test file's name, as comments for crates/emils-planner-core/tests/comments.rs",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        }
+      },
+      "run": ["cargo", "test", "-p", "{crate}", "--test", "{test}"],
+      "timeoutSeconds": 1800,
+      "keep": "^(error|warning|failures|test result|---- |thread '.*' panicked)",
+      "expect": "test result: ok\\. [1-9]",
+      "executes": true
+    },
+
+    "run_unit_tests": {
+      "description": "Run the unit tests inside one crate's src/ (the #[cfg(test)] modules), for a crate your task changed.",
+      "args": {
+        "crate": {
+          "description": "the crate",
+          "values": [
+            "emils-planner-avoid",
+            "emils-planner-cli",
+            "emils-planner-core",
+            "emils-planner-fonts",
+            "emils-planner-harness",
+            "emils-planner-icons",
+            "emils-planner-scene",
+            "emils-planner-app"
           ]
         }
       },
-      "run": ["cargo", "test", "-p", "{target}"],
-      "timeoutSeconds": 90,
-      "keep": "^(error|warning|failures|test result|---- )",
+      "run": ["cargo", "test", "-p", "{crate}", "--lib"],
+      "timeoutSeconds": 1800,
+      "keep": "^(error|warning|failures|test result|---- |thread '.*' panicked)",
+      "expect": "test result: ok\\. [1-9]",
+      "executes": true
+    },
+
+    "registry": {
+      "description": "Run the core's registry tests: every command appears in the every_command sample once, is described, and parses. Run it whenever you add or change a core command.",
+      "run": ["cargo", "test", "-p", "emils-planner-core", "--test", "registry"],
+      "timeoutSeconds": 1800,
+      "keep": "^(error|failures|test result|---- |thread '.*' panicked)",
+      "expect": "test result: ok\\. [1-9]",
       "executes": true
     },
 
     "ui_spec": {
-      "description": "Run one Playwright UI spec by name. It takes the project's machine lock, so it waits if another measurement is running.",
+      "description": "Run one Playwright UI spec against the real app, by the spec file's name under ui/ without .spec.ts. It takes the project's machine lock, so it waits if another measurement is running. Slow, and only meaningful once your code compiles: run it once, not after every edit.",
       "args": {
         "name": {
-          "description": "the spec file's name, without the extension",
+          "description": "the spec's name, as grouped for ui/grouped.spec.ts",
           "pattern": "^[a-z][a-z0-9-]*$"
         }
       },
       "run": ["cargo", "xtask", "ui", "{name}"],
-      "timeoutSeconds": 300,
-      "keep": "^(Error|expect|at |.*failed)",
+      "timeoutSeconds": 3600,
+      "keep": "^(Error|expect|at |.*failed|.*passed|xtask:)",
+      "expect": "[1-9]\\d* passed",
       "executes": true
     },
 
     "vitest": {
-      "description": "Run one vitest file that this task owns.",
+      "description": "Run one vitest file under src/.",
       "args": {
         "file": {
-          "description": "a path under src/, as written for vitest",
+          "description": "a path under src/, as src/commit.test.ts",
           "pattern": "^src/[A-Za-z0-9_./-]+\\.test\\.ts$"
         }
       },
       "run": ["npx", "vitest", "run", "{file}"],
-      "timeoutSeconds": 120,
+      "timeoutSeconds": 600,
       "keep": "^(FAIL|✓|×|Tests |AssertionError)",
-      "executes": true
-    },
-
-    "every_command": {
-      "description": "Run the registry test that checks every core command is reachable from a menu and on NOT_BUILT while the app does not run it. Needs ui_spec to have passed first.",
-      "run": ["cargo", "test", "-p", "emils-planner-core", "--test", "registry", "every_command"],
-      "timeoutSeconds": 90,
-      "keep": "^(error|test result|---- )",
+      "expect": "Tests\\s+[1-9]\\d* passed",
       "executes": true
     }
   }

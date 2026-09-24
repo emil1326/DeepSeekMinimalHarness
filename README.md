@@ -141,37 +141,74 @@ check list, the same "here is how you run a test" — and every copy was a chanc
 to lose one.
 
 So a project gets one file, found by walking up from the worktree. This one is
-`profiles/esap.workspace.json`, a worked example:
+`profiles/esap.workspace.json`, a worked example — and it is loaded by a test, so
+it cannot drift into being wrong:
 
 ```json
 {
   "name": "esap",
   "model": "deepseek-flash",
-  "profiles": { "default": "profiles/esap.json" },
+  "profiles": { "default": "esap.json" },
   "defaultProfile": "default",
   "env": { "CARGO_TARGET_DIR": "{worktree}-target" },
   "rules": "esap.rules.md",
   "soft": ["ui/*.spec.ts"],
-  "setup": [{ "run": ["cargo", "build", "-p", "emils-planner-avoid"] }],
-  "onAsk": { "run": ["node", "notify.mjs"] },
+  "setup": [{ "run": ["cargo", "build", "-p", "emils-planner-avoid"], "timeoutSeconds": 1800 }],
 
   "commands": {
     "run_test": {
-      "description": "Run one Rust test target that this task owns.",
-      "args": { "target": { "description": "a target", "values": ["plain-core:comments"] } },
-      "run": ["cargo", "test", "-p", "{target}"],
-      "timeoutSeconds": 90,
-      "keep": "^(error|FAIL|test result)"
+      "description": "Run one Rust integration test file.",
+      "args": {
+        "crate": { "description": "the crate", "values": ["emils-planner-core"] },
+        "test": { "description": "the file's name under tests/", "pattern": "^[a-z][a-z0-9_]*$" }
+      },
+      "run": ["cargo", "test", "-p", "{crate}", "--test", "{test}"],
+      "timeoutSeconds": 1800,
+      "keep": "^(error|failures|test result)",
+      "expect": "test result: ok\\. [1-9]",
+      "executes": true
     }
   }
 }
 ```
+
+Note what is _not_ in there: `/profiles/`, twice. Every path in a workspace file
+is relative to the workspace file, and an example that lives beside its profile is
+exactly where that is easiest to get wrong.
 
 **`commands` is the one that matters.** It is how the agent gets to run the
 project's own tests, and the whole point is that **the harness does not know what
 a test is.** `commands.ts` contains no `cargo`, no `vitest`, no `playwright`;
 every name in it came from a file somebody wrote. One mechanism covers running
 tests, running a single UI spec, and running project scripts.
+
+**`expect` is the one that makes a green tick mean something.** A real workspace
+declared a command to run one test by name; the name was a helper function rather
+than a test, `cargo test -p core --test registry some_filter` exited **0** and
+printed `0 passed; 0 failed`, and the command reported success for months of runs
+while executing nothing. The exit code cannot catch that, because the exit code is
+right. So a command may say what proof looks like in its own tool's words —
+`test result: ok\. [1-9]` for cargo, `Tests\s+[1-9]\d* passed` for vitest — and a
+call whose output does not match is reported as `[harness] not proven:` and does
+not count as a pass. It is tested against the output before `keep` trims it,
+because `keep` is a pattern for what a reader wants and the line that proves a
+command ran is usually not interesting to read. An `expect` that is not a regular
+expression fails closed: a typo in a config file must not be able to become a
+green tick.
+
+**A task may narrow a command; it may not invent one.** A workspace lists the test
+targets it knows about, and which of them a task owns is a fact about the backlog
+line rather than about the project:
+
+```json
+"commands": { "run_test": { "args": { "crate": { "values": ["emils-planner-core"] } } } }
+```
+
+Only the arguments are overridable, never the `run` argv, because everything
+dangerous lives in the argv and it stays in the workspace where the project can be
+read as a whole. An override that names a command or an argument that does not
+exist is refused rather than ignored, and so is one that would leave an argument
+with no values and no pattern — all three would otherwise do nothing silently.
 
 The security decision, stated plainly: an argument must be a **closed set**
 (`values`, or a `pattern` it must match whole), and a placeholder must be a
@@ -182,9 +219,11 @@ unconstrained one is refused when the workspace is _read_ — not when the model
 first calls it.
 
 A workspace can live inside the worktree, because its own filename is on the
-never-write list. The rule that protects a config was never "keep it outside the
-worktree"; a check can write anywhere its process reaches. It is that no tool the
-agent can call will touch the name.
+never-write list, and so is the rest of `.dsh/*`. The rule that protects a config
+was never "keep it outside the worktree"; a check can write anywhere its process
+reaches. It is that no tool the agent can call will touch the name — and a profile
+is exactly the thing the agent must not be able to edit, because a check it can
+rewrite is a check that cannot refuse it.
 
 `dsh tools <task.json>` lists exactly what that run gets, project commands
 included. Everything else in the file — `rules`, `soft`, `setup`, `onAsk`,
