@@ -265,7 +265,11 @@ export function trimOutput(text: string, keep: string | undefined, context = 2):
   const lines = text.split('\n');
   const wanted = new Set<number>();
   for (const [at, line] of lines.entries()) {
-    if (!regex.test(line)) continue;
+    // Matched with its colour codes taken out. A test runner that colours its
+    // output puts an escape before `FAIL` or `Error`, so a pattern anchored at
+    // the start of a line matched nothing, the whole output came back, and on
+    // a long one the failure was past where anyone reads.
+    if (!regex.test(line.replace(ANSI, ''))) continue;
     for (let near = Math.max(0, at - context); near <= Math.min(lines.length - 1, at + context); near += 1) {
       wanted.add(near);
     }
@@ -284,6 +288,10 @@ export function trimOutput(text: string, keep: string | undefined, context = 2):
   }
   return kept.join('\n');
 }
+
+/** A terminal colour or cursor code, which a pattern should never have to spell. */
+// eslint-disable-next-line no-control-regex
+const ANSI = /\u001b\[[0-9;?]*[A-Za-z]/g;
 
 /**
  * Why a command's output does not prove it did anything, or null when it does.

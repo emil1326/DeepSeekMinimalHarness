@@ -797,11 +797,17 @@ export class Sandbox {
     // A timeout already says what happened, and a proof pattern has nothing to
     // add to "it never finished".
     if (ran.timedOut) return full;
-    const reason = unproven(declared, ran.text);
-    if (reason !== null) return `${NOT_PROVEN} ${reason}\n${full}`;
     // Trimmed after the fact rather than while collecting, so the "ran past its
-    // timeout" case still reports what it managed to print.
-    return declared.keep === undefined ? full : withExitLine(full, trimOutput(bodyOf(full), declared.keep));
+    // timeout" case still reports what it managed to print. And trimmed for an
+    // unproven run too: that is usually a failing one, whose output is the one
+    // a reader most needs cut down to the lines that say why. Handed whole, a UI
+    // spec's build log came first and the failure was past the point the agent
+    // was shown, so it spent its turns rerunning the spec blind.
+    const shown =
+      declared.keep === undefined ? full : withExitLine(full, trimOutput(bodyOf(full), declared.keep));
+    const reason = unproven(declared, ran.text);
+    if (reason !== null) return `${NOT_PROVEN} ${reason}\n${shown}`;
+    return shown;
   }
 
   /** Run one check process: stripped environment, no shell, whole tree killable. */

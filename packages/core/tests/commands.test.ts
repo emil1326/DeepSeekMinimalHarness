@@ -222,6 +222,16 @@ describe('keeping only the output that matters', () => {
     expect(trimOutput(output, 'FAIL[')).toBe(output);
   });
 
+  it('matches a line whatever colour codes the runner put on it', () => {
+    // Playwright and vitest colour their output. A pattern anchored at the start
+    // of a line has to see the words, not the escape in front of them, or it
+    // matches nothing and the whole log comes back with the failure buried.
+    const coloured = ['building...', '\u001b[31mError: it broke\u001b[39m', 'done'].join('\n');
+    const kept = trimOutput(coloured, '^Error', 0);
+    expect(kept).toContain('it broke');
+    expect(kept).not.toContain('building...');
+  });
+
   it('does nothing at all when the project asked for nothing', () => {
     expect(trimOutput(output, undefined)).toBe(output);
   });
