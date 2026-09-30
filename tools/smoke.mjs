@@ -34,7 +34,7 @@ console.log('');
 
 const client = new DeepSeekClient({ apiKey: key, baseUrl });
 
-const tools = toolSpecs(['typecheck']).filter((tool) => tool.function.name === 'read_file');
+const tools = toolSpecs({ checkNames: ['typecheck'] }).filter((tool) => tool.function.name === 'read_file');
 const deltas = [];
 let firstSeen = null;
 
